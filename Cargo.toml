@@ -7,3 +7,8 @@ license = "MIT"
 authors = ["warflash"]
 
 [dependencies]
+highs = "2.3"
+
+[package.metadata.build]
+# On Windows with VS 2026+, set CMAKE_GENERATOR=Ninja before building:
+# $env:CMAKE_GENERATOR="Ninja"; cargo build
