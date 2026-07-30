@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::graph::{DirectedGraph, NodeId, ArcId, Cost};
 use crate::model::{LpRelaxation, SteinerSolution};
-use crate::separation::FlowCutSeparator;
+use crate::separation::{FlowCutSeparator, GomoryCutSeparator, MixedIntegerRoundingSeparator};
 use crate::heuristics::{ConstructiveHeuristic, LocalSearchHeuristic, PrimalHeuristic};
 
 use super::tree::{BranchAndBoundTree, BbNode, SolveStatus};
@@ -245,6 +245,8 @@ impl BranchAndCutSolver {
         // Cutting plane loop
         let mut lp_solution: Vec<f64> = Vec::new();
         let mut node_dual_bound = f64::NEG_INFINITY;
+        let mut gomory_separator = GomoryCutSeparator::new();
+        let mut mir_separator = MixedIntegerRoundingSeparator::new();
 
         for _round in 0..self.config.cut_rounds_per_node {
             // Solve LP
@@ -263,21 +265,36 @@ impl BranchAndCutSolver {
 
             lp_solution = lp.get_solution().to_vec();
 
-            // Separation: find violated Steiner cuts
+            // Separation: find violated Steiner cuts (primary)
             let mut separator = FlowCutSeparator::new(
                 &self.graph,
                 self.root,
                 &self.terminals,
             );
             let cuts = separator.find_violated_cuts(&lp_solution);
+            let mut cuts_added = cuts.len();
 
-            if cuts.is_empty() {
-                break; // No more violated cuts
-            }
-
-            // Add cuts to LP
             for cut in &cuts {
                 lp.add_steiner_cut(&cut.cut_arcs);
+            }
+
+            // If no Steiner cuts found, try Gomory and MIR cuts
+            if cuts_added == 0 {
+                let gomory_count = gomory_separator.separate_from_lp(&lp);
+                for (arc_ids, coeffs, rhs) in &gomory_separator.generated_cuts {
+                    lp.add_cut(arc_ids, coeffs, *rhs);
+                }
+                cuts_added += gomory_count as usize;
+
+                let mir_count = mir_separator.separate_from_lp(&lp);
+                for (arc_ids, coeffs, rhs) in &mir_separator.generated_cuts {
+                    lp.add_cut(arc_ids, coeffs, *rhs);
+                }
+                cuts_added += mir_count as usize;
+            }
+
+            if cuts_added == 0 {
+                break; // No more violated cuts of any type
             }
         }
 

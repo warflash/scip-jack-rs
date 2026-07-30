@@ -236,6 +236,14 @@ impl LpRelaxation {
     pub fn num_constraints(&self) -> usize {
         self.constraints.len()
     }
+
+    /// Expose constraint data for cut separators.
+    /// Returns (variable_indices, coefficients, lower_bound, upper_bound) for each constraint.
+    pub fn get_constraints(&self) -> Vec<(Vec<u32>, Vec<f64>, f64, f64)> {
+        self.constraints.iter()
+            .map(|c| (c.vars.clone(), c.coeffs.clone(), c.lb, c.ub))
+            .collect()
+    }
 }
 
 #[cfg(test)]
