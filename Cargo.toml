@@ -1,0 +1,9 @@
+[package]
+name = "scip-jack"
+version = "0.1.0"
+edition = "2024"
+description = "A mathematically optimal Steiner tree solver in Rust, based on the directed cut formulation"
+license = "MIT"
+authors = ["warflash"]
+
+[dependencies]
