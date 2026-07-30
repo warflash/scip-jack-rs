@@ -320,6 +320,11 @@ impl BranchAndCutSolver {
         constructive.num_starts = 50;
 
         if let Some(initial_sol) = constructive.run() {
+            // Verify feasibility before accepting
+            if !self.verify_solution(&initial_sol) {
+                return;
+            }
+
             // Apply local search
             let mut ls = LocalSearchHeuristic::new(
                 self.graph.clone(),
@@ -329,7 +334,8 @@ impl BranchAndCutSolver {
             ls.set_incumbent(initial_sol.clone());
 
             let best = match ls.run() {
-                Some(improved) if improved.objective_value < initial_sol.objective_value => improved,
+                Some(improved) if improved.objective_value < initial_sol.objective_value
+                    && self.verify_solution(&improved) => improved,
                 _ => initial_sol,
             };
 
@@ -348,6 +354,10 @@ impl BranchAndCutSolver {
 
         let sol = constructive.run()?;
 
+        if !self.verify_solution(&sol) {
+            return None;
+        }
+
         // Apply local search
         let mut ls = LocalSearchHeuristic::new(
             self.graph.clone(),
@@ -358,7 +368,8 @@ impl BranchAndCutSolver {
         ls.set_incumbent(sol.clone());
 
         match ls.run() {
-            Some(improved) if improved.objective_value < sol.objective_value => Some(improved),
+            Some(improved) if improved.objective_value < sol.objective_value
+                && self.verify_solution(&improved) => Some(improved),
             _ => Some(sol),
         }
     }
@@ -391,7 +402,32 @@ impl BranchAndCutSolver {
             return None;
         }
 
-        Some(SteinerSolution::new(arcs, nodes.into_iter().collect(), obj))
+        let sol = SteinerSolution::new(arcs, nodes.into_iter().collect(), obj);
+        if self.verify_solution(&sol) {
+            Some(sol)
+        } else {
+            None
+        }
+    }
+
+    /// Verify that a solution is feasible: all terminals reachable from root.
+    fn verify_solution(&self, solution: &SteinerSolution) -> bool {
+        let arc_set: HashSet<ArcId> = solution.arcs.iter().copied().collect();
+        let mut reachable: HashSet<NodeId> = HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(self.root);
+        reachable.insert(self.root);
+
+        while let Some(node) = queue.pop_front() {
+            for &(head, arc_id) in self.graph.delta_plus(node) {
+                if arc_set.contains(&arc_id) && !reachable.contains(&head) {
+                    reachable.insert(head);
+                    queue.push_back(head);
+                }
+            }
+        }
+
+        self.terminals.iter().all(|t| reachable.contains(t))
     }
 
     /// Create two child nodes from branching on a variable.
