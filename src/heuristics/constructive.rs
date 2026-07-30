@@ -73,14 +73,40 @@ impl ConstructiveHeuristic {
 
         // Track which terminals are already spanned
         let mut unspanned: HashSet<NodeId> = terminal_set.clone();
-        // Nodes currently in the tree
+        // Nodes currently in the tree (always rooted at self.root)
         let mut tree_nodes: HashSet<NodeId> = HashSet::new();
         // Arcs in the solution
         let mut tree_arcs: HashSet<ArcId> = HashSet::new();
 
-        // Initialize: start node is in the tree
-        tree_nodes.insert(start);
-        unspanned.remove(&start);
+        // Always start from root for a valid arborescence
+        tree_nodes.insert(self.root);
+        unspanned.remove(&self.root);
+
+        // If start is different from root and is a terminal, connect it first
+        if start != self.root && unspanned.contains(&start) {
+            let sp_result = multi_source_dijkstra(&self.graph, &tree_nodes, costs);
+            let dist = sp_result.distances[start as usize];
+            if dist < f64::INFINITY {
+                if let Some(path) = sp_result.path_to(start) {
+                    for &arc_id in &path {
+                        let arc = &self.graph.arcs[arc_id as usize];
+                        tree_arcs.insert(arc_id);
+                        tree_nodes.insert(arc.tail);
+                        tree_nodes.insert(arc.head);
+                    }
+                    unspanned.remove(&start);
+                    let path_nodes: HashSet<NodeId> = path.iter()
+                        .flat_map(|&aid| {
+                            let arc = &self.graph.arcs[aid as usize];
+                            vec![arc.tail, arc.head]
+                        })
+                        .collect();
+                    for node in &path_nodes {
+                        unspanned.remove(node);
+                    }
+                }
+            }
+        }
 
         // Grow tree until all terminals are spanned
         while !unspanned.is_empty() {

@@ -643,6 +643,26 @@ impl LocalSearchHeuristic {
         components
     }
 
+    /// Check that all terminals are reachable from root in the solution.
+    fn is_connected(&self, solution: &SteinerSolution) -> bool {
+        let arc_set: HashSet<ArcId> = solution.arcs.iter().copied().collect();
+        let mut reachable: HashSet<NodeId> = HashSet::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(self.root);
+        reachable.insert(self.root);
+
+        while let Some(node) = queue.pop_front() {
+            for &(head, arc_id) in self.graph.delta_plus(node) {
+                if arc_set.contains(&arc_id) && !reachable.contains(&head) {
+                    reachable.insert(head);
+                    queue.push_back(head);
+                }
+            }
+        }
+
+        self.terminals.iter().all(|t| reachable.contains(t))
+    }
+
     /// Remove degree-1 Steiner (non-terminal) nodes from the solution iteratively.
     fn prune_solution(&self, solution: &mut SteinerSolution) {
         let terminal_set: HashSet<NodeId> = self.terminals.iter().copied().collect();
@@ -697,10 +717,30 @@ impl PrimalHeuristic for LocalSearchHeuristic {
             }
             iteration += 1;
 
+            let prev = solution.clone();
             let mut improved = false;
+
             improved |= self.vertex_insertion(&mut solution);
-            improved |= self.key_path_exchange(&mut solution);
-            improved |= self.key_vertex_elimination(&mut solution);
+            if improved && !self.is_connected(&solution) {
+                solution = prev.clone();
+                improved = false;
+            }
+
+            let prev2 = solution.clone();
+            let kpe = self.key_path_exchange(&mut solution);
+            improved |= kpe;
+            if kpe && !self.is_connected(&solution) {
+                solution = prev2.clone();
+                improved = improved && false;
+            }
+
+            let prev3 = solution.clone();
+            let kve = self.key_vertex_elimination(&mut solution);
+            improved |= kve;
+            if kve && !self.is_connected(&solution) {
+                solution = prev3;
+                improved = improved && false;
+            }
 
             if !improved {
                 break;

@@ -32,4 +32,8 @@ impl SteinerSolution {
     pub fn is_feasible(&self) -> bool {
         !self.arcs.is_empty() && self.objective_value < f64::INFINITY
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.arcs.is_empty()
+    }
 }
