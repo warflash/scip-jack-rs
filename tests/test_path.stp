@@ -1,0 +1,25 @@
+33D32945 STP File, STP Format Version 1.0
+
+SECTION Comment
+Name    "test_path"
+Creator "scip-jack test suite"
+Problem "SPG"
+END
+
+SECTION Graph
+Nodes 5
+Edges 5
+E 1 2 1
+E 2 3 1
+E 3 4 1
+E 4 5 1
+E 1 5 10
+END
+
+SECTION Terminals
+Terminals 2
+T 1
+T 5
+END
+
+EOF

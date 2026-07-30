@@ -12,7 +12,7 @@ use super::ReducibleGraph;
 pub fn degree_reductions(graph: &mut ReducibleGraph) -> (u32, Vec<EdgeId>, Cost) {
     let mut changes = 0u32;
     let mut fixed_edges: Vec<EdgeId> = Vec::new();
-    let mut lb_offset: Cost = 0.0;
+    let lb_offset: Cost = 0.0;
     let mut changed = true;
 
     while changed {
@@ -38,13 +38,14 @@ pub fn degree_reductions(graph: &mut ReducibleGraph) -> (u32, Vec<EdgeId>, Cost)
                 continue;
             }
 
-            // Degree-1 Terminal: fix the incident edge
+            // Degree-1 Terminal: fix the incident edge (it must be in every optimal solution)
+            // Note: we do NOT add to lb_offset here because the edge remains in the graph
+            // and will be counted in the solver's solution. We just record which edges are fixed.
             if degree == 1 && graph.is_terminal(node) {
                 let neighbors = graph.valid_neighbors(node);
                 if let Some(&(_, eid)) = neighbors.first() {
                     if !fixed_edges.contains(&eid) {
                         fixed_edges.push(eid);
-                        lb_offset += graph.edges[eid as usize].cost;
                     }
                 }
             }
