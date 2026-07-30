@@ -7,7 +7,7 @@ use crate::separation::FlowCutSeparator;
 use crate::heuristics::{ConstructiveHeuristic, LocalSearchHeuristic, PrimalHeuristic};
 
 use super::tree::{BranchAndBoundTree, BbNode, SolveStatus};
-use super::branching::BranchingRule;
+use super::branching::{BranchingRule, PseudoCosts};
 use super::node_selection::NodeSelector;
 
 /// Configuration for the branch-and-cut solver.
@@ -65,6 +65,7 @@ pub struct BranchAndCutSolver {
     tree: BranchAndBoundTree,
     node_selector: NodeSelector,
     branching_rule: BranchingRule,
+    pseudo_costs: PseudoCosts,
 }
 
 impl BranchAndCutSolver {
@@ -79,6 +80,8 @@ impl BranchAndCutSolver {
             .filter(|id| !terminal_set.contains(id) && *id != root)
             .collect();
 
+        let num_arcs = graph.num_arcs();
+
         Self {
             graph,
             root,
@@ -87,7 +90,8 @@ impl BranchAndCutSolver {
             config: SolverConfig::default(),
             tree: BranchAndBoundTree::new(),
             node_selector: NodeSelector::default_best_estimate(),
-            branching_rule: BranchingRule::MostFractional,
+            branching_rule: BranchingRule::default_reliability(),
+            pseudo_costs: PseudoCosts::new(num_arcs),
         }
     }
 
@@ -304,7 +308,7 @@ impl BranchAndCutSolver {
         }
 
         // Branch
-        match self.branching_rule.select(&lp_solution) {
+        match self.branching_rule.select_with_costs(&lp_solution, &self.pseudo_costs) {
             Some(var) => NodeResult::Branch(var),
             None => NodeResult::Pruned, // All variables are integer
         }
