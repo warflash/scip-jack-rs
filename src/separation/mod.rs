@@ -2,7 +2,7 @@ mod flow_cuts;
 mod gomory;
 mod mir;
 
-pub use flow_cuts::FlowCutSeparator;
+pub use flow_cuts::{FlowCutSeparator, SteinerCut};
 pub use gomory::GomoryCutSeparator;
 pub use mir::MixedIntegerRoundingSeparator;
 
