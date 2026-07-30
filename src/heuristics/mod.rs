@@ -1,5 +1,5 @@
-mod constructive;
-mod local_search;
+pub mod constructive;
+pub mod local_search;
 mod recombination;
 
 pub use constructive::ConstructiveHeuristic;
