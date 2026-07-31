@@ -41,7 +41,7 @@ use crate::graph::algorithms::{
 use crate::graph::{Cost, DirectedGraph, NodeId, NodeType, UndirectedGraph};
 use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
 use crate::heuristics::sph::{shortest_path_heuristic, SphResult, SphWorkspace};
-use crate::preprocessing::preprocess;
+use crate::preprocessing::preprocess_until;
 use crate::graph::SteinerInstance;
 
 /// Outcome of the tightening loop.
@@ -184,7 +184,7 @@ pub fn tighten(
             break;
         };
         let instance = as_instance(&g2, &t2);
-        let (rg, _) = preprocess(&instance, &g2);
+        let (rg, _) = preprocess_until(&instance, &g2, config.deadline);
         let (ri, ru) = rg.to_instance();
         if ri.terminals.is_empty() {
             break;

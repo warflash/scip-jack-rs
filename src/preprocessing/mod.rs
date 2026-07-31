@@ -1,13 +1,13 @@
 pub mod degree;
 pub mod distance;
 pub mod bottleneck;
-pub mod implications;
 pub mod csr;
 pub mod nearest_vertex;
 pub mod vertex_test;
 
 use std::collections::{HashMap, HashSet, BinaryHeap};
 use std::cmp::Ordering;
+use std::time::Instant;
 use crate::graph::{UndirectedGraph, NodeId, EdgeId, Cost, NodeType, Node, Edge, SteinerInstance};
 
 /// A graph wrapper that supports efficient node/edge removal for preprocessing.
@@ -349,8 +349,6 @@ pub struct PreprocessingResult {
 ///    `max(a, b) <= a + b` for nonnegative distances.
 /// 4. **Star domination** ([`vertex_test`]) — Steiner vertex deletion, the
 ///    strongest rule on dense graphs and the most expensive.
-/// 5. **Implications** — only once the rest has settled, since they read the
-///    current structure.
 ///
 /// Each rule is judged against the graph as it stands when the rule runs, and
 /// each preserves the optimum of that graph, so the composition preserves the
@@ -358,28 +356,45 @@ pub struct PreprocessingResult {
 /// [`ReducibleGraph::offset`]; the optimum of the returned graph plus that offset
 /// is the optimum of the instance handed in.
 pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (ReducibleGraph, PreprocessingResult) {
+    preprocess_until(instance, graph, None)
+}
+
+/// [`preprocess`] with a wall-clock stop.
+///
+/// Every rule preserves the optimum on its own, so cutting the loop short at any
+/// point leaves a correct — merely less reduced — instance. The stop matters on
+/// the dense PACE graphs, where a single sweep of the vertex test over a
+/// 200,000-edge graph can outlast the whole time budget.
+pub fn preprocess_until(
+    instance: &SteinerInstance,
+    graph: &UndirectedGraph,
+    deadline: Option<Instant>,
+) -> (ReducibleGraph, PreprocessingResult) {
     let mut rg = ReducibleGraph::from_instance(instance, graph);
 
     let initial_nodes = rg.num_valid_nodes();
     let initial_edges = rg.num_valid_edges();
     let mut total_fixed: Vec<EdgeId> = Vec::new();
+    let expired = || deadline.is_some_and(|d| Instant::now() >= d);
 
     loop {
         let (deg_removed, fixed, _) = degree::degree_reductions(&mut rg);
         total_fixed.extend(fixed);
+        if expired() {
+            break;
+        }
 
         let nv_removed = nearest_vertex::nearest_vertex_reductions(&mut rg);
+        if expired() {
+            break;
+        }
         let bn_removed = bottleneck::bottleneck_reductions(&mut rg);
-        let vt_removed = vertex_test::vertex_reductions(&mut rg);
+        if expired() {
+            break;
+        }
+        let vt_removed = vertex_test::vertex_reductions(&mut rg, deadline);
 
-        let settled = deg_removed + nv_removed + bn_removed + vt_removed == 0;
-        let impl_removed = if settled {
-            implications::implication_reductions(&mut rg)
-        } else {
-            0
-        };
-
-        if settled && impl_removed == 0 {
+        if deg_removed + nv_removed + bn_removed + vt_removed == 0 || expired() {
             break;
         }
     }

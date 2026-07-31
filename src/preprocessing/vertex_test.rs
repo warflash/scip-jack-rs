@@ -93,6 +93,8 @@
 //! graph from which the earlier ones are already absent, which does compose: each
 //! step preserves the optimum of the graph it was applied to.
 
+use std::time::Instant;
+
 use crate::graph::{Cost, NodeId};
 
 use super::csr::{Csr, DijkstraWorkspace};
@@ -101,9 +103,9 @@ use super::ReducibleGraph;
 /// Only vertices of degree at most this are examined. The number of subsets to
 /// check grows as `2^k` and the star cost grows with `k`, so high-degree
 /// vertices are both expensive to test and unlikely to pass.
-const MAX_DEGREE: usize = 5;
+const MAX_DEGREE: usize = 8;
 
-pub fn vertex_reductions(graph: &mut ReducibleGraph) -> u32 {
+pub fn vertex_reductions(graph: &mut ReducibleGraph, deadline: Option<Instant>) -> u32 {
     let terminals: Vec<NodeId> = {
         let mut t: Vec<NodeId> = graph
             .terminals
@@ -130,7 +132,12 @@ pub fn vertex_reductions(graph: &mut ReducibleGraph) -> u32 {
         .collect();
 
     let mut removed = 0;
-    for v in candidates {
+    for (seen, v) in candidates.into_iter().enumerate() {
+        // The per-candidate cost is a handful of bounded Dijkstras, so checking
+        // the clock every few hundred candidates is granular enough.
+        if seen % 256 == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
         if csr.is_masked(v) {
             continue;
         }
@@ -292,7 +299,7 @@ mod tests {
 
         let inst = instance(&g, vec![1, 2, 3]);
         let mut rg = ReducibleGraph::from_instance(&inst, &g);
-        assert_eq!(vertex_reductions(&mut rg), 1);
+        assert_eq!(vertex_reductions(&mut rg, None), 1);
         assert!(!rg.is_node_valid(4));
     }
 
@@ -314,7 +321,7 @@ mod tests {
 
         let inst = instance(&g, vec![1, 2, 3]);
         let mut rg = ReducibleGraph::from_instance(&inst, &g);
-        assert_eq!(vertex_reductions(&mut rg), 0);
+        assert_eq!(vertex_reductions(&mut rg, None), 0);
         assert!(rg.is_node_valid(4));
     }
 
@@ -354,7 +361,7 @@ mod tests {
 
             let inst = instance(&g, terminals.clone());
             let mut rg = ReducibleGraph::from_instance(&inst, &g);
-            vertex_reductions(&mut rg);
+            vertex_reductions(&mut rg, None);
 
             let kept: Vec<(NodeId, NodeId, Cost)> = rg
                 .edges

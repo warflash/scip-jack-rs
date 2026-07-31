@@ -15,7 +15,7 @@ use crate::graph::algorithms::dreyfus_wagner;
 use crate::graph::{Cost, DirectedGraph, SteinerInstance, UndirectedGraph};
 use crate::io;
 use crate::model::verify_solution;
-use crate::preprocessing::preprocess;
+use crate::preprocessing::preprocess_until;
 use crate::root_reduce::{tighten, ReduceConfig};
 
 /// Only dispatch to the Dreyfus-Wagner DP when its `3^k * n` term is affordable.
@@ -45,12 +45,20 @@ pub enum SolveMethod {
     BranchAndCut,
 }
 
-fn dw_is_affordable(num_terminals: usize, num_nodes: u32) -> bool {
+fn dw_is_affordable(num_terminals: usize, num_nodes: u32, num_edges: usize) -> bool {
     if num_terminals < 2 || num_terminals > 24 {
         return false;
     }
-    let work = 3f64.powi(num_terminals as i32) * num_nodes as f64;
-    work <= DW_WORK_BUDGET
+    // Both terms matter. The subset-merge step is `3^k * n`, but each of the
+    // `2^k` subsets also runs one Dijkstra, which is `m log n`. On PACE
+    // instance023 — 9 terminals, 640 vertices, 204,453 edges — the first term is
+    // 13 million and the second is 105 million, and a budget that looked only at
+    // the first spent twelve seconds inside a five-second limit.
+    let k = num_terminals as i32;
+    let n = num_nodes as f64;
+    let merge = 3f64.powi(k) * n;
+    let search = 2f64.powi(k) * (num_edges as f64 + n * n.max(2.0).log2());
+    merge + search <= DW_WORK_BUDGET
 }
 
 /// Solve a Steiner tree instance held in memory.
@@ -71,7 +79,13 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     // that value, and the addition happens once, at the very end.
     let mut base_offset: Cost = 0.0;
     let (work_graph, terminals) = if config.preprocess {
-        let (rg, pr) = preprocess(instance, &graph);
+        // Reduction gets at most a third of the budget. It is worth a lot, but a
+        // dense instance can absorb the whole limit in one sweep and leave the
+        // solver with no time to find a solution at all.
+        let reduce_deadline = start + std::time::Duration::from_secs_f64(
+            (config.time_limit_secs.max(0.001) / 3.0).max(0.05),
+        );
+        let (rg, pr) = preprocess_until(instance, &graph, Some(reduce_deadline));
         base_offset = pr.lower_bound_offset;
         let (ri, ru) = rg.to_instance();
         if config.verbose {
@@ -275,7 +289,16 @@ fn finish(
 
     // The branch-and-cut runs on a graph that only retains solutions cheaper than
     // `root_upper_bound`, so its dual bound proves nothing above that value.
-    let dual = stats.dual_bound.max(root_lower_bound).min(primal);
+    //
+    // An infeasible search is the strongest outcome available here rather than an
+    // error: reduced-cost elimination deletes everything that cannot appear in a
+    // solution *strictly cheaper than the incumbent*, so running out of feasible
+    // solutions is exactly the proof that the incumbent is optimal.
+    let dual = if stats.status == SolveStatus::Infeasible && primal.is_finite() {
+        primal
+    } else {
+        stats.dual_bound.max(root_lower_bound).min(primal)
+    };
     let gap_pct = if primal.is_finite() && dual > f64::NEG_INFINITY {
         ((primal - dual) / primal.abs().max(1e-10)) * 100.0
     } else {
@@ -307,7 +330,7 @@ fn try_dreyfus_wagner(
     terminals: &[crate::graph::NodeId],
     start: Instant,
 ) -> Option<SolveResult> {
-    if !dw_is_affordable(terminals.len(), graph.num_nodes) {
+    if !dw_is_affordable(terminals.len(), graph.num_nodes, graph.edges.len()) {
         return None;
     }
     let dw = dreyfus_wagner(graph, terminals)?;

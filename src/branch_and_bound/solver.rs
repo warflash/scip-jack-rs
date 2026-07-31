@@ -468,8 +468,15 @@ impl BranchAndCutSolver {
             // strengthening, so iterate to a fixpoint. Doing this inside the cut
             // round (rather than consuming one) keeps node bounds identical to
             // the fully resident model while the working LP stays small.
+            // Geometric batches. A fixed batch of 500 costs one LP re-solve per
+            // batch, and on a graph with tens of thousands of held-back rows that
+            // is dozens of solves before the node's bound is even valid to read.
+            // Growing the batch keeps the model small when few rows are wanted
+            // and converges in a handful of solves when many are.
+            let mut batch = 500usize;
             for _ in 0..64 {
-                let added = self.base_lp.as_mut().unwrap().separate_structural(500);
+                let added = self.base_lp.as_mut().unwrap().separate_structural(batch);
+                batch = batch.saturating_mul(4);
                 if added == 0 || self.out_of_time() {
                     break;
                 }
@@ -689,13 +696,40 @@ impl BranchAndCutSolver {
                     }
                 }
 
-                if lp_fixed_count > 0 {
+                // Compound the LP's eliminations into the dual ascent. The ascent
+                // is run on the arcs that survive, so every arc the LP removed
+                // makes it tighter, and a tighter ascent removes more arcs in
+                // turn. Both rules exclude arcs from *cheaper-than-incumbent*
+                // solutions only, and both are stated for this solver's single
+                // root, so the conclusions compose without the orientation
+                // caveat that applies across roots.
+                let mut ascent_fixed = 0usize;
+                loop {
+                    let before = self.fixed_zero_arcs.len();
+                    let (da_bound, da_fixable) = self.node_dual_ascent(&[]);
+                    if da_bound > self.tree.global_dual_bound {
+                        self.tree.global_dual_bound = da_bound;
+                    }
+                    for a in da_fixable {
+                        self.fixed_zero_arcs.insert(a);
+                    }
+                    let gained = self.fixed_zero_arcs.len() - before;
+                    ascent_fixed += gained;
+                    if gained == 0 || self.out_of_time() {
+                        break;
+                    }
+                }
+
+                if lp_fixed_count + ascent_fixed > 0 {
                     let lp = self.base_lp.as_mut().unwrap();
                     for &arc_id in &self.fixed_zero_arcs {
                         lp.fix_variable(arc_id, 0.0);
                     }
+                    lp.snapshot_base();
                     if self.config.verbose {
-                        eprintln!("[B&C] LP reduced-cost fixing: {} arcs fixed (gap={:.2})", lp_fixed_count, gap);
+                        eprintln!(
+                            "[B&C] root fixing: {lp_fixed_count} arcs by LP, {ascent_fixed} more by the ascent it enabled (gap={gap:.2})"
+                        );
                     }
                 }
             }
