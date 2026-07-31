@@ -10,11 +10,10 @@ pub struct LpRelaxation {
     pub objective: Vec<Cost>,
     pub solution: Vec<f64>,
     pub dual_bound: f64,
-    /// Constraint storage: each row is (arc_indices, coefficients, lower_bound, upper_bound)
     constraints: Vec<LpConstraint>,
-    /// Status of the last solve
+    var_lb: Vec<f64>,
+    var_ub: Vec<f64>,
     pub status: LpStatus,
-    /// Number of LP solves performed
     pub solve_count: u64,
 }
 
@@ -53,6 +52,8 @@ impl LpRelaxation {
             solution: vec![0.0; num_arcs as usize],
             dual_bound: f64::NEG_INFINITY,
             constraints: Vec::new(),
+            var_lb: vec![0.0; num_arcs as usize],
+            var_ub: vec![1.0; num_arcs as usize],
             status: LpStatus::NotSolved,
             solve_count: 0,
         };
@@ -131,6 +132,8 @@ impl LpRelaxation {
             solution: vec![0.0; num_vars as usize],
             dual_bound: f64::NEG_INFINITY,
             constraints: Vec::new(),
+            var_lb: vec![0.0; num_vars as usize],
+            var_ub: vec![1.0; num_vars as usize],
             status: LpStatus::NotSolved,
             solve_count: 0,
         }
@@ -159,17 +162,53 @@ impl LpRelaxation {
         self.add_constraint_raw(&vars_coeffs, rhs, f64::INFINITY);
     }
 
+    /// Fix a variable to a specific value by tightening its bounds.
+    pub fn fix_variable(&mut self, arc_id: ArcId, value: f64) {
+        let idx = arc_id as usize;
+        if idx < self.var_lb.len() {
+            self.var_lb[idx] = value;
+            self.var_ub[idx] = value;
+        }
+    }
+
     /// Solve the LP relaxation using HiGHS.
     pub fn solve(&mut self) -> f64 {
         let mut pb = RowProblem::default();
 
-        // Add variables: y_a ∈ [0, 1] with objective coefficient c(a)
-        let cols: Vec<highs::Col> = self.objective.iter()
-            .map(|&cost| pb.add_column(cost, 0.0..=1.0))
+        let cols: Vec<highs::Col> = (0..self.num_vars as usize)
+            .map(|i| {
+                let lb = self.var_lb.get(i).copied().unwrap_or(0.0);
+                let ub = self.var_ub.get(i).copied().unwrap_or(1.0);
+                pb.add_column(self.objective[i], lb..=ub)
+            })
             .collect();
 
-        // Add all constraints
         for constraint in &self.constraints {
+            // Skip constraints where all variables are fixed
+            let has_free_var = constraint.vars.iter().any(|&v| {
+                let idx = v as usize;
+                let lb = self.var_lb.get(idx).copied().unwrap_or(0.0);
+                let ub = self.var_ub.get(idx).copied().unwrap_or(1.0);
+                (ub - lb).abs() > 1e-10
+            });
+
+            // For constraints with only fixed variables, check feasibility
+            if !has_free_var {
+                let fixed_val: f64 = constraint.vars.iter()
+                    .zip(constraint.coeffs.iter())
+                    .map(|(&v, &c)| {
+                        let lb = self.var_lb.get(v as usize).copied().unwrap_or(0.0);
+                        c * lb
+                    })
+                    .sum();
+                if fixed_val < constraint.lb - 1e-6 || fixed_val > constraint.ub + 1e-6 {
+                    self.status = LpStatus::Infeasible;
+                    self.dual_bound = f64::INFINITY;
+                    return f64::INFINITY;
+                }
+                continue;
+            }
+
             let row_entries: Vec<(highs::Col, f64)> = constraint.vars.iter()
                 .zip(constraint.coeffs.iter())
                 .map(|(&var_idx, &coeff)| (cols[var_idx as usize], coeff))
@@ -189,9 +228,21 @@ impl LpRelaxation {
             }
         }
 
-        // Solve
-        let model = pb.optimise(Sense::Minimise);
-        let solved = model.solve();
+        // Solve (catch HiGHS panics on malformed models)
+        let solve_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let model = pb.optimise(Sense::Minimise);
+            model.solve()
+        }));
+
+        let solved = match solve_result {
+            Ok(s) => s,
+            Err(_) => {
+                self.status = LpStatus::Error;
+                self.dual_bound = f64::INFINITY;
+                return f64::INFINITY;
+            }
+        };
+
         self.solve_count += 1;
 
         match solved.status() {

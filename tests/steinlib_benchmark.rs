@@ -148,6 +148,22 @@ fn test_b08_fast() {
 }
 
 #[test]
+fn test_b05_fast() {
+    let r = solve("tests/B/b05.stp", 15.0, true);
+    r.print();
+    assert!(r.is_feasible());
+    assert!(r.primal <= r.optimal * 1.05 + 0.5);
+}
+
+#[test]
+fn test_b07_fast() {
+    let r = solve("tests/B/b07.stp", 15.0, true);
+    r.print();
+    assert!(r.is_feasible());
+    assert!(r.primal <= r.optimal * 1.05 + 0.5);
+}
+
+#[test]
 fn test_b09_fast() {
     let r = solve("tests/B/b09.stp", 15.0, true);
     r.print();

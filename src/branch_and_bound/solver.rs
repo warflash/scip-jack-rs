@@ -124,6 +124,42 @@ impl BranchAndCutSolver {
             for arc_id in fixable {
                 self.fixed_zero_arcs.insert(arc_id);
             }
+
+            // DA-guided primal heuristic: use reduced costs to bias construction
+            let da_weights: Vec<f64> = da_result.reduced_costs.iter()
+                .enumerate()
+                .map(|(i, &rc)| {
+                    let orig = self.graph.arcs[i].cost;
+                    if orig > 1e-10 { 1.0 - (rc / orig).min(1.0) } else { 0.0 }
+                })
+                .collect();
+
+            let mut da_constructive = ConstructiveHeuristic::new(
+                self.graph.clone(), self.root, self.terminals.clone(),
+            );
+            da_constructive = da_constructive.with_lp_weights(da_weights);
+            da_constructive.num_starts = 20;
+
+            if let Some(da_sol) = da_constructive.run() {
+                if self.verify_solution(&da_sol) && da_sol.objective_value < self.tree.global_primal_bound - 1e-9 {
+                    let mut ls = LocalSearchHeuristic::new(
+                        self.graph.clone(), self.root, self.terminals.clone(),
+                    );
+                    ls.set_incumbent(da_sol.clone());
+                    let best = match ls.run() {
+                        Some(improved) if improved.objective_value < da_sol.objective_value
+                            && self.verify_solution(&improved) => improved,
+                        _ => da_sol,
+                    };
+                    self.tree.update_primal(best);
+
+                    // Re-run reduced-cost fixing with tighter UB
+                    let fixable = reduced_cost_fixable_arcs(&da_result, self.tree.global_primal_bound);
+                    for arc_id in fixable {
+                        self.fixed_zero_arcs.insert(arc_id);
+                    }
+                }
+            }
         }
 
         if self.config.verbose {
@@ -232,6 +268,7 @@ impl BranchAndCutSolver {
     fn process_node(&mut self, node_id: u64) -> NodeResult {
         let node = &self.tree.nodes[node_id as usize];
         let fixings = node.fixings.clone();
+        let is_root_node = node.depth == 0;
 
         let mut lp = LpRelaxation::from_formulation(
             &self.graph,
@@ -247,21 +284,24 @@ impl BranchAndCutSolver {
 
         // Apply globally fixed arcs from reduced-cost fixing
         for &arc_id in &self.fixed_zero_arcs {
-            lp.add_cut(&[arc_id], &[1.0], 0.0);
-            lp.add_cut(&[arc_id], &[-1.0], 0.0);
+            lp.fix_variable(arc_id, 0.0);
         }
 
         for &(arc_id, value) in &fixings {
-            lp.add_cut(&[arc_id], &[1.0], value);
-            if value < 0.5 {
-                lp.add_cut(&[arc_id], &[-1.0], 0.0);
-            }
+            lp.fix_variable(arc_id, value);
         }
 
         let mut lp_solution: Vec<f64> = Vec::new();
         let mut node_dual_bound = f64::NEG_INFINITY;
 
-        for _round in 0..self.config.cut_rounds_per_node {
+        // Root gets more aggressive separation for a tighter initial bound
+        let max_rounds = if is_root_node {
+            self.config.cut_rounds_per_node * 3
+        } else {
+            self.config.cut_rounds_per_node
+        };
+
+        for _round in 0..max_rounds {
             let obj = lp.solve();
             self.total_lp_solves += 1;
 

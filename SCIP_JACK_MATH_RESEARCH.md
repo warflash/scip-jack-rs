@@ -15,7 +15,7 @@ It is not yet a 100%-correct SCIP-Jack reimplementation, nor can it currently cl
 3. Reliability branching and pseudo-cost data structures exist, but the branch-and-bound loop does not yet implement the complete strong-branching/pseudo-cost feedback cycle.
 4. The solver uses `f64` for costs, LP coefficients, bounds, and certificates. This is acceptable for engineering, but not by itself for a mathematical proof.
 5. Variant transformations and problem dispatch are incomplete. In particular, artificial-node identifiers can collide with one-based input identifiers, and RSMTP is still a placeholder.
-6. Several of the strongest ideas in the modern Steiner-tree literature are not yet integrated: dual ascent, reduced-cost fixing, implication/conflict reductions, alternative-based reductions, extended reductions, component-based formulations, and parameterized exact algorithms.
+6. An initial Wong-inspired dual-ascent and root-level reduced-cost fixing implementation now exists, but it is not yet proof-carrying or node-aware. The remaining missing ideas include implication/conflict reductions, alternative-based reductions, extended reductions, component-based formulations, and parameterized exact algorithms.
 
 The highest-value strategy is therefore an **exactness firewall**: keep a certified core containing only constraints, cuts, reductions, and bounds with explicit proofs; allow heuristic accelerators only when they return a verified primal solution or a verified lower bound and never let an uncertified operation prune the search tree.
 
@@ -451,3 +451,15 @@ If the gap is large, add valid conflict and partition cuts and repeat. This prod
 ### 10.4 What I would not claim solved yet
 
 I would not claim that the exact BCR gap, the full HYP-vs-DCUT relationship, or a general weighted Cut&Count algorithm has been solved by reasoning alone. Those require new proofs and likely new ideas beyond the current codebase. What we can solve now is the bridge between their results and a certifiable solver: implement the omitted reductions, add proof-carrying cut packing, mine minimal fractional obstructions, and use those obstructions to select or design stronger relaxations.
+
+### 10.5 Audit of the new dual-ascent and verifier work
+
+The current branch now contains `src/graph/algorithms/dual_ascent.rs`, root-level reduced-cost fixing, and an independent verifier. This materially advances the project, but three mathematical boundaries remain.
+
+1. The dual-ascent routine is plausibly a valid ascent on directed terminal-cut inequalities when all arc costs are nonnegative: every raised set contains the root and excludes the currently processed terminal, and the residual-cost invariant is maintained. However, the result stores only the final residual costs and the scalar lower bound, not the actual cut sets and multipliers. It therefore cannot yet be independently replayed as a certificate. Store `(cut_set, terminal, multiplier)` records and check nonnegative multipliers, exact arc loads, and `sum(multiplier) = LB`.
+2. Reduced-cost fixing is mathematically valid under that certificate. If `load_a` is the packed dual load on arc `a`, then any integer solution using `a` satisfies `c(y) >= LB + c_a - load_a`. Hence `LB + reduced_cost_a > UB` safely excludes `a`. The implementation should verify this inequality with the same exact/interval policy used for pruning, and should label the routine “Wong-inspired dual ascent” until equivalence with the exact algorithm in the 1984 paper is demonstrated.
+3. The new independent verifier is not yet the solver’s incumbent firewall. The branch-and-bound solver still uses its older connectivity-only check before accepting heuristic solutions. Also, the new verifier checks directed acyclicity, whereas the original STP certificate should check the undirected projection for acyclicity, root indegree, non-root indegree constraints, orientation consistency, and objective-offset restoration after transformations. These are small but important proof gaps.
+
+For example, the selected arcs `1->2`, `1->3`, `2->4`, `3->4` with terminal `4` form a directed acyclic graph and make the terminal reachable, but their undirected projection contains the cycle `1-2-4-3-1`. The verifier also does not reject the two selected arcs entering terminal `4`. A four-edge adversarial regression test of this form should be added before the verifier is called an exactness firewall.
+
+The dual-ascent code also runs only at the root. The next mathematically safe extension is to rerun or warm-start the ascent after branch fixings, while retaining the root certificate as a global bound and recording each node certificate separately.
