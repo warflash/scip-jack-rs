@@ -20,6 +20,36 @@ const B_OPTIMA: &[(&str, f64)] = &[
     ("b16", 127.0), ("b17", 131.0), ("b18", 218.0),
 ];
 
+const C_OPTIMA: &[(&str, f64)] = &[
+    ("c01", 85.0),   ("c02", 144.0),  ("c03", 754.0),
+    ("c04", 1079.0), ("c05", 1579.0), ("c06", 55.0),
+    ("c07", 102.0),  ("c08", 509.0),  ("c09", 707.0),
+    ("c10", 1093.0), ("c11", 32.0),   ("c12", 46.0),
+    ("c13", 258.0),  ("c14", 323.0),  ("c15", 556.0),
+    ("c16", 11.0),   ("c17", 18.0),   ("c18", 113.0),
+    ("c19", 146.0),  ("c20", 267.0),
+];
+
+const D_OPTIMA: &[(&str, f64)] = &[
+    ("d01", 106.0),  ("d02", 220.0),  ("d03", 1565.0),
+    ("d04", 1935.0), ("d05", 3250.0), ("d06", 67.0),
+    ("d07", 103.0),  ("d08", 1072.0), ("d09", 1448.0),
+    ("d10", 2110.0), ("d11", 29.0),   ("d12", 42.0),
+    ("d13", 500.0),  ("d14", 667.0),  ("d15", 1116.0),
+    ("d16", 13.0),   ("d17", 23.0),   ("d18", 223.0),
+    ("d19", 310.0),  ("d20", 537.0),
+];
+
+const E_OPTIMA: &[(&str, f64)] = &[
+    ("e01", 111.0),  ("e02", 214.0),  ("e03", 4013.0),
+    ("e04", 5101.0), ("e05", 8128.0), ("e06", 73.0),
+    ("e07", 145.0),  ("e08", 2640.0), ("e09", 3604.0),
+    ("e10", 5600.0), ("e11", 34.0),   ("e12", 67.0),
+    ("e13", 1280.0), ("e14", 1732.0), ("e15", 2784.0),
+    ("e16", 15.0),   ("e17", 25.0),   ("e18", 564.0),
+    ("e19", 758.0),  ("e20", 1342.0),
+];
+
 struct BenchResult {
     name: String,
     optimal: f64,
@@ -57,6 +87,9 @@ fn solve(path: &str, time_limit: f64, preprocess_on: bool) -> BenchResult {
     let name = std::path::Path::new(path)
         .file_stem().unwrap().to_str().unwrap().to_string();
     let known_opt = B_OPTIMA.iter()
+        .chain(C_OPTIMA.iter())
+        .chain(D_OPTIMA.iter())
+        .chain(E_OPTIMA.iter())
         .find(|(n, _)| *n == name).map(|(_, o)| *o).unwrap_or(f64::INFINITY);
 
     let start = Instant::now();
@@ -171,6 +204,14 @@ fn test_b09_fast() {
     assert!(r.primal <= r.optimal * 1.05 + 0.5);
 }
 
+#[test]
+fn test_b14_with_preprocess() {
+    let r = solve("tests/B/b14.stp", 30.0, true);
+    r.print();
+    assert!(r.is_feasible(), "b14: {} < opt {}", r.primal, r.optimal);
+    assert!(r.primal <= r.optimal * 1.02 + 0.5, "b14: {} > opt*1.02", r.primal);
+}
+
 /// Mathematical invariant: dual bound must never exceed true optimal.
 #[test]
 fn test_dual_bounds_valid() {
@@ -202,7 +243,39 @@ fn test_solution_verified() {
     }
 }
 
-// === Full benchmark (run with --ignored, takes 15+ min) ===
+// === C-series quick tests (500 nodes) ===
+
+#[test]
+fn test_c01_optimal() {
+    let r = solve("tests/C/c01.stp", 30.0, true);
+    r.print();
+    assert!(r.is_feasible(), "c01: {} < opt {}", r.primal, r.optimal);
+}
+
+#[test]
+fn test_c06_optimal() {
+    let r = solve("tests/C/c06.stp", 30.0, true);
+    r.print();
+    assert!(r.is_feasible());
+}
+
+#[test]
+fn test_c11_optimal() {
+    let r = solve("tests/C/c11.stp", 30.0, true);
+    r.print();
+    assert!(r.is_feasible());
+}
+
+// === D-series quick test (1000 nodes) ===
+
+#[test]
+fn test_d01_optimal() {
+    let r = solve("tests/D/d01.stp", 60.0, true);
+    r.print();
+    assert!(r.is_feasible(), "d01: {} < opt {}", r.primal, r.optimal);
+}
+
+// === Full benchmarks (run with --ignored) ===
 
 #[test]
 #[ignore]
@@ -220,6 +293,60 @@ fn benchmark_full_b_series() {
         total_time += r.time_secs;
     }
     eprintln!("  Proved optimal: {}/{} | Total: {:.1}s", solved, B_OPTIMA.len(), total_time);
+}
+
+#[test]
+#[ignore]
+fn benchmark_full_c_series() {
+    eprintln!("\n=== SteinLib C-Series Full Benchmark (500 nodes) ===");
+    let mut solved = 0;
+    let mut total_time = 0.0;
+
+    for (name, _) in C_OPTIMA {
+        let path = format!("tests/C/{}.stp", name);
+        if !std::path::Path::new(&path).exists() { continue; }
+        let r = solve(&path, 120.0, true);
+        r.print();
+        if r.is_proved_optimal() { solved += 1; }
+        total_time += r.time_secs;
+    }
+    eprintln!("  Proved optimal: {}/{} | Total: {:.1}s", solved, C_OPTIMA.len(), total_time);
+}
+
+#[test]
+#[ignore]
+fn benchmark_full_d_series() {
+    eprintln!("\n=== SteinLib D-Series Full Benchmark (1000 nodes) ===");
+    let mut solved = 0;
+    let mut total_time = 0.0;
+
+    for (name, _) in D_OPTIMA {
+        let path = format!("tests/D/{}.stp", name);
+        if !std::path::Path::new(&path).exists() { continue; }
+        let r = solve(&path, 120.0, true);
+        r.print();
+        if r.is_proved_optimal() { solved += 1; }
+        total_time += r.time_secs;
+    }
+    eprintln!("  Proved optimal: {}/{} | Total: {:.1}s", solved, D_OPTIMA.len(), total_time);
+}
+
+#[test]
+#[ignore]
+fn benchmark_full_e_series() {
+    eprintln!("\n=== SteinLib E-Series Full Benchmark (2500 nodes) ===");
+    let mut solved = 0;
+    let mut total_time = 0.0;
+
+    for (name, _) in E_OPTIMA {
+        let path = format!("tests/E/{}.stp", name);
+        if !std::path::Path::new(&path).exists() { continue; }
+        let r = solve(&path, 180.0, true);
+        r.print();
+        if r.is_proved_optimal() { solved += 1; }
+        total_time += r.time_secs;
+    }
+    eprintln!("  Proved optimal: {}/{} | Total: {:.1}s", solved, E_OPTIMA.len(), total_time);
 }
 
 #[test]

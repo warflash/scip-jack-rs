@@ -19,6 +19,8 @@ pub struct ReducibleGraph {
     edge_valid: Vec<bool>,
     /// Edges created by degree-2 contraction (should not be subject to SD test)
     pub contracted_edges: HashSet<EdgeId>,
+    /// Nodes that have been contracted (degree-2 removal targets)
+    pub contracted_nodes: HashSet<NodeId>,
 }
 
 impl ReducibleGraph {
@@ -47,6 +49,7 @@ impl ReducibleGraph {
             node_valid: vec![true; n + 1],
             edge_valid: vec![true; m],
             contracted_edges: HashSet::new(),
+            contracted_nodes: HashSet::new(),
         }
     }
 
@@ -116,12 +119,11 @@ impl ReducibleGraph {
         let cost2 = self.edges[e2 as usize].cost;
         let new_cost = cost1 + cost2;
 
-        // Remove old edges and node
         self.remove_edge(e1);
         self.remove_edge(e2);
         self.node_valid[node as usize] = false;
+        self.contracted_nodes.insert(node);
 
-        // Add new edge (marked as synthetic/contracted)
         let new_eid = self.edges.len() as EdgeId;
         self.edges.push(Edge { id: new_eid, src: n1, dst: n2, cost: new_cost });
         self.edge_valid.push(true);
@@ -276,21 +278,12 @@ pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (Reduc
     let mut total_fixed: Vec<EdgeId> = Vec::new();
     let mut lb_offset = 0.0;
 
-    let mut first_iteration = true;
-
     loop {
         let (deg_removed, fixed, offset) = degree::degree_reductions(&mut rg);
         total_fixed.extend(fixed);
         lb_offset += offset;
 
-        // SD test only on first pass (before contractions distort distances)
-        // or when there are no contracted edges
-        let dist_removed = if first_iteration || rg.contracted_edges.is_empty() {
-            distance::distance_reductions(&mut rg)
-        } else {
-            0
-        };
-        first_iteration = false;
+        let dist_removed = distance::distance_reductions(&mut rg);
 
         let _bn_removed = 0u32;
 
