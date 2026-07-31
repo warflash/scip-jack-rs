@@ -17,6 +17,8 @@ pub struct ReducibleGraph {
     pub root: Option<NodeId>,
     node_valid: Vec<bool>,
     edge_valid: Vec<bool>,
+    /// Edges created by degree-2 contraction (should not be subject to SD test)
+    pub contracted_edges: HashSet<EdgeId>,
 }
 
 impl ReducibleGraph {
@@ -44,6 +46,7 @@ impl ReducibleGraph {
             root: instance.root,
             node_valid: vec![true; n + 1],
             edge_valid: vec![true; m],
+            contracted_edges: HashSet::new(),
         }
     }
 
@@ -118,10 +121,11 @@ impl ReducibleGraph {
         self.remove_edge(e2);
         self.node_valid[node as usize] = false;
 
-        // Add new edge
+        // Add new edge (marked as synthetic/contracted)
         let new_eid = self.edges.len() as EdgeId;
         self.edges.push(Edge { id: new_eid, src: n1, dst: n2, cost: new_cost });
         self.edge_valid.push(true);
+        self.contracted_edges.insert(new_eid);
         self.adjacency.entry(n1).or_default().push((n2, new_eid));
         self.adjacency.entry(n2).or_default().push((n1, new_eid));
 
@@ -277,8 +281,7 @@ pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (Reduc
         total_fixed.extend(fixed);
         lb_offset += offset;
 
-        // SD test disabled pending investigation of correctness on b10, b11, b13
-        let dist_removed = 0u32;
+        let dist_removed = distance::distance_reductions(&mut rg);
 
         // NOTE: Bottleneck reductions are disabled because the current formula
         // BSD(u,v) = min_t max(bd(u,t), bd(v,t)) is a LOWER BOUND on the true

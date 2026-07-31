@@ -28,9 +28,9 @@ pub fn distance_reductions(graph: &mut ReducibleGraph) -> u32 {
         .map(|&t| graph.shortest_paths_from(t))
         .collect();
 
-    // SD test: for each edge, check if it can be replaced via a terminal
+    // SD test: for each ORIGINAL edge (not created by contraction), check if it can be replaced via a terminal
     let edges_to_check: Vec<(u32, u32, u32, f64)> = graph.edges.iter()
-        .filter(|e| graph.is_edge_valid(e.id))
+        .filter(|e| graph.is_edge_valid(e.id) && !graph.contracted_edges.contains(&e.id))
         .map(|e| (e.id, e.src, e.dst, e.cost))
         .collect();
 
