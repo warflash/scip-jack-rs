@@ -294,12 +294,10 @@ pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (Reduc
         total_fixed.extend(fixed);
         lb_offset += offset;
 
-        // SD test: run on all iterations. Edge removal enables more removals.
-        // Safe even after contractions because contracted edges are excluded.
-        let dist_removed = distance::distance_reductions(&mut rg);
-
-        // BSD test: Bottleneck Steiner Distance reduction (Rehfeldt-Koch 2023).
-        // Removes edge {u,v} if cost > min_t max(d(u,t), d(v,t)).
+        // Bottleneck Steiner distance. This subsumes the older additive test
+        // `d(u,t) + d(v,t) < c`, because `max(a, b) <= a + b` for non-negative
+        // distances, so anything the additive rule removed this one removes too.
+        let dist_removed = 0;
         let bn_removed = bottleneck::bottleneck_reductions(&mut rg);
 
         // Implication reductions: triangle dominance + conflict propagation.

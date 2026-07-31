@@ -1,283 +1,499 @@
+//! The bottleneck Steiner distance (special distance) test.
+//!
+//! # The rule
+//!
+//! Write `d` for the shortest-path metric of the current graph and `R` for its
+//! terminals. For a sequence `u = w_0, w_1, ..., w_k, w_{k+1} = v` whose interior
+//! vertices are all terminals, call `max_i d(w_i, w_{i+1})` its *bottleneck*. The
+//! **bottleneck Steiner distance** `s(u,v)` is the least bottleneck over all such
+//! sequences. The test is
+//!
+//! ```text
+//! s(u,v) < c({u,v})   =>   no optimal tree uses {u,v}.
+//! ```
+//!
+//! ## Proof
+//!
+//! Let `T` be an optimal tree containing `e = {u,v}` and let `w_0..w_{k+1}` attain
+//! `s(u,v) < c(e)`. Deleting `e` splits `T` into `T_u` containing `u` and `T_v`
+//! containing `v`. Every interior `w_i` is a terminal, so it lies in `T`, hence in
+//! `T_u` or in `T_v`; `w_0 = u` is in `T_u` and `w_{k+1} = v` is in `T_v`.
+//! Therefore some consecutive pair has `w_i` in `T_u` and `w_{i+1}` in `T_v`. The
+//! shortest path between them has length at most the bottleneck, so below `c(e)`,
+//! and reconnects the two components. So `T - e + P(w_i, w_{i+1})` spans every
+//! terminal and costs strictly less than `T`, contradicting optimality.
+//!
+//! No path involved can traverse `e` itself: such a path has length at least
+//! `c(e)`, while all of them are strictly shorter. The strictness also makes it
+//! safe to delete every qualifying edge in one pass — each deletion is justified
+//! against the graph as it stood at the start of the pass, and no optimal tree of
+//! that graph uses any of them.
+//!
+//! # What this replaces
+//!
+//! The previous test only allowed `k = 1`: a detour through one terminal, scored
+//! as `min_t max(d(u,t), d(v,t))`. Multi-terminal chains are strictly stronger,
+//! and matter most on dense instances where a pair of far-apart endpoints is
+//! nonetheless linked by a chain of short terminal-to-terminal hops.
+//!
+//! The old code also compared against `bsd + 0.5` rather than `bsd`, a fudge added
+//! to stop it removing edges it should not have. Nothing here needs it: the
+//! inequality is strict and the proof above is complete.
+//!
+//! # Computing it
+//!
+//! Interior hops run terminal-to-terminal, so their contribution is the bottleneck
+//! distance in the complete graph on `R` weighted by `d`. Bottleneck distances in
+//! a graph are realised by any minimum spanning tree, so one MST of that metric
+//! closure plus a traversal per terminal gives every `B(t,t')`.
+//!
+//! Endpoint hops are then minimised over terminals. The `k = 1` case is checked
+//! against *all* terminals; longer chains are checked against each endpoint's
+//! [`NEAREST_TERMINALS`] closest terminals. Restricting the chain endpoints can
+//! only raise the computed value, so the test stays conservative and sound.
+
+use crate::graph::{Cost, NodeId};
+
 use super::ReducibleGraph;
 
-/// Bottleneck Steiner Distance (BSD) test:
-///
-/// An edge {u,v} with cost c can be removed if c > s(u,v), where s(u,v)
-/// is the bottleneck Steiner distance. From Rehfeldt-Koch 2023, Theorem 1:
-///
-///   s(u,v) = bottleneck distance from u to v in the distance network D_G(T ∪ {u,v})
-///
-/// where D is the complete metric graph on terminals plus the two edge endpoints,
-/// with edge weights = shortest-path distances in G.
-///
-/// Practical computation: s(u,v) = min over terminals t of
-///   max(d_G(u,t), d_G(t,v))
-/// where d_G is the shortest-path metric in G with edge {u,v} REMOVED.
-///
-/// Conservative approximation (correct but weaker): use d_G computed on the
-/// full graph. This is valid because removing edge {u,v} can only increase
-/// distances, so: d_G_minus_e(u,t) >= d_G(u,t). Therefore:
-///   s(u,v) >= min_t max(d_G(u,t), d_G(t,v))
-///
-/// WAIT - that means using full-graph distances gives a LOWER bound on s(u,v),
-/// making the test `c > s(u,v)` MORE aggressive (more removals) when using
-/// full-graph distances. This could be UNSOUND!
-///
-/// Correct approach: for each edge {u,v}, compute shortest path distances
-/// from u and from v in the graph WITH edge {u,v} removed, then check
-/// if any terminal provides an alternative path with bottleneck < c.
-///
-/// Efficient implementation: compute APSP from terminals, then for each edge
-/// {u,v}, check if d(u,t) + d(v,t) < c using terminal distances that avoid
-/// the edge. Since terminal Dijkstra uses the full graph, the paths MIGHT
-/// use edge {u,v}. If d(u,t) path goes through edge {u,v}:
-///   d(u,t) = c({u,v}) + d(v,t)
-/// so: d(u,t) + d(v,t) = c + 2*d(v,t) >= c
-/// meaning the test `d(u,t) + d(v,t) < c` CANNOT be triggered.
-/// This proves the SD test (with strict < c) is correct even with full-graph distances!
-///
-/// For the BOTTLENECK version (max instead of sum):
-///   BSD(u,v) = min_t max(d(u,t), d(v,t))    [not additive - shortest paths]
-///
-/// Actually the paper's special distance uses d = shortest-path-distance in the
-/// metric closure: s(u,v) = min_{P: u→v through ≥1 terminal} max_{e∈P} c(e)
-/// where P traverses the distance network. This equals:
-///   s(u,v) = min_t max(d_G(u,t), d_G(v,t))
-/// where d_G(u,t) is the shortest-path distance from u to t in G.
-///
-/// Correctness proof for using full-graph distances:
-/// If the shortest path from u to t in the full graph uses edge {u,v},
-/// then d(u,t) = c({u,v}) + d(v,t), so max(d(u,t), d(v,t)) = c + d(v,t) >= c.
-/// Similarly for d(v,t) using edge {u,v}. So any terminal where the test
-/// passes (max < c) necessarily provides a path that does NOT use edge {u,v}.
-///
-/// Returns number of edges removed.
-pub fn bottleneck_reductions(graph: &mut ReducibleGraph) -> u32 {
-    let mut removed = 0u32;
+/// Chain endpoints are searched among this many nearest terminals per vertex.
+/// Restricting the search only weakens the test, never invalidates it.
+const NEAREST_TERMINALS: usize = 4;
 
-    let terminal_list: Vec<u32> = graph.terminals.iter().copied()
+/// Above this many terminals the dense `|R| x |R|` bottleneck matrix is skipped
+/// and only the single-terminal case is used.
+const MAX_DENSE_TERMINALS: usize = 3000;
+
+pub fn bottleneck_reductions(graph: &mut ReducibleGraph) -> u32 {
+    let terminals: Vec<NodeId> = graph
+        .terminals
+        .iter()
+        .copied()
         .filter(|&t| graph.is_node_valid(t))
         .collect();
-
-    if terminal_list.is_empty() {
+    if terminals.len() < 2 {
         return 0;
     }
+    let mut terminals = terminals;
+    terminals.sort_unstable();
 
-    // Compute shortest-path distances from each terminal
-    let terminal_dists: Vec<Vec<f64>> = terminal_list.iter()
-        .map(|&t| graph.shortest_paths_from(t))
-        .collect();
+    let csr = Csr::build(graph);
+    let dist: Vec<Vec<Cost>> = terminals.iter().map(|&t| csr.dijkstra(t)).collect();
 
-    let edges_to_check: Vec<(u32, u32, u32, f64)> = graph.edges.iter()
-        .filter(|e| {
-            graph.is_edge_valid(e.id)
-                && !graph.contracted_edges.contains(&e.id)
-        })
+    let bottleneck = (terminals.len() <= MAX_DENSE_TERMINALS)
+        .then(|| terminal_bottleneck(&terminals, &dist));
+
+    // The nearest terminals of each vertex, as indices into `terminals`.
+    let nearest = nearest_terminals(&terminals, &dist, csr.num_nodes);
+
+    let candidates: Vec<(u32, NodeId, NodeId, Cost)> = graph
+        .edges
+        .iter()
+        .filter(|e| graph.is_edge_valid(e.id) && !graph.contracted_edges.contains(&e.id))
         .map(|e| (e.id, e.src, e.dst, e.cost))
         .collect();
 
-    for (eid, src, dst, cost) in edges_to_check {
-        if !graph.is_edge_valid(eid) {
-            continue;
-        }
-
-        // Compute s(src, dst) = min over all terminals t of max(d(src,t), d(dst,t))
-        // If s(src, dst) < cost, edge can be removed (Theorem 1 of Rehfeldt-Koch 2023)
-        let mut bsd = f64::INFINITY;
-
-        for (idx, &t) in terminal_list.iter().enumerate() {
-            // Skip endpoints themselves: we need a path that goes THROUGH a terminal
-            if t == src || t == dst {
-                continue;
-            }
-
-            let d_src_t = terminal_dists[idx][src as usize];
-            let d_dst_t = terminal_dists[idx][dst as usize];
-
-            if d_src_t == f64::INFINITY || d_dst_t == f64::INFINITY {
-                continue;
-            }
-
-            let through_t = d_src_t.max(d_dst_t);
-            bsd = bsd.min(through_t);
-        }
-
-        // Remove edge if cost > BSD (strictly dominated by alternative).
-        // Use strict inequality with tolerance to avoid numerical precision issues.
-        // Since all costs are integers in SteinLib instances, a tolerance of 0.5
-        // ensures we only remove edges strictly dominated by integer distances.
-        if cost > bsd + 0.5 {
+    let mut removed = 0;
+    for (eid, u, v, cost) in candidates {
+        if special_distance(u, v, cost, &terminals, &dist, bottleneck.as_ref(), &nearest) {
             graph.remove_edge(eid);
             removed += 1;
         }
     }
-
     removed
+}
+
+/// True when `s(u,v) < cost`, i.e. the edge is provably not in any optimal tree.
+fn special_distance(
+    u: NodeId,
+    v: NodeId,
+    cost: Cost,
+    terminals: &[NodeId],
+    dist: &[Vec<Cost>],
+    bottleneck: Option<&Vec<Cost>>,
+    nearest: &[Vec<u32>],
+) -> bool {
+    // Single-terminal detour, checked against every terminal.
+    for i in 0..terminals.len() {
+        let t = terminals[i];
+        if t == u || t == v {
+            continue;
+        }
+        let du = dist[i][u as usize];
+        let dv = dist[i][v as usize];
+        if du.max(dv) < cost - 1e-9 {
+            return true;
+        }
+    }
+
+    // Longer chains: u -> t1 ~> t2 -> v, with the middle hop's bottleneck taken
+    // from the terminal metric closure.
+    let Some(b) = bottleneck else { return false };
+    let n = terminals.len();
+    let (Some(nu), Some(nv)) = (nearest.get(u as usize), nearest.get(v as usize)) else {
+        return false;
+    };
+    for &i in nu {
+        let du = dist[i as usize][u as usize];
+        if du >= cost - 1e-9 {
+            continue;
+        }
+        for &j in nv {
+            if i == j {
+                continue;
+            }
+            let dv = dist[j as usize][v as usize];
+            if dv >= cost - 1e-9 {
+                continue;
+            }
+            let mid = b[i as usize * n + j as usize];
+            if du.max(dv).max(mid) < cost - 1e-9 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// All-pairs bottleneck distances between terminals in the metric closure.
+///
+/// Bottleneck (minimax) distances are realised by any minimum spanning tree, so a
+/// Prim MST over the dense terminal metric followed by one traversal per terminal
+/// yields the whole matrix in `O(|R|^2)`.
+fn terminal_bottleneck(terminals: &[NodeId], dist: &[Vec<Cost>]) -> Vec<Cost> {
+    let n = terminals.len();
+    let w = |i: usize, j: usize| dist[i][terminals[j] as usize];
+
+    // Prim.
+    let mut in_tree = vec![false; n];
+    let mut best = vec![Cost::INFINITY; n];
+    let mut parent = vec![usize::MAX; n];
+    let mut adj: Vec<Vec<(usize, Cost)>> = vec![Vec::new(); n];
+    best[0] = 0.0;
+    for _ in 0..n {
+        let mut k = usize::MAX;
+        for i in 0..n {
+            if !in_tree[i] && (k == usize::MAX || best[i] < best[k]) {
+                k = i;
+            }
+        }
+        if k == usize::MAX || !best[k].is_finite() {
+            break;
+        }
+        in_tree[k] = true;
+        if parent[k] != usize::MAX {
+            adj[k].push((parent[k], best[k]));
+            adj[parent[k]].push((k, best[k]));
+        }
+        for i in 0..n {
+            if !in_tree[i] {
+                let c = w(k, i);
+                if c < best[i] {
+                    best[i] = c;
+                    parent[i] = k;
+                }
+            }
+        }
+    }
+
+    // Max edge on the tree path, by traversal from each terminal.
+    let mut out = vec![Cost::INFINITY; n * n];
+    let mut stack: Vec<(usize, usize, Cost)> = Vec::new();
+    for s in 0..n {
+        let mut seen = vec![false; n];
+        seen[s] = true;
+        out[s * n + s] = 0.0;
+        stack.clear();
+        stack.push((s, usize::MAX, 0.0));
+        while let Some((v, _, acc)) = stack.pop() {
+            for &(u, c) in &adj[v] {
+                if seen[u] {
+                    continue;
+                }
+                seen[u] = true;
+                let m = acc.max(c);
+                out[s * n + u] = m;
+                stack.push((u, v, m));
+            }
+        }
+    }
+    out
+}
+
+/// Indices of the nearest terminals of every vertex.
+fn nearest_terminals(terminals: &[NodeId], dist: &[Vec<Cost>], num_nodes: usize) -> Vec<Vec<u32>> {
+    let mut out = vec![Vec::new(); num_nodes];
+    let mut scratch: Vec<(Cost, u32)> = Vec::with_capacity(terminals.len());
+    for v in 0..num_nodes {
+        scratch.clear();
+        for (i, d) in dist.iter().enumerate() {
+            let dv = d[v];
+            if dv.is_finite() {
+                scratch.push((dv, i as u32));
+            }
+        }
+        scratch.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        scratch.truncate(NEAREST_TERMINALS);
+        out[v] = scratch.iter().map(|&(_, i)| i).collect();
+    }
+    out
+}
+
+/// Compact adjacency snapshot of the live part of a `ReducibleGraph`.
+///
+/// `ReducibleGraph::shortest_paths_from` allocates a `Vec` per settled vertex,
+/// which is far too slow to run once per terminal on the larger instances.
+struct Csr {
+    num_nodes: usize,
+    start: Vec<u32>,
+    head: Vec<u32>,
+    cost: Vec<Cost>,
+}
+
+impl Csr {
+    fn build(graph: &ReducibleGraph) -> Self {
+        let num_nodes = graph.nodes.iter().map(|n| n.id as usize).max().unwrap_or(0) + 1;
+        let mut degree = vec![0u32; num_nodes + 1];
+        let live: Vec<(NodeId, NodeId, Cost)> = graph
+            .edges
+            .iter()
+            .filter(|e| {
+                graph.is_edge_valid(e.id)
+                    && graph.is_node_valid(e.src)
+                    && graph.is_node_valid(e.dst)
+            })
+            .map(|e| (e.src, e.dst, e.cost))
+            .collect();
+        for &(a, b, _) in &live {
+            degree[a as usize + 1] += 1;
+            degree[b as usize + 1] += 1;
+        }
+        for i in 0..num_nodes {
+            degree[i + 1] += degree[i];
+        }
+        let start = degree.clone();
+        let mut fill = start.clone();
+        let mut head = vec![0u32; live.len() * 2];
+        let mut cost = vec![0.0; live.len() * 2];
+        for &(a, b, c) in &live {
+            head[fill[a as usize] as usize] = b;
+            cost[fill[a as usize] as usize] = c;
+            fill[a as usize] += 1;
+            head[fill[b as usize] as usize] = a;
+            cost[fill[b as usize] as usize] = c;
+            fill[b as usize] += 1;
+        }
+        Self { num_nodes, start, head, cost }
+    }
+
+    fn dijkstra(&self, source: NodeId) -> Vec<Cost> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
+        let mut dist = vec![Cost::INFINITY; self.num_nodes];
+        let mut heap: BinaryHeap<(Reverse<Ordered>, u32)> = BinaryHeap::new();
+        dist[source as usize] = 0.0;
+        heap.push((Reverse(Ordered(0.0)), source));
+        while let Some((Reverse(Ordered(d)), v)) = heap.pop() {
+            if d > dist[v as usize] + 1e-12 {
+                continue;
+            }
+            let (s, e) = (self.start[v as usize] as usize, self.start[v as usize + 1] as usize);
+            for i in s..e {
+                let u = self.head[i];
+                let nd = d + self.cost[i];
+                if nd < dist[u as usize] - 1e-12 {
+                    dist[u as usize] = nd;
+                    heap.push((Reverse(Ordered(nd)), u));
+                }
+            }
+        }
+        dist
+    }
+}
+
+#[derive(PartialEq, PartialOrd)]
+struct Ordered(Cost);
+impl Eq for Ordered {}
+#[allow(clippy::derive_ord_xor_partial_ord)]
+impl Ord for Ordered {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{UndirectedGraph, NodeType, SteinerInstance};
+    use crate::graph::{NodeType, SteinerInstance, UndirectedGraph};
 
-    #[test]
-    fn test_bottleneck_removes_expensive_edge() {
-        // 1(T) --1-- 2(T) --1-- 3(T) and edge 1-3 cost 5
-        // BSD(1,3) via terminal 2: max(d(1,2), d(3,2)) = max(1, 1) = 1
-        // Since cost 5 > BSD 1, edge should be removed
-        let mut g = UndirectedGraph::new(3);
-        g.add_node(1, NodeType::Terminal, 0.0);
-        g.add_node(2, NodeType::Terminal, 0.0);
-        g.add_node(3, NodeType::Terminal, 0.0);
-
-        g.add_edge(1, 2, 1.0); // 0
-        g.add_edge(2, 3, 1.0); // 1
-        g.add_edge(1, 3, 5.0); // 2: should be removed
-
-        let instance = SteinerInstance {
+    fn instance(g: &UndirectedGraph, terminals: Vec<NodeId>) -> SteinerInstance {
+        SteinerInstance {
             name: "test".into(),
             comment: String::new(),
-            num_nodes: 3,
-            num_edges: 3,
-            num_terminals: 3,
+            num_nodes: g.num_nodes,
+            num_edges: g.edges.len() as u32,
+            num_terminals: terminals.len() as u32,
             nodes: g.nodes.clone(),
             edges: g.edges.clone(),
-            terminals: vec![1, 2, 3],
+            terminals,
             root: Some(1),
-        };
-
-        let mut rg = ReducibleGraph::from_instance(&instance, &g);
-        let removed = bottleneck_reductions(&mut rg);
-
-        assert!(removed >= 1, "Should remove edge with cost > BSD");
-        assert!(!rg.is_edge_valid(2), "Edge 1-3 (cost 5, BSD=1) should be removed");
+        }
     }
 
     #[test]
-    fn test_bottleneck_keeps_necessary_edge() {
-        // 1(T) --3-- 2(T): single connection, no alternative through another terminal
+    fn removes_an_edge_dominated_through_one_terminal() {
+        // 1(T) -1- 2(T) -1- 3(T), plus the direct 1-3 edge at cost 5.
+        let mut g = UndirectedGraph::new(3);
+        for v in 1..=3u32 {
+            g.add_node(v, NodeType::Terminal, 0.0);
+        }
+        g.add_edge(1, 2, 1.0);
+        g.add_edge(2, 3, 1.0);
+        g.add_edge(1, 3, 5.0);
+
+        let inst = instance(&g, vec![1, 2, 3]);
+        let mut rg = ReducibleGraph::from_instance(&inst, &g);
+        assert!(bottleneck_reductions(&mut rg) >= 1);
+        assert!(!rg.is_edge_valid(2), "the cost-5 chord should go");
+    }
+
+    #[test]
+    fn keeps_the_only_connection() {
         let mut g = UndirectedGraph::new(2);
         g.add_node(1, NodeType::Terminal, 0.0);
         g.add_node(2, NodeType::Terminal, 0.0);
-
         g.add_edge(1, 2, 3.0);
 
-        let instance = SteinerInstance {
-            name: "test".into(),
-            comment: String::new(),
-            num_nodes: 2,
-            num_edges: 1,
-            num_terminals: 2,
-            nodes: g.nodes.clone(),
-            edges: g.edges.clone(),
-            terminals: vec![1, 2],
-            root: Some(1),
-        };
-
-        let mut rg = ReducibleGraph::from_instance(&instance, &g);
-        let removed = bottleneck_reductions(&mut rg);
-
-        assert_eq!(removed, 0, "Should not remove the only connecting edge");
+        let inst = instance(&g, vec![1, 2]);
+        let mut rg = ReducibleGraph::from_instance(&inst, &g);
+        assert_eq!(bottleneck_reductions(&mut rg), 0);
     }
 
     #[test]
-    fn test_bottleneck_steiner_node_path() {
-        // 1(T) --2-- 2(S) --2-- 3(T) --2-- 4(S) --10-- 5(T)
-        // Edge 4-5 cost 10: BSD via terminal 3: max(d(4,3), d(5,3)) = max(2, ?)
-        // d(5,3) via 4-3 = 2 + 2 = 4? No, d(5,3) = 10 + 2 = 12 (only path 5-4-3)
-        // Wait, but there's no direct 5-3 edge. d(5,3) = 10 + 2 = 12
-        // BSD(4,5) = min_t max(d(4,t), d(5,t))
-        //   via t=1: max(2+2, 10+2+2+2) = max(4, 16) = 16
-        //   via t=3: max(2, 12) = 12
-        // BSD = 12. cost = 10 < BSD, so edge NOT removed. Correct!
+    fn multi_hop_chain_beats_the_single_terminal_test() {
+        // Terminals 1,2,3,4 in a line with unit spacing; a chord 1-4 of cost 4.
+        //
+        //   single-terminal score: min_t max(d(1,t), d(4,t))
+        //     t=2 -> max(1,2) = 2? no: d(4,2) = 2, so max(1,2) = 2 < 4 as well.
+        // Make the chain necessary by spacing the terminals so that no single
+        // terminal is close to both endpoints, but consecutive hops are short.
         let mut g = UndirectedGraph::new(5);
-        g.add_node(1, NodeType::Terminal, 0.0);
-        g.add_node(2, NodeType::Steiner, 0.0);
-        g.add_node(3, NodeType::Terminal, 0.0);
-        g.add_node(4, NodeType::Steiner, 0.0);
-        g.add_node(5, NodeType::Terminal, 0.0);
+        for v in 1..=5u32 {
+            let t = v != 5;
+            g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+        }
+        // Path 1 -3- 2 -3- 3 -3- 4 : consecutive terminals are 3 apart, but
+        // d(1,4) = 9 and every single terminal is at least 6 from one endpoint.
+        g.add_edge(1, 2, 3.0);
+        g.add_edge(2, 3, 3.0);
+        g.add_edge(3, 4, 3.0);
+        // Chord of cost 5: beaten by the chain 1 -> 2 -> 3 -> 4 whose hops are
+        // all 3, but not by any single-terminal detour, which costs at least 6.
+        g.add_edge(1, 4, 5.0);
 
-        g.add_edge(1, 2, 2.0); // 0
-        g.add_edge(2, 3, 2.0); // 1
-        g.add_edge(3, 4, 2.0); // 2
-        g.add_edge(4, 5, 10.0); // 3
+        let inst = instance(&g, vec![1, 2, 3, 4]);
+        let mut rg = ReducibleGraph::from_instance(&inst, &g);
 
-        let instance = SteinerInstance {
-            name: "test".into(),
-            comment: String::new(),
-            num_nodes: 5,
-            num_edges: 4,
-            num_terminals: 3,
-            nodes: g.nodes.clone(),
-            edges: g.edges.clone(),
-            terminals: vec![1, 3, 5],
-            root: Some(1),
-        };
+        // Single-terminal scores for the chord {1,4}: via 2 -> max(3, 6) = 6;
+        // via 3 -> max(6, 3) = 6. Both exceed 5, so the old rule kept the chord.
+        let dists: Vec<Vec<Cost>> = [1u32, 2, 3, 4]
+            .iter()
+            .map(|&t| Csr::build(&rg).dijkstra(t))
+            .collect();
+        for (i, _) in [1u32, 2, 3, 4].iter().enumerate() {
+            let single = dists[i][1].max(dists[i][4]);
+            assert!(single >= 5.0 - 1e-9, "single-terminal detour should not fire");
+        }
 
-        let mut rg = ReducibleGraph::from_instance(&instance, &g);
-        let removed = bottleneck_reductions(&mut rg);
-
-        assert_eq!(removed, 0, "Should not remove edge 4-5 (cost 10 < BSD 12)");
+        assert!(bottleneck_reductions(&mut rg) >= 1, "the chain test should fire");
+        assert!(!rg.is_edge_valid(3), "chord 1-4 should be removed");
     }
 
     #[test]
-    fn test_bottleneck_vs_sd() {
-        // BSD is strictly stronger than SD for some instances.
-        // 1(T) --3-- 2(S) --3-- 3(T) --3-- 4(S) --3-- 5(T)
-        //            |                                  |
-        //            +------------- 5 -----------------+
-        //
-        // Edge 2-5 cost 5:
-        // SD test: d(2,t) + d(5,t) for each terminal t:
-        //   t=1: d(2,1) + d(5,1) = 3 + (5 or 9) = 8 or 12. Min path: 3+5=8? No, d(5,1)=9 via 5-4-3-2-1
-        //   Actually with edge 2-5: d(5,1) = min(5+3, 3+3+3+3) = min(8, 12) = 8
-        //   SD: d(2,t)+d(5,t) via t=3: d(2,3)+d(5,3) = 3 + min(5+3,3+3)=3+5(via 2-5-?)...
-        // This gets complex. Let's use a simpler distinguishing example.
-        //
-        // 1(T) --1-- 2(T) --5-- 3(T)
-        //            |           |
-        //            +----3------+
-        //
-        // Edges: 1-2(1), 2-3(5), 2-3(3) [parallel]
-        // With parallel edges: edge 2-3 cost 5. SD: d(2,1)+d(3,1) = 1+min(5,3)+1 = 1+2=3? 
-        // No: d(3,1) = min(5+1, 3+1) = 4. So SD: d(2,1)+d(3,1) = 1+4 = 5 = cost. Not < cost. Not removed by SD.
-        // BSD: max(d(2,1), d(3,1)) = max(1, 4) = 4 < 5. Removed by BSD!
-        //
-        // Actually this example doesn't work cleanly with our graph structure (parallel edges).
-        // Let me just verify basic correctness.
-
-        let mut g = UndirectedGraph::new(4);
-        g.add_node(1, NodeType::Terminal, 0.0);
-        g.add_node(2, NodeType::Terminal, 0.0);
-        g.add_node(3, NodeType::Steiner, 0.0);
-        g.add_node(4, NodeType::Terminal, 0.0);
-
-        // 1 --1-- 2 --1-- 3 --1-- 4
-        //         |               |
-        //         +------5--------+
-        g.add_edge(1, 2, 1.0); // 0
-        g.add_edge(2, 3, 1.0); // 1
-        g.add_edge(3, 4, 1.0); // 2
-        g.add_edge(2, 4, 5.0); // 3: cost 5
-
-        // BSD(2,4) = min_t max(d(2,t), d(4,t))
-        //   t=1: max(d(2,1), d(4,1)) = max(1, min(5+1, 1+1+1)) = max(1, 3) = 3
-        // Since cost 5 > BSD 3, edge should be removed
-        let instance = SteinerInstance {
-            name: "test".into(),
-            comment: String::new(),
-            num_nodes: 4,
-            num_edges: 4,
-            num_terminals: 3,
-            nodes: g.nodes.clone(),
-            edges: g.edges.clone(),
-            terminals: vec![1, 2, 4],
-            root: Some(1),
+    fn never_removes_an_edge_of_the_optimum() {
+        // Randomised check: brute-force the optimum before and after reduction.
+        let mut seed = 0x1234_5678_9ABC_DEF0u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
         };
 
-        let mut rg = ReducibleGraph::from_instance(&instance, &g);
-        let removed = bottleneck_reductions(&mut rg);
+        for _ in 0..300 {
+            let n = 5 + (rng() % 3) as u32;
+            let mut g = UndirectedGraph::new(n);
+            let k = 2 + (rng() % 3) as u32;
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = v <= k;
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            let mut edges = Vec::new();
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 3 != 0 {
+                        let c = 1.0 + (rng() % 9) as f64;
+                        g.add_edge(u, v, c);
+                        edges.push((u, v, c));
+                    }
+                }
+            }
+            let Some(before) = brute(n, &edges, &terminals) else { continue };
 
-        assert!(removed >= 1, "BSD should remove edge 2-4 (cost 5, BSD=3)");
+            let inst = instance(&g, terminals.clone());
+            let mut rg = ReducibleGraph::from_instance(&inst, &g);
+            bottleneck_reductions(&mut rg);
+
+            let kept: Vec<(NodeId, NodeId, Cost)> = rg
+                .edges
+                .iter()
+                .filter(|e| rg.is_edge_valid(e.id))
+                .map(|e| (e.src, e.dst, e.cost))
+                .collect();
+            let after = brute(n, &kept, &terminals).unwrap_or(Cost::INFINITY);
+            assert!(
+                (after - before).abs() < 1e-9,
+                "reduction changed the optimum: {before} -> {after}"
+            );
+        }
+    }
+
+    fn brute(n: u32, edges: &[(NodeId, NodeId, Cost)], terminals: &[NodeId]) -> Option<Cost> {
+        let m = edges.len();
+        if m > 20 {
+            return None;
+        }
+        let mut best = Cost::INFINITY;
+        for mask in 0u32..(1u32 << m) {
+            let mut parent: Vec<u32> = (0..=n).collect();
+            fn find(p: &mut Vec<u32>, x: u32) -> u32 {
+                if p[x as usize] != x {
+                    let r = find(p, p[x as usize]);
+                    p[x as usize] = r;
+                }
+                p[x as usize]
+            }
+            let mut cost = 0.0;
+            for (i, &(u, v, c)) in edges.iter().enumerate() {
+                if mask >> i & 1 == 1 {
+                    cost += c;
+                    let (a, b) = (find(&mut parent, u), find(&mut parent, v));
+                    parent[a as usize] = b;
+                }
+            }
+            if cost >= best {
+                continue;
+            }
+            let r0 = find(&mut parent, terminals[0]);
+            if terminals.iter().all(|&t| find(&mut parent, t) == r0) {
+                best = cost;
+            }
+        }
+        if best.is_finite() { Some(best) } else { None }
     }
 }
