@@ -46,12 +46,6 @@ pub struct SolverStats {
     pub status: SolveStatus,
 }
 
-/// A stored Steiner cut that can be inherited across B&B nodes.
-#[derive(Clone)]
-struct PoolCut {
-    cut_arcs: Vec<ArcId>,
-}
-
 pub struct BranchAndCutSolver {
     pub graph: DirectedGraph,
     pub root: NodeId,
@@ -62,8 +56,8 @@ pub struct BranchAndCutSolver {
     node_selector: NodeSelector,
     branching_rule: BranchingRule,
     pseudo_costs: PseudoCosts,
-    /// Global cut pool: Steiner cuts discovered at any node, valid everywhere.
-    global_cut_pool: Vec<PoolCut>,
+    /// Persistent LP: built once, reset per node via snapshot/reset.
+    base_lp: Option<LpRelaxation>,
     /// Canonical signatures for deduplication (sorted arc list as key).
     cut_signatures: HashSet<Vec<ArcId>>,
     /// Arcs fixed to 0 by reduced-cost fixing (valid globally).
@@ -97,7 +91,7 @@ impl BranchAndCutSolver {
             node_selector: NodeSelector::default_best_estimate(),
             branching_rule: BranchingRule::default_reliability(),
             pseudo_costs: PseudoCosts::new(num_arcs),
-            global_cut_pool: Vec::new(),
+            base_lp: None,
             cut_signatures: HashSet::new(),
             fixed_zero_arcs: HashSet::new(),
             total_cuts_added: 0,
@@ -165,6 +159,19 @@ impl BranchAndCutSolver {
             }
         }
 
+        // Build the base LP once (structural constraints + global fixings)
+        let mut lp = LpRelaxation::from_formulation(
+            &self.graph,
+            self.root,
+            &self.terminals,
+            &self.steiner_nodes,
+        );
+        for &arc_id in &self.fixed_zero_arcs {
+            lp.fix_variable(arc_id, 0.0);
+        }
+        lp.snapshot_base();
+        self.base_lp = Some(lp);
+
         if self.config.verbose {
             eprintln!(
                 "[B&C] Initial primal: {:.1} | DA lower bound: {:.1} | Fixed arcs: {}",
@@ -206,7 +213,9 @@ impl BranchAndCutSolver {
                 }
             };
 
-            self.tree.open_nodes.retain(|&id| id != node_id);
+            if let Some(pos) = self.tree.open_nodes.iter().position(|&id| id == node_id) {
+                self.tree.open_nodes.swap_remove(pos);
+            }
             self.tree.nodes_processed += 1;
 
             let result = self.process_node(node_id);
@@ -273,31 +282,17 @@ impl BranchAndCutSolver {
         let fixings = node.fixings.clone();
         let is_root_node = node.depth == 0;
 
-        let mut lp = LpRelaxation::from_formulation(
-            &self.graph,
-            self.root,
-            &self.terminals,
-            &self.steiner_nodes,
-        );
-
-        // Inherit all global cuts (valid at every node)
-        for pool_cut in &self.global_cut_pool {
-            lp.add_steiner_cut(&pool_cut.cut_arcs);
-        }
-
-        // Apply globally fixed arcs from reduced-cost fixing
-        for &arc_id in &self.fixed_zero_arcs {
-            lp.fix_variable(arc_id, 0.0);
-        }
-
-        for &(arc_id, value) in &fixings {
-            lp.fix_variable(arc_id, value);
+        {
+            let lp = self.base_lp.as_mut().unwrap();
+            lp.reset_to_base();
+            for &(arc_id, value) in &fixings {
+                lp.fix_variable(arc_id, value);
+            }
         }
 
         let mut lp_solution: Vec<f64> = Vec::new();
         let mut node_dual_bound = f64::NEG_INFINITY;
 
-        // Root gets more aggressive separation for a tighter initial bound
         let max_rounds = if is_root_node {
             self.config.cut_rounds_per_node * 3
         } else {
@@ -305,10 +300,10 @@ impl BranchAndCutSolver {
         };
 
         for _round in 0..max_rounds {
-            let obj = lp.solve();
+            let obj = self.base_lp.as_mut().unwrap().solve();
             self.total_lp_solves += 1;
 
-            if !lp.is_optimal() {
+            if !self.base_lp.as_ref().unwrap().is_optimal() {
                 return NodeResult::Pruned;
             }
 
@@ -318,11 +313,8 @@ impl BranchAndCutSolver {
                 return NodeResult::Pruned;
             }
 
-            lp_solution = lp.get_solution().to_vec();
+            lp_solution = self.base_lp.as_ref().unwrap().get_solution().to_vec();
 
-            // Only use certified Steiner cuts (valid named inequality family).
-            // Gomory/MIR separators are disabled: they do not receive a simplex
-            // tableau and can produce invalid inequalities (see research memo §2).
             let mut separator = FlowCutSeparator::new(
                 &self.graph,
                 self.root,
@@ -334,17 +326,20 @@ impl BranchAndCutSolver {
                 break;
             }
 
+            let mut new_cut_arcs: Vec<Vec<ArcId>> = Vec::new();
             for cut in &cuts {
                 let mut sig = cut.cut_arcs.clone();
                 sig.sort();
                 if self.cut_signatures.insert(sig) {
-                    lp.add_steiner_cut(&cut.cut_arcs);
-                    self.global_cut_pool.push(PoolCut {
-                        cut_arcs: cut.cut_arcs.clone(),
-                    });
+                    new_cut_arcs.push(cut.cut_arcs.clone());
                     self.total_cuts_added += 1;
                 }
             }
+            let lp = self.base_lp.as_mut().unwrap();
+            for arcs in &new_cut_arcs {
+                lp.add_steiner_cut(arcs);
+            }
+            lp.base_constraint_count = lp.num_constraints();
         }
 
         self.tree.nodes[node_id as usize].dual_bound = node_dual_bound;

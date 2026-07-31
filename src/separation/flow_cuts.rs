@@ -1,6 +1,6 @@
 use super::Separator;
 use crate::graph::{DirectedGraph, NodeId, ArcId};
-use crate::graph::algorithms::max_flow_min_cut;
+use crate::graph::algorithms::MaxFlowWorkspace;
 
 /// Separates violated directed cut constraints (Steiner cuts).
 ///
@@ -16,8 +16,8 @@ pub struct FlowCutSeparator<'a> {
     pub terminals: &'a [NodeId],
     pub cuts_found: u32,
     pub total_cuts_generated: u32,
-    /// Tolerance for considering a cut violated
     pub violation_tolerance: f64,
+    workspace: Option<MaxFlowWorkspace>,
 }
 
 /// A separated Steiner cut constraint.
@@ -42,6 +42,7 @@ impl<'a> FlowCutSeparator<'a> {
             cuts_found: 0,
             total_cuts_generated: 0,
             violation_tolerance: 1e-6,
+            workspace: None,
         }
     }
 
@@ -50,12 +51,17 @@ impl<'a> FlowCutSeparator<'a> {
     pub fn find_violated_cuts(&mut self, lp_solution: &[f64]) -> Vec<SteinerCut> {
         let mut violated_cuts = Vec::new();
 
+        if self.workspace.is_none() {
+            self.workspace = Some(MaxFlowWorkspace::new(self.graph));
+        }
+        let ws = self.workspace.as_mut().unwrap();
+
         for &terminal in self.terminals {
             if terminal == self.root {
                 continue;
             }
 
-            let result = max_flow_min_cut(self.graph, self.root, terminal, lp_solution);
+            let result = ws.compute(self.root, terminal, lp_solution, &self.graph.arcs);
 
             // If max-flow < 1, we have a violated Steiner cut
             if result.flow_value < 1.0 - self.violation_tolerance {

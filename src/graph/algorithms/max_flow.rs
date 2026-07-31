@@ -12,99 +12,127 @@ pub struct MaxFlowResult {
     pub cut_arcs: Vec<ArcId>,
 }
 
-/// Dinic's blocking-flow algorithm for max-flow/min-cut.
-/// O(V²E) worst case, much faster than Edmonds-Karp O(VE²) in practice.
-///
-/// For Steiner cut separation: source = root, sink = terminal,
-/// capacities = LP solution values y_a.
+/// Pre-allocated workspace for repeated max-flow computations on the same graph.
+pub struct MaxFlowWorkspace {
+    cap: Vec<f64>,
+    head_node: Vec<u32>,
+    adj: Vec<Vec<usize>>,
+    level: Vec<i32>,
+    iter_ptr: Vec<usize>,
+    reachable: Vec<bool>,
+    queue: VecDeque<NodeId>,
+    num_arcs: usize,
+    num_nodes: usize,
+}
+
+impl MaxFlowWorkspace {
+    pub fn new(graph: &DirectedGraph) -> Self {
+        let num_arcs = graph.arcs.len();
+        let num_nodes = graph.num_nodes as usize + 1;
+        let total_edges = num_arcs * 2;
+
+        let mut head_node = vec![0u32; total_edges];
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); num_nodes];
+
+        for (i, arc) in graph.arcs.iter().enumerate() {
+            head_node[i] = arc.head;
+            head_node[i + num_arcs] = arc.tail;
+            adj[arc.tail as usize].push(i);
+            adj[arc.head as usize].push(i + num_arcs);
+        }
+
+        Self {
+            cap: vec![0.0; total_edges],
+            head_node,
+            adj,
+            level: vec![0i32; num_nodes],
+            iter_ptr: vec![0; num_nodes],
+            reachable: vec![false; num_nodes],
+            queue: VecDeque::with_capacity(num_nodes),
+            num_arcs,
+            num_nodes,
+        }
+    }
+
+    pub fn compute(&mut self, source: NodeId, sink: NodeId, capacities: &[f64], arcs: &[crate::graph::Arc]) -> MaxFlowResult {
+        for i in 0..self.num_arcs {
+            self.cap[i] = capacities[i];
+            self.cap[i + self.num_arcs] = 0.0;
+        }
+
+        let mut total_flow = 0.0;
+
+        loop {
+            for l in self.level.iter_mut() { *l = -1; }
+            self.level[source as usize] = 0;
+            self.queue.clear();
+            self.queue.push_back(source);
+
+            while let Some(v) = self.queue.pop_front() {
+                for &eid in &self.adj[v as usize] {
+                    let u = self.head_node[eid];
+                    if self.cap[eid] > 1e-10 && self.level[u as usize] < 0 {
+                        self.level[u as usize] = self.level[v as usize] + 1;
+                        self.queue.push_back(u);
+                    }
+                }
+            }
+
+            if self.level[sink as usize] < 0 {
+                break;
+            }
+
+            for p in self.iter_ptr.iter_mut() { *p = 0; }
+
+            loop {
+                let pushed = dfs_blocking(
+                    source, sink, f64::INFINITY,
+                    &self.adj, &self.head_node, &mut self.cap, &self.level, &mut self.iter_ptr, self.num_arcs,
+                );
+                if pushed <= 1e-12 {
+                    break;
+                }
+                total_flow += pushed;
+            }
+        }
+
+        for r in self.reachable.iter_mut() { *r = false; }
+        self.reachable[source as usize] = true;
+        self.queue.clear();
+        self.queue.push_back(source);
+        while let Some(v) = self.queue.pop_front() {
+            for &eid in &self.adj[v as usize] {
+                let u = self.head_node[eid];
+                if self.cap[eid] > 1e-10 && !self.reachable[u as usize] {
+                    self.reachable[u as usize] = true;
+                    self.queue.push_back(u);
+                }
+            }
+        }
+
+        let source_side: Vec<NodeId> = (1..self.num_nodes as NodeId)
+            .filter(|&n| self.reachable[n as usize])
+            .collect();
+
+        let cut_arcs: Vec<ArcId> = arcs.iter()
+            .enumerate()
+            .filter(|(_, arc)| self.reachable[arc.tail as usize] && !self.reachable[arc.head as usize])
+            .map(|(i, _)| i as ArcId)
+            .collect();
+
+        MaxFlowResult { flow_value: total_flow, source_side, cut_arcs }
+    }
+}
+
+/// Convenience function: allocates workspace per call (for backward compat / tests).
 pub fn max_flow_min_cut(
     graph: &DirectedGraph,
     source: NodeId,
     sink: NodeId,
     capacities: &[f64],
 ) -> MaxFlowResult {
-    let num_arcs = graph.arcs.len();
-    let num_nodes = graph.num_nodes as usize + 1;
-
-    let total_edges = num_arcs * 2;
-    let mut cap = vec![0.0f64; total_edges];
-    let mut head_node = vec![0u32; total_edges];
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); num_nodes];
-
-    for (i, arc) in graph.arcs.iter().enumerate() {
-        cap[i] = capacities[i];
-        cap[i + num_arcs] = 0.0;
-        head_node[i] = arc.head;
-        head_node[i + num_arcs] = arc.tail;
-        adj[arc.tail as usize].push(i);
-        adj[arc.head as usize].push(i + num_arcs);
-    }
-
-    let mut total_flow = 0.0;
-    let mut level = vec![0i32; num_nodes];
-    let mut iter_ptr: Vec<usize> = vec![0; num_nodes];
-
-    loop {
-        // BFS to build level graph
-        for l in level.iter_mut() { *l = -1; }
-        level[source as usize] = 0;
-        let mut queue = VecDeque::new();
-        queue.push_back(source);
-
-        while let Some(v) = queue.pop_front() {
-            for &eid in &adj[v as usize] {
-                let u = head_node[eid];
-                if cap[eid] > 1e-10 && level[u as usize] < 0 {
-                    level[u as usize] = level[v as usize] + 1;
-                    queue.push_back(u);
-                }
-            }
-        }
-
-        if level[sink as usize] < 0 {
-            break;
-        }
-
-        for p in iter_ptr.iter_mut() { *p = 0; }
-
-        loop {
-            let pushed = dfs_blocking(
-                source, sink, f64::INFINITY,
-                &adj, &head_node, &mut cap, &level, &mut iter_ptr, num_arcs,
-            );
-            if pushed <= 1e-12 {
-                break;
-            }
-            total_flow += pushed;
-        }
-    }
-
-    // Min-cut: reachable from source in final residual graph
-    let mut reachable = vec![false; num_nodes];
-    reachable[source as usize] = true;
-    let mut queue = VecDeque::new();
-    queue.push_back(source);
-    while let Some(v) = queue.pop_front() {
-        for &eid in &adj[v as usize] {
-            let u = head_node[eid];
-            if cap[eid] > 1e-10 && !reachable[u as usize] {
-                reachable[u as usize] = true;
-                queue.push_back(u);
-            }
-        }
-    }
-
-    let source_side: Vec<NodeId> = (1..num_nodes as NodeId)
-        .filter(|&n| reachable[n as usize])
-        .collect();
-
-    let cut_arcs: Vec<ArcId> = graph.arcs.iter()
-        .enumerate()
-        .filter(|(_, arc)| reachable[arc.tail as usize] && !reachable[arc.head as usize])
-        .map(|(i, _)| i as ArcId)
-        .collect();
-
-    MaxFlowResult { flow_value: total_flow, source_side, cut_arcs }
+    let mut ws = MaxFlowWorkspace::new(graph);
+    ws.compute(source, sink, capacities, &graph.arcs)
 }
 
 fn dfs_blocking(

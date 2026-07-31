@@ -11,8 +11,11 @@ pub struct LpRelaxation {
     pub solution: Vec<f64>,
     pub dual_bound: f64,
     constraints: Vec<LpConstraint>,
+    pub base_constraint_count: usize,
     var_lb: Vec<f64>,
     var_ub: Vec<f64>,
+    base_var_lb: Vec<f64>,
+    base_var_ub: Vec<f64>,
     pub status: LpStatus,
     pub solve_count: u64,
 }
@@ -52,8 +55,11 @@ impl LpRelaxation {
             solution: vec![0.0; num_arcs as usize],
             dual_bound: f64::NEG_INFINITY,
             constraints: Vec::new(),
+            base_constraint_count: 0,
             var_lb: vec![0.0; num_arcs as usize],
             var_ub: vec![1.0; num_arcs as usize],
+            base_var_lb: vec![0.0; num_arcs as usize],
+            base_var_ub: vec![1.0; num_arcs as usize],
             status: LpStatus::NotSolved,
             solve_count: 0,
         };
@@ -121,6 +127,7 @@ impl LpRelaxation {
             }
         }
 
+        lp.base_constraint_count = lp.constraints.len();
         lp
     }
 
@@ -132,11 +139,30 @@ impl LpRelaxation {
             solution: vec![0.0; num_vars as usize],
             dual_bound: f64::NEG_INFINITY,
             constraints: Vec::new(),
+            base_constraint_count: 0,
             var_lb: vec![0.0; num_vars as usize],
             var_ub: vec![1.0; num_vars as usize],
+            base_var_lb: vec![0.0; num_vars as usize],
+            base_var_ub: vec![1.0; num_vars as usize],
             status: LpStatus::NotSolved,
             solve_count: 0,
         }
+    }
+
+    /// Mark current state as the base (after adding global cuts and fixed arcs).
+    /// Subsequent `reset_to_base()` calls will restore to this point.
+    pub fn snapshot_base(&mut self) {
+        self.base_constraint_count = self.constraints.len();
+        self.base_var_lb = self.var_lb.clone();
+        self.base_var_ub = self.var_ub.clone();
+    }
+
+    /// Reset to the base state: remove node-local constraints and variable fixings.
+    pub fn reset_to_base(&mut self) {
+        self.constraints.truncate(self.base_constraint_count);
+        self.var_lb = self.base_var_lb.clone();
+        self.var_ub = self.base_var_ub.clone();
+        self.status = LpStatus::NotSolved;
     }
 
     fn add_constraint_raw(&mut self, vars_coeffs: &[(u32, f64)], lb: f64, ub: f64) {
