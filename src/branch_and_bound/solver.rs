@@ -480,9 +480,18 @@ impl BranchAndCutSolver {
         let parent_depth = parent.depth;
         let parent_fixings = parent.fixings.clone();
 
+        // Symmetry-aware branching: branch_var is the first arc in a pair.
+        // Fix BOTH anti-parallel arcs (undirected edge branching).
+        let reverse_arc = branch_var + 1;
+        let has_reverse = (reverse_arc as usize) < self.graph.arcs.len();
+
+        // Child 0: fix edge to 0 (both arcs to 0)
         let child0_id = self.tree.nodes.len() as u64;
         let mut fixings0 = parent_fixings.clone();
         fixings0.push((branch_var, 0.0));
+        if has_reverse {
+            fixings0.push((reverse_arc, 0.0));
+        }
         self.tree.nodes.push(BbNode {
             id: child0_id,
             parent: Some(parent_id),
@@ -493,6 +502,8 @@ impl BranchAndCutSolver {
         });
         self.tree.open_nodes.push(child0_id);
 
+        // Child 1: fix edge to 1 (at least one arc must be 1)
+        // We fix the forward arc to 1 (the reverse may still be 0 or 1)
         let child1_id = self.tree.nodes.len() as u64;
         let mut fixings1 = parent_fixings;
         fixings1.push((branch_var, 1.0));

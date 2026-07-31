@@ -1,33 +1,18 @@
 use crate::graph::ArcId;
 
-/// Branching strategy for selecting the variable to branch on.
-///
-/// SCIP-Jack uses hybrid branching which combines:
-/// - Strong branching (solve LP for both child nodes)
-/// - Pseudo costs (historical branching impact)
-/// - Conflict scores and inference scores
 pub enum BranchingRule {
-    /// Most fractional variable (simple, fast)
     MostFractional,
-    /// Strong branching: evaluate LP bound change for candidates
     StrongBranching { max_candidates: u32 },
-    /// Reliability branching: use strong branching until pseudo-costs are reliable,
-    /// then switch to pseudo-cost branching
     ReliabilityBranching {
         max_strong_candidates: u32,
         reliability_threshold: u32,
     },
 }
 
-/// Historical pseudo-cost data for branching decisions.
 pub struct PseudoCosts {
-    /// Sum of LP bound changes when branching variable to 0
     down_sum: Vec<f64>,
-    /// Number of times branched down
     down_count: Vec<u32>,
-    /// Sum of LP bound changes when branching variable to 1
     up_sum: Vec<f64>,
-    /// Number of times branched up
     up_count: Vec<u32>,
 }
 
@@ -58,7 +43,6 @@ impl PseudoCosts {
         }
     }
 
-    /// Estimated bound change from branching down on variable.
     pub fn down_estimate(&self, var: ArcId, frac: f64) -> f64 {
         let i = var as usize;
         if self.down_count[i] > 0 {
@@ -68,7 +52,6 @@ impl PseudoCosts {
         }
     }
 
-    /// Estimated bound change from branching up on variable.
     pub fn up_estimate(&self, var: ArcId, frac: f64) -> f64 {
         let i = var as usize;
         if self.up_count[i] > 0 {
@@ -78,17 +61,14 @@ impl PseudoCosts {
         }
     }
 
-    /// Is this variable's pseudo-cost reliable (branched enough times)?
     pub fn is_reliable(&self, var: ArcId, threshold: u32) -> bool {
         let i = var as usize;
         self.down_count[i] >= threshold && self.up_count[i] >= threshold
     }
 
-    /// Score for branching on a variable (product scoring).
     pub fn score(&self, var: ArcId, frac: f64) -> f64 {
         let down = self.down_estimate(var, frac).max(1e-6);
         let up = self.up_estimate(var, frac).max(1e-6);
-        // Product score (SCIP default)
         (1.0 - 1e-6) * down.min(up) + 1e-6 * down.max(up)
     }
 }
@@ -101,41 +81,59 @@ impl BranchingRule {
         }
     }
 
-    /// Select the arc variable to branch on given fractional LP values.
-    /// Returns None if solution is integer-feasible.
     pub fn select(&self, lp_solution: &[f64]) -> Option<ArcId> {
         match self {
-            BranchingRule::MostFractional => {
-                select_most_fractional(lp_solution)
-            }
-            BranchingRule::StrongBranching { .. } => {
-                // Strong branching falls back to most fractional without LP access
-                select_most_fractional(lp_solution)
-            }
-            BranchingRule::ReliabilityBranching { .. } => {
-                select_most_fractional(lp_solution)
-            }
+            BranchingRule::MostFractional => select_most_fractional(lp_solution),
+            BranchingRule::StrongBranching { .. } => select_most_fractional(lp_solution),
+            BranchingRule::ReliabilityBranching { .. } => select_most_fractional(lp_solution),
         }
     }
 
-    /// Select with pseudo-cost guidance (used when LP is available).
+    /// Select branching variable using symmetry-aware undirected edge branching.
+    ///
+    /// For a bidirected graph, arc 2i and 2i+1 correspond to the same undirected edge.
+    /// Instead of branching on individual arcs, we compute z_e = y_{uv} + y_{vu}
+    /// and select the edge whose z_e is most fractional. Branching on z_e=0
+    /// fixes both anti-parallel arcs to 0, breaking the bidirected symmetry.
+    ///
+    /// Returns the arc ID of the FIRST arc in the pair (the even-indexed one).
+    /// The solver must fix both arcs in the pair when branching.
     pub fn select_with_costs(
         &self,
         lp_solution: &[f64],
         pseudo_costs: &PseudoCosts,
     ) -> Option<ArcId> {
+        let num_arcs = lp_solution.len();
+
+        // Group arcs into undirected edges (pairs of 2i, 2i+1)
+        let num_edges = num_arcs / 2;
+        if num_edges == 0 {
+            return select_most_fractional(lp_solution);
+        }
+
         match self {
             BranchingRule::MostFractional => {
-                select_most_fractional(lp_solution)
+                select_edge_most_fractional(lp_solution, num_edges)
             }
             BranchingRule::StrongBranching { max_candidates } => {
-                select_strong_candidates(lp_solution, *max_candidates)
+                select_edge_strong(lp_solution, num_edges, *max_candidates)
             }
             BranchingRule::ReliabilityBranching { reliability_threshold, max_strong_candidates } => {
-                select_reliability(lp_solution, pseudo_costs, *reliability_threshold, *max_strong_candidates)
+                select_edge_reliability(
+                    lp_solution, num_edges, pseudo_costs,
+                    *reliability_threshold, *max_strong_candidates,
+                )
             }
         }
     }
+}
+
+/// Compute z_e = y_{uv} + y_{vu} and its fractionality for edge e.
+fn edge_frac(lp_solution: &[f64], edge_idx: usize) -> f64 {
+    let y_fwd = lp_solution[edge_idx * 2];
+    let y_rev = lp_solution[edge_idx * 2 + 1];
+    let z = y_fwd + y_rev;
+    (z - z.round()).abs()
 }
 
 fn select_most_fractional(lp_solution: &[f64]) -> Option<ArcId> {
@@ -151,59 +149,75 @@ fn select_most_fractional(lp_solution: &[f64]) -> Option<ArcId> {
     if best_frac > 1e-6 { best_var } else { None }
 }
 
-/// Select top-k most fractional candidates for strong branching.
-fn select_strong_candidates(lp_solution: &[f64], max_candidates: u32) -> Option<ArcId> {
-    let mut candidates: Vec<(ArcId, f64)> = lp_solution.iter()
-        .enumerate()
-        .map(|(i, &val)| (i as ArcId, (val - val.round()).abs()))
-        .filter(|&(_, frac)| frac > 1e-6)
+/// Branch on undirected edge with most fractional z_e.
+fn select_edge_most_fractional(lp_solution: &[f64], num_edges: usize) -> Option<ArcId> {
+    let mut best_frac = 0.0;
+    let mut best_arc = None;
+
+    for e in 0..num_edges {
+        let f = edge_frac(lp_solution, e);
+        if f > best_frac {
+            best_frac = f;
+            best_arc = Some((e * 2) as ArcId);
+        }
+    }
+
+    if best_frac > 1e-6 { best_arc } else { None }
+}
+
+fn select_edge_strong(
+    lp_solution: &[f64],
+    num_edges: usize,
+    max_candidates: u32,
+) -> Option<ArcId> {
+    let mut candidates: Vec<(usize, f64)> = (0..num_edges)
+        .map(|e| (e, edge_frac(lp_solution, e)))
+        .filter(|&(_, f)| f > 1e-6)
         .collect();
 
     candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     candidates.truncate(max_candidates as usize);
 
-    // Without LP re-solving, pick the most fractional among candidates
-    candidates.first().map(|&(var, _)| var)
+    candidates.first().map(|&(e, _)| (e * 2) as ArcId)
 }
 
-/// Reliability branching: use pseudo-costs for reliable vars, strong branching for unreliable.
-fn select_reliability(
+fn select_edge_reliability(
     lp_solution: &[f64],
+    num_edges: usize,
     pseudo_costs: &PseudoCosts,
     reliability_threshold: u32,
     max_strong: u32,
 ) -> Option<ArcId> {
     let mut best_score = f64::NEG_INFINITY;
-    let mut best_var = None;
+    let mut best_arc = None;
     let mut unreliable_count = 0u32;
 
-    for (i, &val) in lp_solution.iter().enumerate() {
-        let frac = (val - val.round()).abs();
+    for e in 0..num_edges {
+        let frac = edge_frac(lp_solution, e);
         if frac <= 1e-6 {
             continue;
         }
 
-        let var = i as ArcId;
+        let arc = (e * 2) as ArcId;
+        let z_val = lp_solution[e * 2] + lp_solution[e * 2 + 1];
 
-        if pseudo_costs.is_reliable(var, reliability_threshold) {
-            // Use pseudo-cost score
-            let score = pseudo_costs.score(var, val);
+        if pseudo_costs.is_reliable(arc, reliability_threshold) {
+            let score = pseudo_costs.score(arc, z_val);
             if score > best_score {
                 best_score = score;
-                best_var = Some(var);
+                best_arc = Some(arc);
             }
         } else {
-            // Mark for strong branching (use fractionality as proxy)
             unreliable_count += 1;
             if unreliable_count <= max_strong {
-                let score = frac; // Proxy: more fractional = better candidate
+                let score = frac;
                 if score > best_score {
                     best_score = score;
-                    best_var = Some(var);
+                    best_arc = Some(arc);
                 }
             }
         }
     }
 
-    best_var
+    best_arc
 }
