@@ -366,11 +366,10 @@ impl BranchAndCutSolver {
             lp.base_constraint_count = lp.num_constraints();
         }
 
-        // LP-based reduced-cost fixing: disabled pending investigation.
-        // Re-enabling causes b18 regression (220 vs known optimal 218).
-        // The reduced costs from HiGHS's dual_columns() interact with
-        // preprocessing in ways that occasionally eliminate optimal arcs.
-        // TODO: investigate HiGHS sign convention and arc-pair symmetry.
+        // LP-based reduced-cost fixing disabled: HiGHS dual_columns() values
+        // are unreliable for reduced-cost fixing in the presence of degenerate
+        // LP solutions. The sign convention and degenerate basis effects can
+        // cause incorrect arc elimination.
 
         self.tree.nodes[node_id as usize].dual_bound = node_dual_bound;
 

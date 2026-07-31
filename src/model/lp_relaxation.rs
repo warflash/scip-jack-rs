@@ -266,12 +266,12 @@ impl LpRelaxation {
             }
         }
 
-        // Build model and warm-start with previous solution
         let solve_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let model = pb.optimise(Sense::Minimise);
+            let mut model = pb.optimise(Sense::Minimise);
 
-            // Note: warm-start disabled to avoid affecting LP convergence path
-            // which can change cut discovery and affect optimality proof
+            if self.solve_count > 0 && !self.solution.is_empty() {
+                model.set_solution(Some(&self.solution), None, None, None);
+            }
 
             model.solve()
         }));
