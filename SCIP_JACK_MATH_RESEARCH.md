@@ -467,3 +467,320 @@ The dual-ascent code also runs only at the root. The next mathematically safe ex
 As a sanity check, I reimplemented the ascent invariant independently and tested it on 19,363 exhaustive connected unweighted cases up to five vertices plus 5,000 random weighted cases up to seven vertices. No lower bound exceeded the brute-force optimum and no tested reduced-cost fixing eliminated an optimal rooted orientation. This is evidence for the invariant, not a substitute for the missing replayable certificate.
 
 The current integration suite also exposes a separate blocker: `cargo test --all-targets` reaches 45 passing unit tests, but `test_b07_fast` fails inside HiGHS with `invalid problem: Error` before producing a result. That does not disprove the dual-ascent bound, but it means the model-construction path is not yet robust enough for a correctness claim. The first checks should be for empty separation rows, self-loops created by degree-2 contraction, duplicate column indices in a row, and disconnected terminals after preprocessing. These should become explicit pre-solve assertions rather than backend-dependent failures.
+
+## 11. Original mathematical research program
+
+This is the part of the memo that is deliberately not a literature summary. The current proposal is mathematically non-optimal in a precise sense: it asks a rooted directed-cut relaxation to describe a tree, but directed cuts only describe terminal reachability.
+
+They do not, by themselves, price the graphic-matroid fact that the optimum has no cycles, the multiway fact that \(k\) terminal regions need \(k-1\) connections, or the minimality fact that a terminal-free branch needs two exits. The lower-bound certificate proposed earlier also prices only elementary cuts.
+
+The following constructions are the research direction I would lead. The validity proofs below are self-contained. Claims of global novelty are intentionally separated from claims that are already theorems: the constructions are new as a combined SCIP-Jack research program, while some of their ingredients are classical polyhedral facts.
+
+### 11.1 Forest-closed BCR: make the relaxation describe a tree
+
+Introduce one undirected variable \(x_e\) for each original edge \(e=\{u,v\}\), linked to the bidirected variables by
+
+\[
+x_e = y_{uv}+y_{vu}, \qquad 0\le x_e\le 1.
+\]
+
+The upper bound \(x_e\le 1\) is valid for the optimization problem with nonnegative costs: every optimal Steiner solution can be oriented with at most one direction of each original edge. Add the following valid tree closure:
+
+\[
+x(F)\le r_G(F) \qquad \text{for every }F\subseteq E,
+\]
+
+where \(r_G\) is the graphic-matroid rank function. The simple, cheaply separable first layer is the cycle closure
+
+\[
+x(C)\le |C|-1 \qquad \text{for every simple cycle }C.
+\]
+
+For every partition \(\mathcal P\) of \(V\) whose parts all contain a terminal, add the terminal-partition inequality
+
+\[
+x(\delta(\mathcal P))\ge |\mathcal P|-1.
+\]
+
+Finally introduce activation variables \(s_v\) for used vertices and add the minimal-tree perspective
+
+\[
+s_t=1 \ (t\in R),\qquad 0\le s_v\le 1,\qquad x_e\le s_u,\ x_e\le s_v,
+\]
+
+\[
+\sum_{e\in E}x_e=\sum_{v\in V}s_v-1,
+\qquad
+x(\delta(v))\ge 2s_v\quad(v\notin R).
+\]
+
+The last inequality says that a selected nonterminal cannot be a leaf. It is valid for at least one optimum because a nonterminal leaf can be deleted without disconnecting a terminal and without increasing a nonnegative objective.
+
+Call the resulting relaxation \(\mathrm{FC\text{-}BCR}\), for forest-closed BCR. It is not a claim that all these rows are new; partition and forest inequalities have a long polyhedral history. The new point is to make them a first-class closure around the bidirected formulation and to carry their dual prices into reductions and proof certificates.
+
+The exactness argument is short. Given an optimal undirected Steiner tree, orient it away from the chosen root, set \(x\) to its edge incidence vector, set \(s\) to its used-vertex incidence vector, and all rows above hold. Therefore minimizing over \(\mathrm{FC\text{-}BCR}\) still gives a lower bound, while the optimum integer value is unchanged. The relaxation can be strictly stronger than a cut-only model because a fractional solution may satisfy every one-terminal cut while violating a cycle, a multiway partition, or the no-terminal-leaf closure.
+
+Cycle separation is especially attractive. A cycle row is violated exactly when
+
+\[
+\sum_{e\in C}(1-x_e)<1.
+\]
+
+Thus a minimum-weight cycle problem with edge lengths \(1-x_e\) separates this first layer exactly. Full graphic-rank separation can be added later; it should not be a prerequisite for obtaining the first mathematically justified strengthening.
+
+### 11.2 A new lower-bound object: matroid-corrected cut packing
+
+The existing cut-packing certificate is sound but incomplete: it cannot exploit the fact that a tree is not allowed to use all edges of a cycle. The following is the certificate I would make the central lower-bound object.
+
+Let \(a_C^\top x\ge 1\) be valid terminal-cut rows, \(p_P^\top x\ge b_P\) be valid partition or terminal-structure rows, and \(b_F^\top x\le r_F\) be selected forest-rank rows. Choose nonnegative multipliers \(\alpha_C,\beta_P,\gamma_F\) satisfying the edgewise domination condition
+
+For the bidirected model, either keep the linking variables \(x\), or lift an undirected coefficient equally to the two arcs of its original edge. The certificate is then checked in the same variable space as the objective.
+
+\[
+\sum_C\alpha_C a_C
++\sum_P\beta_P p_P
+-\sum_F\gamma_F b_F
+\ \le\ c.
+\]
+
+Then every feasible tree vector \(x\) obeys
+
+\[
+c^\top x
+\ge
+\sum_C\alpha_C
++\sum_P\beta_P b_P
+-\sum_F\gamma_F r_F.
+\tag{MC}
+\]
+
+Proof:
+
+\[
+c^\top x
+\ge
+\left(\sum_C\alpha_C a_C
++\sum_P\beta_P p_P
+-\sum_F\gamma_F b_F
+\right)^\top x
+\]
+
+\[
+\ge
+\sum_C\alpha_C
++\sum_P\beta_P b_P
+-\sum_F\gamma_F r_F.
+\]
+
+The first inequality uses the edgewise domination and \(x\ge 0\). The second uses the lower rows and the upper forest rows. This is a complete proof, not a heuristic interpretation of LP dual multipliers.
+
+I call (MC) the **matroid-corrected cut-packing certificate**. The previous cut-packing certificate is the special case \(\beta=\gamma=0\). The new term \(-\gamma_F r_F\) is important: it allows the cut load to exceed the raw edge cost on a set that cannot be fully selected because of a forest rank constraint, while charging the certificate for that privilege. With only cycle rows this becomes a practical cycle-corrected certificate.
+
+Define the certified slack
+
+\[
+\rho_e
+=c_e-
+\left(
+\sum_C\alpha_C a_{C,e}
++\sum_P\beta_P p_{P,e}
+-\sum_F\gamma_F b_{F,e}
+\right)\ge 0.
+\]
+
+The same derivation gives the edge-fixing theorem
+
+\[
+x_e=1
+\quad\Longrightarrow\quad
+c^\top x\ge \mathrm{LB}_{\mathrm{MC}}+\rho_e.
+\]
+
+Consequently, if
+
+\[
+\mathrm{LB}_{\mathrm{MC}}+\rho_e>\mathrm{UB},
+\]
+
+then \(e\) can be fixed to zero. This is the mathematically correct generalization of reduced-cost fixing for a certificate that includes tree structure. It is materially stronger than using a scalar dual-ascent bound plus the raw cost of an edge.
+
+The research question is not whether (MC) is valid; it is. The research question is how to choose a small, high-value support:
+
+1. generate violated terminal cuts;
+2. generate violated \(k\)-partition rows for small \(k\);
+3. find short cycles or violated rank sets in the fractional support;
+4. solve the multiplier problem over this finite certificate pool using rational coefficients;
+5. add new rows only when they improve the certificate value per unit separation cost.
+
+This turns “dual ascent versus LP dual” into one common mathematical object. It also prevents double-counting: two bounds are not added merely because they came from different algorithms; they are jointly validated by one coefficientwise inequality.
+
+### 11.3 A solver-specific valid inequality that removes terminal-free dead branches
+
+The minimal-tree argument yields a concrete inequality family that is not present in the current proposal. Let \(S\subseteq V\setminus R\) and let \(e\in E(S)\). For every inclusion-minimal Steiner tree \(T\),
+
+\[
+x_T(\delta(S))\ge 2x_{T,e}.
+\tag{TF}
+\]
+
+To prove (TF), consider the connected component \(Q\) of \(T[S]\) containing \(e\). It contains no terminal. If \(Q\) had zero boundary edges, \(T\) would be disconnected. If it had one boundary edge, \(Q\) would be a terminal-free pendant subtree and could be removed while preserving terminal connectivity. Both cases contradict the definition of an inclusion-minimal optimum. Therefore \(Q\), and hence \(S\), has at least two boundary edges whenever \(e\) is selected.
+
+For \(S=\{v\}\), the same proof gives the singleton row \(x(\delta(v))\ge 2s_v\). For larger \(S\), (TF) forbids a fractional or integral selected edge from hiding inside a terminal-free region with only one escape edge.
+
+The rows can be separated exactly. For a fixed nonterminal edge \(e=\{u,v\}\), contract \(u\) and \(v\), make the terminals the sink side, and compute a minimum \(u\)-to-\(R\) cut with capacities \(x\). If its value is less than \(2x_e\), the corresponding source side is a violated (TF) row. Thus this is a genuine polynomial-time separation oracle, not an exponential reduction search.
+
+This family is a good example of the distinction between “a tree is connected” and “a tree is a minimal connected object.” It attacks a failure mode that ordinary terminal cuts cannot see. Its scope must be restricted to nonnegative-cost STP or another model for which an inclusion-minimal optimum is guaranteed; it must not be copied blindly into a negative-cost arborescence transformation.
+
+### 11.4 Replacing laminar moat duals with a non-moat certificate grammar
+
+The recent BCR-gap papers make a sharp negative statement: a broad moat-growing class cannot certify below \(12/7\), even though the best general BCR upper bound is now \(1.898\). The conclusion for this project is not “improve moat-growing.” It is “change the dual language.”
+
+The numerical frontier is from [Byrka--Grandoni--Traub](https://arxiv.org/abs/2407.19905) and [Paschmanns--Traub](https://arxiv.org/abs/2602.19879). The latter explicitly isolates the moat-growing barrier; the construction below is intended to leave that restricted proof class.
+
+The proposed language is a **crossing-support dual grammar**:
+
+1. a laminar cut-packing core for the easy regions;
+2. a bounded number of crossing cut packets around a fractional obstruction;
+3. terminal-partition rows for multiway mergers;
+4. cycle/rank corrections for shared physical edges.
+
+The dual support is allowed to be non-laminar by construction. When two growing terminal regions want to charge the same corridor, the certificate does not silently merge them. It records either a crossing cut packet or a partition row, and if the corridor is cycle-supported it records a rank correction. The resulting feasibility is checked by (MC), so the construction never relies on a geometric intuition about moats.
+
+The concrete conjecture to test is:
+
+> **Bounded-crossing obstruction conjecture.** After cycle closure and terminal-free boundary closure, every minimal fractional obstruction to a useful BCR lower bound either violates a small terminal partition inequality or admits a certificate whose cut-support crossing graph has bounded local width.
+
+This is not claimed as a theorem. It is a falsifiable route to a theorem: enumerate minimal fractional extreme points on small graphs, compute their crossing graphs, and look for the smallest obstruction that defeats every \(k\)-partition plus cycle certificate. If the conjecture survives, the next proof target is a decomposition theorem saying that the remaining obstruction can be covered by a finite family of crossing packets. If it fails, the counterexample is more valuable than an average benchmark because it identifies the next missing facet type.
+
+This is the route I would use to attack the authors' laminarity limitation. A universal exact BCR gap bound is still open, but the solver does not need to wait for that theorem: it can optimize over a certificate class that is strictly richer than moat growth and verify every resulting bound.
+
+### 11.5 A mathematically safe bridge to the hypergraphic relaxation
+
+Simply switching to a restricted hypergraphic master is not a lower-bound method. Omitting component variables from a minimization problem can increase the restricted optimum. The missing mathematical bridge is an omitted-column certificate.
+
+This builds on the structural relation between partition/hypergraphic relaxations and BCR established by [Chakrabarty--Könemann--Pritchard](https://arxiv.org/abs/0910.0281); the proposed contribution is the certificate for safely using only a partial component system.
+
+Let \(K\) be a full component spanning terminal set \(Q_K\), with cost \(c_K\). In the partition master, a partition \(\mathcal P\) receives contribution
+
+\[
+\eta_{\mathcal P}(K)
+=\left|\{P\in\mathcal P:P\cap Q_K\ne\varnothing\}\right|-1.
+\]
+
+For dual partition multipliers \(\beta_{\mathcal P}\ge 0\), the component's dual price is
+
+\[
+\Phi_\beta(Q_K)
+=\sum_{\mathcal P}\beta_{\mathcal P}\eta_{\mathcal P}(K).
+\]
+
+Suppose an oracle supplies a certified lower envelope \(\underline c(Q)\) satisfying
+
+\[
+\underline c(Q)\le c_K
+\quad\text{for every full component }K\text{ on }Q.
+\]
+
+Then the restricted master is dual-feasible for every omitted component as soon as
+
+\[
+\underline c(Q)\ge \Phi_\beta(Q)
+\quad\text{for every omitted terminal set }Q.
+\tag{OP}
+\]
+
+Indeed, \(c_K-\Phi_\beta(Q_K)\ge \underline c(Q_K)-\Phi_\beta(Q_K)\ge0\). This is the exact missing proof condition.
+
+The new algorithmic idea is to make \(\underline c\) heterogeneous:
+
+1. exact Dreyfus-Wagner/Dijkstra-Steiner costs for small terminal subsets;
+2. the forest-closed cut certificate for medium subsets;
+3. a cheap metric or cut-packing lower bound for large subsets.
+
+The dual then asks only for terminal sets where the lower envelope fails to dominate \(\Phi_\beta\). Exact pricing is performed on those sets; all other omitted components are certified away by (OP). This is a principled component-pricing scheme, not an unsafe “generate a few components and hope the restricted optimum is a bound.”
+
+The open part is proving that the lower-envelope separation can be kept tractable on general instances. The bounded-terminal version is an immediate research target and directly connects the exact DP literature to the hypergraphic gap literature.
+
+### 11.6 A general exchange-potential abstraction for stronger reductions
+
+The implied bottleneck distance of Rehfeldt and Koch is powerful because it does more than compare two paths: it credits a local alternative that can be exchanged into an optimum. The next mathematical step is to abstract the credit rather than hard-code one bottleneck formula.
+
+Call \(\pi(v,F)\ge0\) a local exchange potential if a separately checkable witness proves:
+
+\[
+\text{whenever an inclusion-minimal Steiner tree }S\text{ uses }v\text{ but omits }F,
+\]
+
+\[
+\text{there is a Steiner tree }S'\text{ using an edge of }F
+\text{ with }c(S')+\pi(v,F)\le c(S).
+\tag{EP}
+\]
+
+The witness may be a single alternative edge, a small exact DP, or a packing of mutually compatible exchanges. Given (EP), define the cost of a replacement walk as its actual edge cost minus the exchange potentials whose witness sets are disjoint and therefore cannot be charged twice. Conditional on proving that compatibility/no-double-counting property, the usual remove-edge, reconnect-components, and exchange-at-intermediate-vertices proof yields:
+
+\[
+\text{if the potential-adjusted bottleneck distance between the endpoints of }e
+\text{ is less than }c(e),
+\]
+
+\[
+\text{then some optimum avoids }e.
+\]
+
+The proof obligation is explicit: every negative credit must have an exchange witness and a no-double-counting condition. Arbitrary LP reduced costs do not satisfy (EP) merely because they are nonnegative. They become useful only after being converted into local exchange witnesses.
+
+This suggests a new **exchange packing oracle**. For a small neighborhood around \(v\), enumerate alternative connections, solve a packing problem for compatible swaps, and use its dual as \(\pi(v,F)\). The scalar maximum used in the existing implied-profit construction is then the one-witness special case. A multi-witness potential could strictly dominate it on graphs where several alternatives are jointly available but no single alternative is strong enough.
+
+This is a real mathematical research target: prove a sufficient compatibility condition for exchange witnesses, then prove that the resulting potential-adjusted bottleneck distance dominates the current implied distance. The proof is local and therefore much more approachable than the global BCR integrality-gap problem.
+
+### 11.7 Multi-root coupling: use root invariance as a strengthening, not a branching heuristic
+
+The value of the basic BCR is invariant under the selected root, so changing the root alone cannot strengthen that relaxation. A different construction is to couple several root copies through one common undirected vector \(x\).
+
+For a small root set \(Q\subseteq R\), introduce \(y^q\) for each \(q\in Q\) and impose
+
+\[
+y^q_{uv}+y^q_{vu}=x_{\{u,v\}}\qquad(q\in Q),
+\]
+
+with the rooted cut and arborescence constraints for every \(q\). Every tree is feasible: orient the same tree away from each root separately. The common \(x\) means the fractional solution must admit all these orientations simultaneously. The resulting projection is at least as strong as a single-root extended formulation; strictness is a testable question, not an assumption.
+
+This is the STP analogue of the multi-root direction mentioned in the recent BCR literature for Steiner forest. The useful conjecture is modest:
+
+> Two or three roots chosen from the terminal core may remove fractional orientation artifacts that survive one-root BCR, especially after forest closure.
+
+The finite polyhedral microscope should decide whether this is a genuine strengthening or merely a more expensive representation of existing rows. Either result is useful: a strict example gives a new relaxation; a redundancy proof prevents wasted effort.
+
+### 11.8 What can be claimed as solved, and what remains an open theorem
+
+The following claims are now mathematically justified within this memo:
+
+1. Forest, partition, activation, and terminal-free boundary rows preserve the optimum value of nonnegative-cost STP because every optimum has a minimal-tree representative.
+2. The matroid-corrected certificate (MC) is a valid lower bound, and its certified slacks give a valid edge-fixing rule.
+3. Terminal-free boundary rows have an exact min-cut separation oracle.
+4. A restricted hypergraphic master is a lower bound only after the omitted-price condition (OP) is certified.
+
+The following are not solved and should not be presented as solved:
+
+1. the exact integrality gap of BCR;
+2. a universal bound for the crossing-support grammar;
+3. a complete polynomial-time separation oracle for the full forest-closed relaxation;
+4. general full-component pricing;
+5. a proof that the exchange-packing potential strictly dominates the implied bottleneck distance on all instances.
+
+That distinction is the central research discipline. We can contribute new theorems and useful strict strengthenings without pretending that a 2026 open integrality-gap problem has disappeared.
+
+### 11.9 The mathematical work order
+
+The order I recommend for the research team is:
+
+1. Prove and formalize \(\mathrm{FC\text{-}BCR}\), including the exact domain where the minimal-tree rows are valid.
+2. Implement the mixed certificate LP over cuts, partitions, cycle rows, and terminal-free boundary rows; require exact replay of (MC).
+3. Build the finite obstruction catalogue and record the smallest graph defeating each closure.
+4. Test the bounded-crossing obstruction conjecture on those minimal examples.
+5. Build the omitted-component envelope and prove pricing certificates for bounded terminal subsets.
+6. Only then attempt a non-moat BCR-gap proof using the obstruction catalogue and crossing grammar.
+7. Generalize reductions through exchange potentials, with a formal witness checker before any new credit is trusted.
+
+The important shift is that the solver is no longer treated as “BCR plus papers.” It becomes an experimental laboratory for new polyhedral closures and proof systems. The first concrete mathematical deliverable is not another heuristic: it is a strictly stronger, independently certifiable relaxation and a counterexample-driven program for discovering the next missing inequality.

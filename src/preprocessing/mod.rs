@@ -276,19 +276,22 @@ pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (Reduc
     let mut total_fixed: Vec<EdgeId> = Vec::new();
     let mut lb_offset = 0.0;
 
+    let mut first_iteration = true;
+
     loop {
         let (deg_removed, fixed, offset) = degree::degree_reductions(&mut rg);
         total_fixed.extend(fixed);
         lb_offset += offset;
 
-        let dist_removed = distance::distance_reductions(&mut rg);
+        // SD test only on first pass (before contractions distort distances)
+        // or when there are no contracted edges
+        let dist_removed = if first_iteration || rg.contracted_edges.is_empty() {
+            distance::distance_reductions(&mut rg)
+        } else {
+            0
+        };
+        first_iteration = false;
 
-        // NOTE: Bottleneck reductions are disabled because the current formula
-        // BSD(u,v) = min_t max(bd(u,t), bd(v,t)) is a LOWER BOUND on the true
-        // Bottleneck Steiner Distance. The optimal bottleneck paths from u to t
-        // and v to t may share edges, making the concatenated path infeasible.
-        // This can cause incorrect edge removals (verified on SteinLib b01).
-        // TODO: Implement using Voronoi-based BSD or exact path verification.
         let _bn_removed = 0u32;
 
         if deg_removed + dist_removed == 0 {
