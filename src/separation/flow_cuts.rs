@@ -61,7 +61,10 @@ impl<'a> FlowCutSeparator<'a> {
         }
         let ws = self.workspace.as_mut().unwrap();
 
-        // Standard terminal separation
+        // Standard terminal separation with early termination.
+        // Once we find enough violated cuts, stop computing max-flows for
+        // the remaining terminals. The solver only adds ~30 per round anyway.
+        let max_violated = 50;
         for &terminal in self.terminals {
             if terminal == self.root {
                 continue;
@@ -77,6 +80,9 @@ impl<'a> FlowCutSeparator<'a> {
                     separated_terminal: terminal,
                     violation,
                 });
+                if violated_cuts.len() >= max_violated {
+                    break;
+                }
             }
         }
 

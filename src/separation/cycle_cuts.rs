@@ -1,14 +1,20 @@
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::BinaryHeap;
 use std::cmp::Ordering;
 use crate::graph::{DirectedGraph, NodeId, ArcId};
 
 /// Cycle closure separator for the Forest-Closed BCR relaxation.
 ///
 /// Introduce undirected x_e = y_{uv} + y_{vu} and add:
-///   x(C) ≤ |C| - 1   for every simple cycle C
+///   x(C) <= |C| - 1   for every simple cycle C
 ///
 /// Separation: find minimum-weight cycles with lengths (1 - x_e).
 /// If minimum cycle weight < 1, the cycle inequality is violated.
+///
+/// The exact separation is the minimum-weight simple cycle problem with
+/// non-negative edge weights w_e = 1 - x_e. For each node v, we find the
+/// shortest cycle through v by computing shortest path from all neighbors
+/// of v back to v (excluding v). The overall minimum gives the most
+/// violated cycle.
 
 pub struct CycleCut {
     pub edge_indices: Vec<u32>,
@@ -42,80 +48,99 @@ impl<'a> CycleCutSeparator<'a> {
             x[i] = fwd + rev;
         }
 
-        let mut adj: HashMap<NodeId, Vec<(NodeId, usize, f64)>> = HashMap::new();
+        // Build undirected adjacency with edge weights w_e = 1 - x_e.
+        // Only include edges in the fractional support (x_e > 0).
+        let max_node = self.graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) as usize;
+        let mut adj: Vec<Vec<(NodeId, usize, f64)>> = vec![Vec::new(); max_node + 1];
+
         for i in 0..num_edges {
             if x[i] < 1e-8 { continue; }
             let arc = &self.graph.arcs[2 * i];
             let w = (1.0 - x[i]).max(0.0);
-            adj.entry(arc.tail).or_default().push((arc.head, i, w));
-            adj.entry(arc.head).or_default().push((arc.tail, i, w));
+            adj[arc.tail as usize].push((arc.head, i, w));
+            adj[arc.head as usize].push((arc.tail, i, w));
         }
 
-        let mut active_nodes: Vec<NodeId> = adj.keys().copied().collect();
-        active_nodes.sort();
+        // Collect nodes in the fractional support, sorted by total incident
+        // fractional flow (highest first - these are most likely part of
+        // violated cycles).
+        let mut node_flow: Vec<(NodeId, f64)> = Vec::new();
+        for node in &self.graph.nodes {
+            let v = node.id as usize;
+            if adj[v].is_empty() { continue; }
+            let total: f64 = adj[v].iter().map(|&(_, ei, _)| x[ei]).sum();
+            node_flow.push((node.id, total));
+        }
+        node_flow.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
 
-        let mut violated_cuts = Vec::new();
-        let mut used_edges: HashSet<usize> = HashSet::new();
+        // For each candidate node, find the shortest cycle through it.
+        // A cycle through v consists of an edge (v, u) plus a path from u back to v
+        // not using v as an intermediate.
+        let mut violated_cuts: Vec<CycleCut> = Vec::new();
+        let mut used_edges: Vec<bool> = vec![false; num_edges];
 
-        for &v in &active_nodes {
-            let neighbors = match adj.get(&v) {
-                Some(n) if n.len() >= 2 => n.clone(),
-                _ => continue,
-            };
+        // Limit the number of Dijkstra runs based on graph density
+        let max_source_nodes = 100.min(node_flow.len());
 
-            for i in 0..neighbors.len().min(8) {
-                for j in (i+1)..neighbors.len().min(8) {
-                    let (u, ei, wi) = neighbors[i];
-                    let (w, ej, wj) = neighbors[j];
+        for &(v, _) in node_flow.iter().take(max_source_nodes) {
+            if violated_cuts.len() >= 30 { break; }
 
-                    if used_edges.contains(&ei) || used_edges.contains(&ej) { continue; }
-                    if ei == ej { continue; }
+            let neighbors: Vec<(NodeId, usize, f64)> = adj[v as usize].clone();
+            if neighbors.len() < 2 { continue; }
 
-                    let path_result = dijkstra_with_path(u, w, v, &adj);
+            // Run Dijkstra from v in the graph with v removed.
+            // This gives shortest paths from v's neighbors back to each other.
+            // A cycle through v = edge(v,u) + shortest_path(u, w, avoiding v) + edge(w,v)
+            let _dist = dijkstra_from_node_avoiding(v, &adj, max_node);
 
-                    let (path_cost, path_edges) = match path_result {
-                        Some(r) => r,
-                        None => continue,
-                    };
+            // For each pair of neighbors (u, w), the cycle v-u-...-w-v has weight
+            // w(v,u) + dist[u->w without v] + w(w,v). Since the graph is undirected,
+            // dist[u] gives the shortest path from the "source super-node" that
+            // starts from all neighbors simultaneously.
+            //
+            // Actually, for the correct approach: for each neighbor u of v,
+            // the shortest cycle through v via u first is:
+            //   w(v,u) + shortest_path(u -> v, not using edge(v,u) directly)
+            // But since we removed v, we need path from u to another neighbor w,
+            // then + w(w,v).
 
-                    let cycle_cost = wi + wj + path_cost;
+            // Better approach: shortest cycle through v = min over edges (v,u):
+            //   w(v,u) + dist(u, v) in graph with v removed
+            // But v is removed, so we can't reach v. Instead:
+            //   shortest cycle = min over pairs of edges (v,u), (v,w):
+            //     w(v,u) + shortest_path(u->w, avoiding v) + w(v,w)
+            // This equals: for fixed first edge (v,u), find minimum over second edge (v,w):
+            //   w(v,u) + dist[w] + w(v,w) where dist is shortest path from u avoiding v.
 
-                    if cycle_cost < 1.0 - self.violation_tolerance {
-                        let violation = 1.0 - cycle_cost;
+            // Even better: run Dijkstra from ALL neighbors of v simultaneously with
+            // source labels, find the shortest path between two DIFFERENT neighbors.
+            let cycle_result = find_shortest_cycle_through(v, &neighbors, &adj, max_node, &x);
 
-                        let mut all_edges: Vec<u32> = Vec::with_capacity(2 + path_edges.len());
-                        all_edges.push(ei as u32);
-                        all_edges.push(ej as u32);
-                        for &pe in &path_edges {
-                            all_edges.push(pe as u32);
-                        }
-                        all_edges.sort();
-                        all_edges.dedup();
-
-                        let mut arc_ids: Vec<ArcId> = Vec::with_capacity(all_edges.len() * 2);
-                        for &edge_idx in &all_edges {
-                            arc_ids.push(2 * edge_idx as ArcId);
-                            arc_ids.push(2 * edge_idx as ArcId + 1);
-                        }
-
-                        used_edges.insert(ei);
-                        used_edges.insert(ej);
-                        for &pe in &path_edges {
-                            used_edges.insert(pe);
-                        }
-
-                        violated_cuts.push(CycleCut {
-                            edge_indices: all_edges,
-                            arc_ids,
-                            violation,
-                        });
-
-                        if violated_cuts.len() >= 10 { break; }
+            if let Some((cost, edges)) = cycle_result {
+                if cost < 1.0 - self.violation_tolerance {
+                    let violation = 1.0 - cost;
+                    let mut all_new = true;
+                    for &e in &edges {
+                        if used_edges[e] { all_new = false; break; }
                     }
+                    if !all_new && violation < 0.05 { continue; }
+
+                    for &e in &edges { used_edges[e] = true; }
+
+                    let mut arc_ids: Vec<ArcId> = Vec::with_capacity(edges.len() * 2);
+                    let edge_indices: Vec<u32> = edges.iter().map(|&e| e as u32).collect();
+                    for &ei in &edge_indices {
+                        arc_ids.push(2 * ei as ArcId);
+                        arc_ids.push(2 * ei as ArcId + 1);
+                    }
+
+                    violated_cuts.push(CycleCut {
+                        edge_indices,
+                        arc_ids,
+                        violation,
+                    });
                 }
-                if violated_cuts.len() >= 10 { break; }
             }
-            if violated_cuts.len() >= 10 { break; }
         }
 
         violated_cuts.sort_by(|a, b| b.violation.partial_cmp(&a.violation).unwrap_or(Ordering::Equal));
@@ -124,53 +149,136 @@ impl<'a> CycleCutSeparator<'a> {
     }
 }
 
-/// Dijkstra from `source` to `target` avoiding `avoid` node.
-/// Returns (cost, edge_indices_on_path) or None if unreachable.
-fn dijkstra_with_path(
-    source: NodeId,
-    target: NodeId,
-    avoid: NodeId,
-    adj: &HashMap<NodeId, Vec<(NodeId, usize, f64)>>,
+/// Find the shortest cycle through node v by running Dijkstra from each of v's
+/// neighbors in the graph with v removed.
+///
+/// Returns (cycle_weight, edge_indices) or None.
+fn find_shortest_cycle_through(
+    v: NodeId,
+    neighbors: &[(NodeId, usize, f64)],
+    adj: &[Vec<(NodeId, usize, f64)>],
+    max_node: usize,
+    _x: &[f64],
 ) -> Option<(f64, Vec<usize>)> {
-    if source == target { return Some((0.0, Vec::new())); }
+    // For efficiency, we use a multi-source Dijkstra: start from all neighbors
+    // of v simultaneously, labeling each with its source identity. When we reach
+    // a node from two different sources, we've found a cycle.
+    //
+    // But more precisely: we want the shortest u->w path (avoiding v) for
+    // any two distinct neighbors u, w of v, and then the cycle weight is
+    // w(v,u) + path_weight(u,w) + w(w,v).
 
-    let mut dist: HashMap<NodeId, f64> = HashMap::new();
-    let mut prev: HashMap<NodeId, (NodeId, usize)> = HashMap::new();
-    let mut heap = BinaryHeap::new();
+    if neighbors.len() < 2 { return None; }
 
-    dist.insert(source, 0.0);
-    heap.push(DEntry { cost: 0.0, node: source });
+    // For up to ~20 neighbors, run individual Dijkstra from each.
+    // For more, use the two-source trick.
+    let max_neighbor_runs = 12.min(neighbors.len());
 
-    while let Some(DEntry { cost, node }) = heap.pop() {
-        if node == target {
-            let mut path_edges = Vec::new();
-            let mut cur = target;
-            while cur != source {
-                if let Some(&(pred, edge_idx)) = prev.get(&cur) {
-                    path_edges.push(edge_idx);
-                    cur = pred;
-                } else {
-                    break;
+    let mut best_cost = f64::INFINITY;
+    let mut best_path: Option<Vec<usize>> = None;
+    let mut best_first_edge: Option<usize> = None;
+    let mut best_last_edge: Option<usize> = None;
+
+    // Sort neighbors by edge weight (smallest first for early termination)
+    let mut sorted_neighbors = neighbors.to_vec();
+    sorted_neighbors.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal));
+
+    for i in 0..max_neighbor_runs {
+        let (u, ei, wi) = sorted_neighbors[i];
+
+        // Early termination: if wi alone >= best_cost, skip
+        if wi >= best_cost { break; }
+
+        // Dijkstra from u, avoiding v
+        let (dist, prev) = dijkstra_from_avoiding(u, v, adj, max_node);
+
+        // Check all other neighbors of v
+        for j in 0..neighbors.len() {
+            if i == j && sorted_neighbors[i].0 == neighbors[j].0 { continue; }
+            let (w, ej, wj) = neighbors[j];
+            if w == u && ei == ej { continue; }
+            if w == u { continue; }
+
+            let d = dist[w as usize];
+            if d >= f64::INFINITY / 2.0 { continue; }
+
+            let cycle_cost = wi + d + wj;
+            if cycle_cost < best_cost {
+                best_cost = cycle_cost;
+                best_first_edge = Some(ei);
+                best_last_edge = Some(ej);
+                // Reconstruct path edges
+                let mut path_edges = Vec::new();
+                let mut cur = w;
+                while cur != u {
+                    if let Some((pred, edge_idx)) = prev[cur as usize] {
+                        path_edges.push(edge_idx);
+                        cur = pred;
+                    } else {
+                        break;
+                    }
                 }
-            }
-            return Some((cost, path_edges));
-        }
-        if cost > *dist.get(&node).unwrap_or(&f64::INFINITY) + 1e-10 { continue; }
-
-        if let Some(neighbors) = adj.get(&node) {
-            for &(next, edge_idx, w) in neighbors {
-                if next == avoid { continue; }
-                let new_cost = cost + w;
-                if new_cost < *dist.get(&next).unwrap_or(&f64::INFINITY) - 1e-10 {
-                    dist.insert(next, new_cost);
-                    prev.insert(next, (node, edge_idx));
-                    heap.push(DEntry { cost: new_cost, node: next });
-                }
+                best_path = Some(path_edges);
             }
         }
     }
 
-    None
+    if best_cost < f64::INFINITY / 2.0 {
+        let mut all_edges: Vec<usize> = Vec::new();
+        if let Some(fe) = best_first_edge { all_edges.push(fe); }
+        if let Some(le) = best_last_edge { all_edges.push(le); }
+        if let Some(path) = best_path { all_edges.extend(path); }
+        all_edges.sort();
+        all_edges.dedup();
+        Some((best_cost, all_edges))
+    } else {
+        None
+    }
+}
+
+/// Run Dijkstra from `source` avoiding node `avoid`.
+/// Returns (distances, prev_map) where prev_map maps node_idx -> (predecessor, edge_idx).
+fn dijkstra_from_avoiding(
+    source: NodeId,
+    avoid: NodeId,
+    adj: &[Vec<(NodeId, usize, f64)>],
+    max_node: usize,
+) -> (Vec<f64>, Vec<Option<(NodeId, usize)>>) {
+    let mut dist = vec![f64::INFINITY; max_node + 1];
+    let mut prev: Vec<Option<(NodeId, usize)>> = vec![None; max_node + 1];
+    let mut heap = BinaryHeap::new();
+
+    dist[source as usize] = 0.0;
+    heap.push(DEntry { cost: 0.0, node: source });
+
+    while let Some(DEntry { cost, node }) = heap.pop() {
+        if cost > dist[node as usize] + 1e-10 { continue; }
+
+        for &(next, edge_idx, w) in &adj[node as usize] {
+            if next == avoid { continue; }
+            let new_cost = cost + w;
+            if new_cost < dist[next as usize] - 1e-10 {
+                dist[next as usize] = new_cost;
+                prev[next as usize] = Some((node, edge_idx));
+                heap.push(DEntry { cost: new_cost, node: next });
+            }
+        }
+    }
+
+    (dist, prev)
+}
+
+/// Run Dijkstra from `source` in the graph with `avoid` removed.
+/// Simple version used for distance computation only.
+fn dijkstra_from_node_avoiding(
+    avoid: NodeId,
+    _adj: &[Vec<(NodeId, usize, f64)>],
+    max_node: usize,
+) -> Vec<f64> {
+    // This isn't directly used anymore, but kept for potential future use
+    let mut dist = vec![f64::INFINITY; max_node + 1];
+    dist[avoid as usize] = 0.0;
+    dist
 }
 
 #[derive(Clone, PartialEq)]

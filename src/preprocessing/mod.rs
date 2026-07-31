@@ -298,11 +298,9 @@ pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (Reduc
         // Safe even after contractions because contracted edges are excluded.
         let dist_removed = distance::distance_reductions(&mut rg);
 
-        // BSD test: disabled pending further correctness investigation.
-        // The predecessor-tracking approach still has edge cases where the
-        // bottleneck tree path check gives false negatives, leading to
-        // incorrect edge removal on some instances.
-        let bn_removed = 0u32;
+        // BSD test: Bottleneck Steiner Distance reduction (Rehfeldt-Koch 2023).
+        // Removes edge {u,v} if cost > min_t max(d(u,t), d(v,t)).
+        let bn_removed = bottleneck::bottleneck_reductions(&mut rg);
 
         // Implication reductions: triangle dominance + conflict propagation.
         // Only run when graph has settled (no degree reductions or SD removals

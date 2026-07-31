@@ -494,11 +494,6 @@ impl BranchAndCutSolver {
             lp.base_constraint_count = lp.num_constraints();
         }
 
-        // LP-based reduced-cost fixing disabled: HiGHS dual_columns() values
-        // are unreliable for reduced-cost fixing in the presence of degenerate
-        // LP solutions. The sign convention and degenerate basis effects can
-        // cause incorrect arc elimination.
-
         self.tree.nodes[node_id as usize].dual_bound = node_dual_bound;
 
         if self.is_integer_solution(&lp_solution) {
@@ -508,7 +503,9 @@ impl BranchAndCutSolver {
             }
         }
 
-        if self.tree.nodes_processed % self.config.heuristic_frequency as u64 == 0 {
+        let run_heuristic = is_root_node
+            || self.tree.nodes_processed % self.config.heuristic_frequency as u64 == 0;
+        if run_heuristic {
             if let Some(sol) = self.run_lp_heuristic(&lp_solution) {
                 self.recombination.add_solution(sol.clone());
                 if sol.objective_value < self.tree.global_primal_bound - 1e-9 {
@@ -539,6 +536,10 @@ impl BranchAndCutSolver {
                 }
             }
         }
+
+        // LP-based reduced-cost fixing: DISABLED pending sign convention verification.
+        // HiGHS dual_columns() values may have unexpected sign convention with
+        // activation variables present, leading to incorrect arc elimination.
 
         // Strong branching at the top of the tree: temporarily solve child LPs
         // to determine which variable gives the best dual bound improvement.

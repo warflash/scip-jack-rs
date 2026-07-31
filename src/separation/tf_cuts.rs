@@ -64,23 +64,25 @@ impl<'a> TfCutSeparator<'a> {
 
         let mut violated_cuts = Vec::new();
 
-        // For each non-terminal edge e={u,v} where neither u nor v is terminal
-        for edge_idx in 0..num_edges {
-            if x[edge_idx] < 0.1 { continue; }
+        // Collect candidate edges sorted by x_e descending (most fractional first).
+        // Only check top candidates to avoid O(|E|) max-flow computations on dense graphs.
+        let mut candidates: Vec<(usize, f64)> = (0..num_edges)
+            .filter(|&i| x[i] >= 0.1)
+            .filter(|&i| {
+                let arc = &self.graph.arcs[2 * i];
+                !terminal_set.contains(&arc.tail) && !terminal_set.contains(&arc.head)
+            })
+            .map(|i| (i, x[i]))
+            .collect();
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.truncate(50);
 
+        for (edge_idx, x_val) in candidates {
             let arc = &self.graph.arcs[2 * edge_idx];
             let u = arc.tail;
             let v = arc.head;
+            let threshold = 2.0 * x_val;
 
-            if terminal_set.contains(&u) || terminal_set.contains(&v) {
-                continue;
-            }
-
-            let threshold = 2.0 * x[edge_idx];
-
-            // BFS/max-flow from {u,v} to terminal set with capacities x_e.
-            // Use a simpler approach: BFS-based min-cut via shortest augmenting path.
-            // Source = {u, v} (merged), Sink = any terminal.
             if let Some(cut) = self.find_min_cut_to_terminals(
                 u, v, edge_idx, &x, &adj, &terminal_set, max_node, threshold,
             ) {

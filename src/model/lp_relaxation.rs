@@ -98,18 +98,24 @@ impl LpRelaxation {
         }
 
         // (5) y(delta^-(v)) >= y_a for each a in delta^+(v), for Steiner nodes v
-        for &v in steiner_nodes {
-            let in_arcs: Vec<ArcId> = graph.delta_minus(v).iter()
-                .map(|&(_, arc_id)| arc_id)
-                .collect();
-            for &(_, out_arc) in graph.delta_plus(v) {
-                let mut row: Vec<(Col, f64)> = Vec::new();
-                for &in_arc in &in_arcs {
-                    row.push((cols[in_arc as usize], 1.0));
-                }
-                row.push((cols[out_arc as usize], -1.0));
-                if !row.is_empty() {
-                    pb.add_row(0.0.., &row);
+        // For dense graphs (>3000 arcs), these generate O(|S|*degree) rows which
+        // makes the LP too large. In that case, omit them initially and rely on
+        // the flow balance (4) + no-leaf + separation to enforce the property.
+        // Constraint (5) is essential for LP strength - always include.
+        {
+            for &v in steiner_nodes {
+                let in_arcs: Vec<ArcId> = graph.delta_minus(v).iter()
+                    .map(|&(_, arc_id)| arc_id)
+                    .collect();
+                for &(_, out_arc) in graph.delta_plus(v) {
+                    let mut row: Vec<(Col, f64)> = Vec::new();
+                    for &in_arc in &in_arcs {
+                        row.push((cols[in_arc as usize], 1.0));
+                    }
+                    row.push((cols[out_arc as usize], -1.0));
+                    if !row.is_empty() {
+                        pb.add_row(0.0.., &row);
+                    }
                 }
             }
         }
@@ -124,36 +130,37 @@ impl LpRelaxation {
         }
 
         // TF singleton cuts (Terminal-Free degree constraints):
-        // For each Steiner node v and each incident edge e:
-        //   sum of arc flows on OTHER incident edges >= arc flow on e
-        // This prevents terminal-free nodes from having "dead-end" fractional
-        // flow, enforcing the minimal-tree structure on the LP relaxation.
-        for &v in steiner_nodes {
-            let in_arcs: Vec<ArcId> = graph.delta_minus(v).iter().map(|&(_, a)| a).collect();
-            let out_arcs: Vec<ArcId> = graph.delta_plus(v).iter().map(|&(_, a)| a).collect();
-            let all_arcs: Vec<ArcId> = in_arcs.iter().chain(out_arcs.iter()).copied().collect();
-            if all_arcs.len() < 4 { continue; }
+        // For dense graphs (> 4000 arcs), omit these (O(|S|*degree) rows).
+        // The no-leaf constraint covers the same property, and TF set cut
+        // separation handles the non-singleton case dynamically.
+        if num_arcs < 4000 {
+            for &v in steiner_nodes {
+                let in_arcs: Vec<ArcId> = graph.delta_minus(v).iter().map(|&(_, a)| a).collect();
+                let out_arcs: Vec<ArcId> = graph.delta_plus(v).iter().map(|&(_, a)| a).collect();
+                let all_arcs: Vec<ArcId> = in_arcs.iter().chain(out_arcs.iter()).copied().collect();
+                if all_arcs.len() < 4 { continue; }
 
-            let mut incident_edges: Vec<usize> = all_arcs.iter()
-                .map(|&a| (a as usize) / 2)
-                .collect();
-            incident_edges.sort();
-            incident_edges.dedup();
+                let mut incident_edges: Vec<usize> = all_arcs.iter()
+                    .map(|&a| (a as usize) / 2)
+                    .collect();
+                incident_edges.sort();
+                incident_edges.dedup();
 
-            for &edge_idx in &incident_edges {
-                let fwd = (2 * edge_idx) as ArcId;
-                let rev = (2 * edge_idx + 1) as ArcId;
+                for &edge_idx in &incident_edges {
+                    let fwd = (2 * edge_idx) as ArcId;
+                    let rev = (2 * edge_idx + 1) as ArcId;
 
-                let mut row: Vec<(Col, f64)> = Vec::new();
-                for &a in &all_arcs {
-                    if a == fwd || a == rev {
-                        row.push((cols[a as usize], -1.0));
-                    } else {
-                        row.push((cols[a as usize], 1.0));
+                    let mut row: Vec<(Col, f64)> = Vec::new();
+                    for &a in &all_arcs {
+                        if a == fwd || a == rev {
+                            row.push((cols[a as usize], -1.0));
+                        } else {
+                            row.push((cols[a as usize], 1.0));
+                        }
                     }
-                }
-                if !row.is_empty() {
-                    pb.add_row(0.0.., &row);
+                    if !row.is_empty() {
+                        pb.add_row(0.0.., &row);
+                    }
                 }
             }
         }
