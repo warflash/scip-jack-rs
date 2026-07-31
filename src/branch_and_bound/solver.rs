@@ -301,6 +301,13 @@ impl BranchAndCutSolver {
             self.config.cut_rounds_per_node
         };
 
+        let mut separator = FlowCutSeparator::new(
+            &self.graph,
+            self.root,
+            &self.terminals,
+        );
+        let mut cycle_sep = CycleCutSeparator::new(&self.graph);
+
         for _round in 0..max_rounds {
             let obj = self.base_lp.as_mut().unwrap().solve();
             self.total_lp_solves += 1;
@@ -317,20 +324,7 @@ impl BranchAndCutSolver {
 
             lp_solution = self.base_lp.as_ref().unwrap().get_solution().to_vec();
 
-            // LP-based reduced-cost fixing: if an arc's LP reduced cost
-            // exceeds the gap (UB - LB), then that arc is 0 in every optimal solution.
-            // Only apply AFTER the cut loop stabilizes (not during), to avoid
-            // fixing based on reduced costs from an early, weak LP relaxation.
-            // The actual fixing happens after the cut loop (below).
-
-            let mut separator = FlowCutSeparator::new(
-                &self.graph,
-                self.root,
-                &self.terminals,
-            );
             let flow_cuts = separator.find_violated_cuts(&lp_solution);
-
-            let mut cycle_sep = CycleCutSeparator::new(&self.graph);
             let cycle_cuts = cycle_sep.find_violated_cuts(&lp_solution);
 
             if flow_cuts.is_empty() && cycle_cuts.is_empty() {
@@ -369,6 +363,12 @@ impl BranchAndCutSolver {
             }
             lp.base_constraint_count = lp.num_constraints();
         }
+
+        // LP-based reduced-cost fixing: disabled pending investigation.
+        // Re-enabling causes b18 regression (220 vs known optimal 218).
+        // The reduced costs from HiGHS's dual_columns() interact with
+        // preprocessing in ways that occasionally eliminate optimal arcs.
+        // TODO: investigate HiGHS sign convention and arc-pair symmetry.
 
         self.tree.nodes[node_id as usize].dual_bound = node_dual_bound;
 

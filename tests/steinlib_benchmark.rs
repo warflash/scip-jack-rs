@@ -244,6 +244,19 @@ fn test_d01_optimal() {
     assert!(r.is_feasible(), "d01: {} < opt {}", r.result.primal_bound, r.optimal);
 }
 
+#[test]
+fn test_d_series_dual_validity() {
+    for name in &["d01", "d02", "d06", "d07", "d11", "d12", "d16", "d17"] {
+        let path = format!("tests/D/{}.stp", name);
+        if !std::path::Path::new(&path).exists() { continue; }
+        let r = solve(&path, 30.0);
+        r.print();
+        assert!(r.result.dual_bound <= r.optimal + 1e-4,
+            "{}: dual {:.4} > optimal {:.4} — preprocessing too aggressive!",
+            r.name, r.result.dual_bound, r.optimal);
+    }
+}
+
 // === Full benchmarks (run with --ignored) ===
 
 fn run_series(label: &str, optima: &[(&str, f64)], series: &str, time_limit: f64) {
