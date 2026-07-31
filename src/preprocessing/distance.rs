@@ -39,10 +39,11 @@ pub fn distance_reductions(graph: &mut ReducibleGraph) -> u32 {
             continue;
         }
 
-        // Check: is there a terminal t such that d(src, t) + d(dst, t) <= cost?
+        // Check: is there a terminal t such that d(src, t) + d(dst, t) < cost?
+        // (Strict inequality: the alternative path must be STRICTLY cheaper
+        // for the edge to be provably redundant)
         let mut can_remove = false;
         for (idx, &t) in terminal_list.iter().enumerate() {
-            // Skip if t is one of the endpoints (trivial path)
             if t == src || t == dst {
                 continue;
             }
@@ -50,7 +51,7 @@ pub fn distance_reductions(graph: &mut ReducibleGraph) -> u32 {
             let d_src_t = terminal_dists[idx][src as usize];
             let d_dst_t = terminal_dists[idx][dst as usize];
 
-            if d_src_t + d_dst_t <= cost - 1e-9 {
+            if d_src_t + d_dst_t < cost - 1e-9 {
                 can_remove = true;
                 break;
             }
@@ -62,39 +63,9 @@ pub fn distance_reductions(graph: &mut ReducibleGraph) -> u32 {
         }
     }
 
-    // Long edge test: remove edges that are more expensive than the sum of shortest paths
-    // from both endpoints to their nearest terminals (if endpoints are Steiner nodes)
-    let valid_edges: Vec<(u32, u32, u32, f64)> = graph.edges.iter()
-        .filter(|e| graph.is_edge_valid(e.id))
-        .map(|e| (e.id, e.src, e.dst, e.cost))
-        .collect();
-
-    for (eid, src, dst, cost) in valid_edges {
-        if !graph.is_edge_valid(eid) {
-            continue;
-        }
-
-        // If both endpoints are Steiner nodes, check if the edge is dominated
-        if !graph.is_terminal(src) && !graph.is_terminal(dst) {
-            // Find nearest terminal distances for each endpoint
-            let nearest_src = terminal_list.iter().enumerate()
-                .map(|(idx, _)| terminal_dists[idx][src as usize])
-                .fold(f64::INFINITY, f64::min);
-
-            let nearest_dst = terminal_list.iter().enumerate()
-                .map(|(idx, _)| terminal_dists[idx][dst as usize])
-                .fold(f64::INFINITY, f64::min);
-
-            // If the edge cost exceeds both nearest terminal distances summed,
-            // it cannot be in any optimal solution
-            if nearest_src < f64::INFINITY && nearest_dst < f64::INFINITY {
-                if cost > nearest_src + nearest_dst + 1e-9 {
-                    graph.remove_edge(eid);
-                    removed += 1;
-                }
-            }
-        }
-    }
+    // The "long edge" test is only valid when the nearest terminals are the SAME terminal.
+    // If d(u,t) + d(v,t) <= c({u,v}) for some terminal t, the SD test above already handles it.
+    // The general "nearest terminal sum" test is NOT sound for different terminals.
 
     removed
 }
