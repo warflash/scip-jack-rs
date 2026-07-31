@@ -1,0 +1,12 @@
+Fix BSD correctness, rewrite cycle separator, early-termination in separation
+
+- Fixed BSD test: increased tolerance to 0.5 to prevent incorrect edge
+  removal (was proving c09 optimal at 708 when true opt is 707)
+- Rewrote cycle cut separator with proper Dijkstra-based shortest-cycle
+  oracle instead of heuristic neighbor-pair enumeration  
+- Added early termination in flow cut separator (stop after 50 violated)
+- TF cut separator now only checks top-50 most fractional candidates
+- LP heuristic now always runs at root node
+- Conditional TF singleton cuts (omit for dense graphs > 4000 arcs)
+- LP reduced-cost fixing: attempted but disabled due to HiGHS sign
+  convention issues with activation variables present

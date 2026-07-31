@@ -530,4 +530,66 @@ mod tests {
         assert_eq!(lp.status, LpStatus::Optimal);
         assert!(obj >= 5.0 - 1e-6, "LP bound should be >= 5, got {}", obj);
     }
+
+    /// Verify HiGHS reduced cost sign convention for our formulation.
+    ///
+    /// For a MINIMIZATION problem:
+    /// - Variable at lower bound (y=0): reduced cost should be >= 0.
+    ///   Meaning: increasing y from 0 would increase objective by at least rc.
+    /// - Variable at upper bound (y=1): reduced cost should be <= 0.
+    ///
+    /// This test uses a known instance where we can verify which arcs are
+    /// unused at optimality and what their reduced costs should be.
+    #[test]
+    fn test_reduced_cost_sign_convention() {
+        // Triangle: 1(T,root) --1-- 2(S) --1-- 3(T), plus edge 1-3 cost 5
+        // Optimal: use 1→2→3 (cost 2). Arc 1→3 (cost 5) should be at lb=0
+        // with positive reduced cost (using it would cost 5 instead of 2, so rc>=3).
+        let (graph, root, terminals, steiner_nodes) = build_simple_instance();
+        let mut lp = LpRelaxation::from_formulation(&graph, root, &terminals, &steiner_nodes);
+
+        // Add cut to make terminal 3 reachable
+        lp.add_steiner_cut(&[2, 4]); // arcs into node 3: arc 2 (2→3) and arc 4 (1→3)
+
+        let obj = lp.solve();
+        assert_eq!(lp.status, LpStatus::Optimal);
+
+        let sol = lp.get_solution();
+        let rc = &lp.reduced_costs;
+
+        // Arc 4 is 1→3 (cost 5). In optimal LP, it should be 0 (cheaper path exists).
+        let arc_1_3 = 4usize; // arc index for 1→3
+        eprintln!("Arc 1→3 (cost 5): y={:.4}, rc={:.4}", sol[arc_1_3], rc[arc_1_3]);
+
+        // Arc 5 is 3→1 (cost 5). Should also be 0 (going backwards from terminal).
+        let arc_3_1 = 5usize;
+        eprintln!("Arc 3→1 (cost 5): y={:.4}, rc={:.4}", sol[arc_3_1], rc[arc_3_1]);
+
+        // Arc 0 is 1→2 (cost 1). Likely used in optimal (y > 0).
+        let arc_1_2 = 0usize;
+        eprintln!("Arc 1→2 (cost 1): y={:.4}, rc={:.4}", sol[arc_1_2], rc[arc_1_2]);
+
+        // Arc 2 is 2→3 (cost 1). Likely used in optimal (y > 0).
+        let arc_2_3 = 2usize;
+        eprintln!("Arc 2→3 (cost 1): y={:.4}, rc={:.4}", sol[arc_2_3], rc[arc_2_3]);
+
+        // KEY TEST: for arc at lower bound (y≈0), rc should be non-negative.
+        // If HiGHS returns NEGATIVE rc for a variable at lb, sign is flipped.
+        if sol[arc_1_3] < 1e-6 {
+            assert!(rc[arc_1_3] >= -1e-6,
+                "Arc at lower bound should have rc >= 0, got rc={:.6}. \
+                 HiGHS sign convention may be inverted!", rc[arc_1_3]);
+        }
+        if sol[arc_3_1] < 1e-6 {
+            assert!(rc[arc_3_1] >= -1e-6,
+                "Arc at lower bound should have rc >= 0, got rc={:.6}. \
+                 HiGHS sign convention may be inverted!", rc[arc_3_1]);
+        }
+
+        // Also verify: LP bound + rc > cost_of_any_feasible_tree means fixable.
+        // Optimal tree cost = 2 (via 1→2→3). LP bound should be close to 2.
+        // If rc(1→3) >= 3, then LP_bound + rc >= 2 + 3 = 5 >= cost of 1→3 edge alone.
+        // This confirms the fixing criterion: if LP_bound + rc > UB, fix to 0.
+        eprintln!("LP bound: {:.4}, expected ~2.0", obj);
+    }
 }

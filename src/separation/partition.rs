@@ -327,17 +327,16 @@ impl<'a> PartitionSeparator<'a> {
             return (f64::INFINITY, Vec::new());
         }
 
-        // Collect arcs crossing from root_component to its complement
+        // Collect ALL arcs crossing from root_component to its complement.
+        // The partition inequality requires ALL crossing arcs in the LHS,
+        // not just those with positive flow (otherwise the cut would be invalid).
         let mut crossing_arcs = Vec::new();
         let mut total_flow = 0.0;
 
         for arc in &self.graph.arcs {
             if root_component.contains(&arc.tail) && !root_component.contains(&arc.head) {
-                let flow = lp_solution.get(arc.id as usize).copied().unwrap_or(0.0);
-                if flow > 1e-10 {
-                    crossing_arcs.push(arc.id);
-                    total_flow += flow;
-                }
+                crossing_arcs.push(arc.id);
+                total_flow += lp_solution.get(arc.id as usize).copied().unwrap_or(0.0);
             }
         }
 

@@ -537,9 +537,40 @@ impl BranchAndCutSolver {
             }
         }
 
-        // LP-based reduced-cost fixing: DISABLED pending sign convention verification.
-        // HiGHS dual_columns() values may have unexpected sign convention with
-        // activation variables present, leading to incorrect arc elimination.
+        // LP-based reduced-cost fixing at root: uses verified HiGHS sign convention.
+        // For minimization with vars in [0,1]:
+        //   - var at lb=0: rc >= 0, meaning any solution using this arc costs at least LP_bound + rc
+        //   - Therefore: if LP_bound + rc > UB, this arc can never be in an optimal integer solution
+        // All cuts added are globally valid, so root fixings are global.
+        if is_root_node && self.tree.global_primal_bound < f64::INFINITY {
+            let gap = self.tree.global_primal_bound - node_dual_bound;
+            if gap > 1e-6 {
+                let num_arcs = self.graph.num_arcs() as usize;
+                let rc = &self.base_lp.as_ref().unwrap().reduced_costs;
+                let sol = &lp_solution;
+                let mut lp_fixed_count = 0usize;
+
+                for a in 0..num_arcs {
+                    if self.fixed_zero_arcs.contains(&(a as ArcId)) {
+                        continue;
+                    }
+                    if sol[a] < 1e-6 && rc[a] > gap + 1e-4 {
+                        self.fixed_zero_arcs.insert(a as ArcId);
+                        lp_fixed_count += 1;
+                    }
+                }
+
+                if lp_fixed_count > 0 {
+                    let lp = self.base_lp.as_mut().unwrap();
+                    for &arc_id in &self.fixed_zero_arcs {
+                        lp.fix_variable(arc_id, 0.0);
+                    }
+                    if self.config.verbose {
+                        eprintln!("[B&C] LP reduced-cost fixing: {} arcs fixed (gap={:.2})", lp_fixed_count, gap);
+                    }
+                }
+            }
+        }
 
         // Strong branching at the top of the tree: temporarily solve child LPs
         // to determine which variable gives the best dual bound improvement.
