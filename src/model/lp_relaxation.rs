@@ -1,33 +1,29 @@
 use crate::graph::{DirectedGraph, NodeId, ArcId, Cost};
-use highs::{RowProblem, Sense, HighsModelStatus};
+use highs::{RowProblem, Col, Sense, HighsModelStatus, Model as HModel};
 
 /// LP relaxation of the directed cut formulation for the Steiner arborescence problem.
 ///
-/// Manages the constraint matrix and interfaces with HiGHS for solving.
-/// Supports dynamic cut addition for the branch-and-cut framework.
+/// Uses a **persistent HiGHS model**: the model is built once with structural
+/// constraints and then incrementally modified (add rows, change column bounds)
+/// without ever being rebuilt from scratch. This avoids O(constraints) rebuild
+/// overhead on every LP solve.
 pub struct LpRelaxation {
     pub num_vars: u32,
     pub objective: Vec<Cost>,
     pub solution: Vec<f64>,
-    /// LP reduced costs (dual column values) from the last solve
     pub reduced_costs: Vec<f64>,
     pub dual_bound: f64,
-    constraints: Vec<LpConstraint>,
-    pub base_constraint_count: usize,
-    var_lb: Vec<f64>,
-    var_ub: Vec<f64>,
-    base_var_lb: Vec<f64>,
-    base_var_ub: Vec<f64>,
     pub status: LpStatus,
     pub solve_count: u64,
-}
+    pub base_constraint_count: usize,
 
-#[derive(Debug, Clone)]
-struct LpConstraint {
-    vars: Vec<u32>,
-    coeffs: Vec<f64>,
-    lb: f64,
-    ub: f64,
+    model: Option<HModel>,
+    cols: Vec<Col>,
+    current_row_count: usize,
+    base_var_lb: Vec<f64>,
+    base_var_ub: Vec<f64>,
+    var_lb: Vec<f64>,
+    var_ub: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,166 +38,176 @@ pub enum LpStatus {
 impl LpRelaxation {
     /// Create a new LP relaxation from the directed cut formulation.
     ///
-    /// Initializes with:
-    /// - Variables y_a ∈ [0, 1] for each arc
-    /// - Objective: min Σ c(a) * y_a
+    /// Builds the persistent HiGHS model with:
+    /// - Variables y_a in [0, 1] for each arc
+    /// - Objective: min sum c(a) * y_a
     /// - Flow conservation constraints (3a, 3b, 3c)
     /// - Flow balance constraints (4)
+    /// - Arc coupling constraints (5)
+    /// - Anti-symmetry constraints: y_{uv} + y_{vu} <= 1 for each edge pair
     pub fn from_formulation(graph: &DirectedGraph, root: NodeId, terminals: &[NodeId], steiner_nodes: &[NodeId]) -> Self {
         let num_arcs = graph.num_arcs();
         let objective: Vec<Cost> = graph.arcs.iter().map(|a| a.cost).collect();
 
-        let mut lp = Self {
-            num_vars: num_arcs,
-            objective: objective.clone(),
-            solution: vec![0.0; num_arcs as usize],
-            reduced_costs: vec![0.0; num_arcs as usize],
-            dual_bound: f64::NEG_INFINITY,
-            constraints: Vec::new(),
-            base_constraint_count: 0,
-            var_lb: vec![0.0; num_arcs as usize],
-            var_ub: vec![1.0; num_arcs as usize],
-            base_var_lb: vec![0.0; num_arcs as usize],
-            base_var_ub: vec![1.0; num_arcs as usize],
-            status: LpStatus::NotSolved,
-            solve_count: 0,
-        };
+        let mut pb = RowProblem::default();
+        let cols: Vec<Col> = (0..num_arcs as usize)
+            .map(|i| pb.add_column(objective[i], 0.0..=1.0))
+            .collect();
 
-        // (3a) y(δ⁻(root)) = 0: no incoming flow to root
-        let in_root: Vec<(u32, f64)> = graph.delta_minus(root).iter()
-            .map(|&(_, arc_id)| (arc_id, 1.0))
+        // (3a) y(delta^-(root)) = 0
+        let in_root: Vec<(Col, f64)> = graph.delta_minus(root).iter()
+            .map(|&(_, arc_id)| (cols[arc_id as usize], 1.0))
             .collect();
         if !in_root.is_empty() {
-            lp.add_constraint_raw(&in_root, 0.0, 0.0);
+            pb.add_row(0.0..=0.0, &in_root);
         }
 
-        // (3b) y(δ⁻(t)) = 1 for each terminal t ≠ root
+        // (3b) y(delta^-(t)) = 1 for each terminal t != root
         for &t in terminals {
             if t == root { continue; }
-            let in_t: Vec<(u32, f64)> = graph.delta_minus(t).iter()
-                .map(|&(_, arc_id)| (arc_id, 1.0))
+            let in_t: Vec<(Col, f64)> = graph.delta_minus(t).iter()
+                .map(|&(_, arc_id)| (cols[arc_id as usize], 1.0))
                 .collect();
             if !in_t.is_empty() {
-                lp.add_constraint_raw(&in_t, 1.0, 1.0);
+                pb.add_row(1.0..=1.0, &in_t);
             }
         }
 
-        // (3c) y(δ⁻(v)) ≤ 1 for each Steiner node v
+        // (3c) y(delta^-(v)) <= 1 for each Steiner node v
         for &v in steiner_nodes {
-            let in_v: Vec<(u32, f64)> = graph.delta_minus(v).iter()
-                .map(|&(_, arc_id)| (arc_id, 1.0))
+            let in_v: Vec<(Col, f64)> = graph.delta_minus(v).iter()
+                .map(|&(_, arc_id)| (cols[arc_id as usize], 1.0))
                 .collect();
             if !in_v.is_empty() {
-                lp.add_constraint_raw(&in_v, 0.0, 1.0);
+                pb.add_row(0.0..=1.0, &in_v);
             }
         }
 
-        // (4) y(δ⁻(v)) ≤ y(δ+(v)) for each Steiner node v
-        // Rewritten: -y(δ+(v)) + y(δ⁻(v)) ≤ 0
+        // (4) y(delta^-(v)) <= y(delta^+(v)) for each Steiner node v
         for &v in steiner_nodes {
-            let mut vars_coeffs: Vec<(u32, f64)> = Vec::new();
+            let mut row: Vec<(Col, f64)> = Vec::new();
             for &(_, arc_id) in graph.delta_minus(v) {
-                vars_coeffs.push((arc_id, 1.0));
+                row.push((cols[arc_id as usize], 1.0));
             }
             for &(_, arc_id) in graph.delta_plus(v) {
-                vars_coeffs.push((arc_id, -1.0));
+                row.push((cols[arc_id as usize], -1.0));
             }
-            if !vars_coeffs.is_empty() {
-                lp.add_constraint_raw(&vars_coeffs, f64::NEG_INFINITY, 0.0);
+            if !row.is_empty() {
+                pb.add_row(..=0.0, &row);
             }
         }
 
-        // (5) y(δ⁻(v)) ≥ y_a for each a ∈ δ+(v), for Steiner nodes v
-        // Rewritten: y(δ⁻(v)) - y_a ≥ 0
+        // (5) y(delta^-(v)) >= y_a for each a in delta^+(v), for Steiner nodes v
         for &v in steiner_nodes {
             let in_arcs: Vec<ArcId> = graph.delta_minus(v).iter()
                 .map(|&(_, arc_id)| arc_id)
                 .collect();
-
             for &(_, out_arc) in graph.delta_plus(v) {
-                let mut vars_coeffs: Vec<(u32, f64)> = Vec::new();
+                let mut row: Vec<(Col, f64)> = Vec::new();
                 for &in_arc in &in_arcs {
-                    vars_coeffs.push((in_arc, 1.0));
+                    row.push((cols[in_arc as usize], 1.0));
                 }
-                vars_coeffs.push((out_arc, -1.0));
-                if !vars_coeffs.is_empty() {
-                    lp.add_constraint_raw(&vars_coeffs, 0.0, f64::INFINITY);
+                row.push((cols[out_arc as usize], -1.0));
+                if !row.is_empty() {
+                    pb.add_row(0.0.., &row);
                 }
             }
         }
 
-        lp.base_constraint_count = lp.constraints.len();
+        // Anti-symmetry: y_{2i} + y_{2i+1} <= 1 for each undirected edge pair.
+        // In a valid arborescence at most one direction of each edge is used.
+        let num_pairs = num_arcs as usize / 2;
+        for p in 0..num_pairs {
+            let fwd = 2 * p;
+            let rev = 2 * p + 1;
+            pb.add_row(..=1.0, &[(cols[fwd], 1.0), (cols[rev], 1.0)]);
+        }
+
+        let base_rows = pb.num_rows();
+
+        let mut model = pb.optimise(Sense::Minimise);
+        model.set_option("output_flag", false);
+        model.set_option("presolve", "off");
+
+        let var_lb = vec![0.0; num_arcs as usize];
+        let var_ub = vec![1.0; num_arcs as usize];
+
+        let lp = Self {
+            num_vars: num_arcs,
+            objective,
+            solution: vec![0.0; num_arcs as usize],
+            reduced_costs: vec![0.0; num_arcs as usize],
+            dual_bound: f64::NEG_INFINITY,
+            status: LpStatus::NotSolved,
+            solve_count: 0,
+            base_constraint_count: base_rows,
+            model: Some(model),
+            cols,
+            current_row_count: base_rows,
+            base_var_lb: var_lb.clone(),
+            base_var_ub: var_ub.clone(),
+            var_lb,
+            var_ub,
+        };
+
         lp
     }
 
-    /// Simplified constructor for basic usage.
-    pub fn new(num_vars: u32, objective: Vec<Cost>) -> Self {
-        Self {
-            num_vars,
-            objective,
-            solution: vec![0.0; num_vars as usize],
-            reduced_costs: vec![0.0; num_vars as usize],
-            dual_bound: f64::NEG_INFINITY,
-            constraints: Vec::new(),
-            base_constraint_count: 0,
-            var_lb: vec![0.0; num_vars as usize],
-            var_ub: vec![1.0; num_vars as usize],
-            base_var_lb: vec![0.0; num_vars as usize],
-            base_var_ub: vec![1.0; num_vars as usize],
-            status: LpStatus::NotSolved,
-            solve_count: 0,
-        }
-    }
-
     /// Mark current state as the base (after adding global cuts and fixed arcs).
-    /// Subsequent `reset_to_base()` calls will restore to this point.
     pub fn snapshot_base(&mut self) {
-        self.base_constraint_count = self.constraints.len();
+        self.base_constraint_count = self.current_row_count;
         self.base_var_lb = self.var_lb.clone();
         self.base_var_ub = self.var_ub.clone();
     }
 
-    /// Reset to the base state: remove node-local constraints and variable fixings.
+    /// Reset column bounds to the base state for a new B&B node.
+    /// All cuts added remain (they are global); only variable fixings are reverted.
     pub fn reset_to_base(&mut self) {
-        self.constraints.truncate(self.base_constraint_count);
-        self.var_lb = self.base_var_lb.clone();
-        self.var_ub = self.base_var_ub.clone();
+        let model = self.model.as_mut().unwrap();
+        for i in 0..self.num_vars as usize {
+            let blb = self.base_var_lb[i];
+            let bub = self.base_var_ub[i];
+            if (self.var_lb[i] - blb).abs() > 1e-12 || (self.var_ub[i] - bub).abs() > 1e-12 {
+                model.change_column_bounds(self.cols[i], blb..=bub);
+                self.var_lb[i] = blb;
+                self.var_ub[i] = bub;
+            }
+        }
         self.status = LpStatus::NotSolved;
     }
 
-    fn add_constraint_raw(&mut self, vars_coeffs: &[(u32, f64)], lb: f64, ub: f64) {
-        let vars: Vec<u32> = vars_coeffs.iter().map(|&(v, _)| v).collect();
-        let coeffs: Vec<f64> = vars_coeffs.iter().map(|&(_, c)| c).collect();
-        self.constraints.push(LpConstraint { vars, coeffs, lb, ub });
-    }
-
-    /// Add a Steiner cut constraint: Σ y_a ≥ 1 for arcs crossing the cut.
+    /// Add a Steiner cut: sum y_a >= 1 for arcs crossing the cut.
     pub fn add_steiner_cut(&mut self, cut_arcs: &[ArcId]) {
-        let vars_coeffs: Vec<(u32, f64)> = cut_arcs.iter()
-            .map(|&aid| (aid, 1.0))
+        let entries: Vec<(Col, f64)> = cut_arcs.iter()
+            .map(|&aid| (self.cols[aid as usize], 1.0))
             .collect();
-        self.add_constraint_raw(&vars_coeffs, 1.0, f64::INFINITY);
+        let model = self.model.as_mut().unwrap();
+        model.add_row(1.0.., entries);
+        self.current_row_count += 1;
     }
 
     /// Add a general cut (constraint) to the LP.
     pub fn add_cut(&mut self, arc_ids: &[ArcId], coefficients: &[f64], rhs: f64) {
-        let vars_coeffs: Vec<(u32, f64)> = arc_ids.iter()
+        let entries: Vec<(Col, f64)> = arc_ids.iter()
             .zip(coefficients.iter())
-            .map(|(&aid, &coeff)| (aid, coeff))
+            .map(|(&aid, &coeff)| (self.cols[aid as usize], coeff))
             .collect();
-        self.add_constraint_raw(&vars_coeffs, rhs, f64::INFINITY);
+        let model = self.model.as_mut().unwrap();
+        model.add_row(rhs.., entries);
+        self.current_row_count += 1;
     }
 
-    /// Add a cycle inequality: Σ (y_{uv} + y_{vu}) ≤ |C|-1 for arc pairs in cycle C.
-    /// Each pair is (fwd_arc, rev_arc) representing one undirected edge.
+    /// Add a cycle inequality: sum (y_{uv} + y_{vu}) <= |C|-1 for arc pairs in cycle C.
     pub fn add_cycle_cut(&mut self, arc_pairs: &[(ArcId, ArcId)]) {
         let rhs = arc_pairs.len() as f64 - 1.0;
-        let mut vars_coeffs: Vec<(u32, f64)> = Vec::with_capacity(arc_pairs.len() * 2);
-        for &(fwd, rev) in arc_pairs {
-            vars_coeffs.push((fwd, 1.0));
-            vars_coeffs.push((rev, 1.0));
-        }
-        self.add_constraint_raw(&vars_coeffs, f64::NEG_INFINITY, rhs);
+        let entries: Vec<(Col, f64)> = arc_pairs.iter()
+            .flat_map(|&(fwd, rev)| {
+                [(self.cols[fwd as usize], 1.0), (self.cols[rev as usize], 1.0)]
+            })
+            .collect();
+        let model = self.model.as_mut().unwrap();
+        model.add_row(..=rhs, entries);
+        self.current_row_count += 1;
     }
 
     /// Fix a variable to a specific value by tightening its bounds.
@@ -210,69 +216,23 @@ impl LpRelaxation {
         if idx < self.var_lb.len() {
             self.var_lb[idx] = value;
             self.var_ub[idx] = value;
+            let model = self.model.as_mut().unwrap();
+            model.change_column_bounds(self.cols[idx], value..=value);
         }
     }
 
-    /// Solve the LP relaxation using HiGHS with warm-starting from previous solution.
+    /// Solve the LP using the persistent HiGHS model.
+    ///
+    /// The model is NOT rebuilt from scratch; HiGHS re-solves incrementally
+    /// using its internal warm-start from the previous basis.
     pub fn solve(&mut self) -> f64 {
-        let mut pb = RowProblem::default();
+        let mut model = self.model.take().unwrap();
 
-        let cols: Vec<highs::Col> = (0..self.num_vars as usize)
-            .map(|i| {
-                let lb = self.var_lb.get(i).copied().unwrap_or(0.0);
-                let ub = self.var_ub.get(i).copied().unwrap_or(1.0);
-                pb.add_column(self.objective[i], lb..=ub)
-            })
-            .collect();
-
-        for constraint in &self.constraints {
-            let has_free_var = constraint.vars.iter().any(|&v| {
-                let idx = v as usize;
-                let lb = self.var_lb.get(idx).copied().unwrap_or(0.0);
-                let ub = self.var_ub.get(idx).copied().unwrap_or(1.0);
-                (ub - lb).abs() > 1e-10
-            });
-
-            if !has_free_var {
-                let fixed_val: f64 = constraint.vars.iter()
-                    .zip(constraint.coeffs.iter())
-                    .map(|(&v, &c)| {
-                        let lb = self.var_lb.get(v as usize).copied().unwrap_or(0.0);
-                        c * lb
-                    })
-                    .sum();
-                if fixed_val < constraint.lb - 1e-6 || fixed_val > constraint.ub + 1e-6 {
-                    self.status = LpStatus::Infeasible;
-                    self.dual_bound = f64::INFINITY;
-                    return f64::INFINITY;
-                }
-                continue;
-            }
-
-            let row_entries: Vec<(highs::Col, f64)> = constraint.vars.iter()
-                .zip(constraint.coeffs.iter())
-                .map(|(&var_idx, &coeff)| (cols[var_idx as usize], coeff))
-                .collect();
-
-            let lb = constraint.lb;
-            let ub = constraint.ub;
-
-            if lb == f64::NEG_INFINITY {
-                pb.add_row(..=ub, &row_entries);
-            } else if ub == f64::INFINITY {
-                pb.add_row(lb.., &row_entries);
-            } else {
-                pb.add_row(lb..=ub, &row_entries);
-            }
+        if self.solve_count > 0 && !self.solution.is_empty() {
+            model.set_solution(Some(&self.solution), None, None, None);
         }
 
         let solve_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut model = pb.optimise(Sense::Minimise);
-
-            if self.solve_count > 0 && !self.solution.is_empty() {
-                model.set_solution(Some(&self.solution), None, None, None);
-            }
-
             model.solve()
         }));
 
@@ -312,6 +272,7 @@ impl LpRelaxation {
             }
         }
 
+        self.model = Some(solved.into());
         self.dual_bound
     }
 
@@ -328,15 +289,7 @@ impl LpRelaxation {
     }
 
     pub fn num_constraints(&self) -> usize {
-        self.constraints.len()
-    }
-
-    /// Expose constraint data for cut separators.
-    /// Returns (variable_indices, coefficients, lower_bound, upper_bound) for each constraint.
-    pub fn get_constraints(&self) -> Vec<(Vec<u32>, Vec<f64>, f64, f64)> {
-        self.constraints.iter()
-            .map(|c| (c.vars.clone(), c.coeffs.clone(), c.lb, c.ub))
-            .collect()
+        self.current_row_count
     }
 }
 
@@ -346,20 +299,17 @@ mod tests {
     use crate::graph::{DirectedGraph, NodeType};
 
     fn build_simple_instance() -> (DirectedGraph, NodeId, Vec<NodeId>, Vec<NodeId>) {
-        // Simple graph: root(1) -> 2(steiner) -> 3(terminal)
-        //               root(1) -> 3(terminal) [expensive direct]
         let mut g = DirectedGraph::new(3);
         g.add_node(1, NodeType::Terminal, 0.0);
         g.add_node(2, NodeType::Steiner, 0.0);
         g.add_node(3, NodeType::Terminal, 0.0);
 
-        // Bidirectional arcs
-        g.add_arc(1, 2, 1.0); // 0
-        g.add_arc(2, 1, 1.0); // 1
-        g.add_arc(2, 3, 1.0); // 2
-        g.add_arc(3, 2, 1.0); // 3
-        g.add_arc(1, 3, 5.0); // 4
-        g.add_arc(3, 1, 5.0); // 5
+        g.add_arc(1, 2, 1.0);
+        g.add_arc(2, 1, 1.0);
+        g.add_arc(2, 3, 1.0);
+        g.add_arc(3, 2, 1.0);
+        g.add_arc(1, 3, 5.0);
+        g.add_arc(3, 1, 5.0);
 
         let root = 1;
         let terminals = vec![3];
@@ -372,8 +322,6 @@ mod tests {
         let (graph, root, terminals, steiner_nodes) = build_simple_instance();
         let mut lp = LpRelaxation::from_formulation(&graph, root, &terminals, &steiner_nodes);
 
-        // Add a Steiner cut: arcs leaving {1, 2} must sum ≥ 1
-        // δ+({1,2}) = {arc 2: 2->3, arc 4: 1->3}
         lp.add_steiner_cut(&[2, 4]);
 
         let obj = lp.solve();
@@ -391,13 +339,11 @@ mod tests {
 
         let y = lp.get_solution();
 
-        // (3a) No flow into root
         let in_root: f64 = graph.delta_minus(root).iter()
             .map(|&(_, aid)| y[aid as usize])
             .sum();
         assert!(in_root.abs() < 1e-6, "Flow into root should be 0, got {}", in_root);
 
-        // (3b) Flow into terminal 3 = 1
         let in_3: f64 = graph.delta_minus(3).iter()
             .map(|&(_, aid)| y[aid as usize])
             .sum();
@@ -409,10 +355,8 @@ mod tests {
         let (graph, root, terminals, steiner_nodes) = build_simple_instance();
         let mut lp = LpRelaxation::from_formulation(&graph, root, &terminals, &steiner_nodes);
 
-        // Solve without cuts
         let bound_no_cuts = lp.solve();
 
-        // Add cuts and resolve
         lp.add_steiner_cut(&[2, 4]);
         let bound_with_cuts = lp.solve();
 
@@ -422,19 +366,18 @@ mod tests {
 
     #[test]
     fn test_lp_multi_terminal() {
-        // root(1) -> 2 -> 3(term), root(1) -> 4(term)
         let mut g = DirectedGraph::new(4);
         g.add_node(1, NodeType::Terminal, 0.0);
         g.add_node(2, NodeType::Steiner, 0.0);
         g.add_node(3, NodeType::Terminal, 0.0);
         g.add_node(4, NodeType::Terminal, 0.0);
 
-        g.add_arc(1, 2, 1.0); // 0
-        g.add_arc(2, 1, 1.0); // 1
-        g.add_arc(2, 3, 2.0); // 2
-        g.add_arc(3, 2, 2.0); // 3
-        g.add_arc(1, 4, 3.0); // 4
-        g.add_arc(4, 1, 3.0); // 5
+        g.add_arc(1, 2, 1.0);
+        g.add_arc(2, 1, 1.0);
+        g.add_arc(2, 3, 2.0);
+        g.add_arc(3, 2, 2.0);
+        g.add_arc(1, 4, 3.0);
+        g.add_arc(4, 1, 3.0);
 
         let root = 1;
         let terminals = vec![3, 4];
@@ -442,14 +385,11 @@ mod tests {
 
         let mut lp = LpRelaxation::from_formulation(&g, root, &terminals, &steiner_nodes);
 
-        // Cut for terminal 3: arcs leaving {1, 2} to {3, 4}
-        lp.add_steiner_cut(&[2, 4]); // 2->3, 1->4
-        // Cut for terminal 4: arcs leaving {1, 2, 3} to {4}
-        lp.add_steiner_cut(&[4]); // 1->4
+        lp.add_steiner_cut(&[2, 4]);
+        lp.add_steiner_cut(&[4]);
 
         let obj = lp.solve();
         assert_eq!(lp.status, LpStatus::Optimal);
-        // Optimal: 1->2(1) + 2->3(2) + 1->4(3) = 6
         assert!(obj >= 5.0 - 1e-6, "LP bound should be >= 5, got {}", obj);
     }
 }
