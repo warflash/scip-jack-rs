@@ -8,10 +8,15 @@ use super::ReducibleGraph;
 /// **Bottleneck Steiner Distance (BSD) test**:
 /// An edge {u,v} can be removed if c({u,v}) > BSD(u, v), where BSD(u,v)
 /// is the minimum bottleneck of any path from u to v that passes through
-/// at least one terminal.
+/// at least one terminal, NOT using the edge {u,v} itself.
 ///
 /// The bottleneck of a path is the maximum edge cost along that path.
-/// BSD(u,v) = min over all paths P from u to v through a terminal {max_{e ∈ P} c(e)}.
+/// BSD(u,v) = min over paths P (u→t→v avoiding edge e) of max_{e' ∈ P} c(e').
+///
+/// Key correctness constraint: the bottleneck path must avoid the edge being
+/// tested. We achieve this by computing, for each terminal t, the bottleneck
+/// distance from t to all nodes using a predecessor-aware computation that
+/// lets us determine if a path uses a specific edge.
 ///
 /// Returns number of edges removed.
 pub fn bottleneck_reductions(graph: &mut ReducibleGraph) -> u32 {
@@ -25,13 +30,12 @@ pub fn bottleneck_reductions(graph: &mut ReducibleGraph) -> u32 {
         return 0;
     }
 
-    // Compute bottleneck distances from each terminal using a modified Dijkstra
-    // where distance = max edge weight on path (bottleneck distance).
-    let terminal_bottlenecks: Vec<Vec<Cost>> = terminal_list.iter()
-        .map(|&t| bottleneck_distances_from(graph, t))
+    // Compute bottleneck distance trees from each terminal, storing the
+    // predecessor edge so we can determine if a specific edge is on the path.
+    let terminal_bn_trees: Vec<BnTree> = terminal_list.iter()
+        .map(|&t| bottleneck_tree_from(graph, t))
         .collect();
 
-    // For each edge, compute BSD and check if edge cost exceeds it
     let edges_to_check: Vec<(u32, u32, u32, f64)> = graph.edges.iter()
         .filter(|e| graph.is_edge_valid(e.id))
         .map(|e| (e.id, e.src, e.dst, e.cost))
@@ -42,17 +46,61 @@ pub fn bottleneck_reductions(graph: &mut ReducibleGraph) -> u32 {
             continue;
         }
 
-        // BSD(src, dst) = min over all terminals t of max(bd(src, t), bd(dst, t))
-        // where bd(x, t) is the bottleneck distance from x to t
+        // BSD(src, dst) = min over all terminals t of the bottleneck of the
+        // best path src → t → dst that does NOT use edge eid.
+        //
+        // For terminal t: the path src→t has bottleneck bd(src, t) and the path
+        // dst→t has bottleneck bd(dst, t). The combined path src→t→dst has
+        // bottleneck max(bd(src,t), bd(dst,t)).
+        //
+        // HOWEVER: if either of these paths uses edge eid, we need the second-best
+        // bottleneck distance that avoids it. We use the predecessor information:
+        // if the bottleneck tree path from t to src uses edge eid, or the path
+        // from t to dst uses edge eid, that particular terminal doesn't provide
+        // a valid alternative.
         let mut bsd = f64::INFINITY;
-        for (idx, _) in terminal_list.iter().enumerate() {
-            let bd_src = terminal_bottlenecks[idx][src as usize];
-            let bd_dst = terminal_bottlenecks[idx][dst as usize];
+
+        for (idx, _t) in terminal_list.iter().enumerate() {
+            let tree = &terminal_bn_trees[idx];
+
+            let bd_src = tree.dist[src as usize];
+            let bd_dst = tree.dist[dst as usize];
+
+            if bd_src == f64::INFINITY || bd_dst == f64::INFINITY {
+                continue;
+            }
+
+            // Check if the bottleneck tree path from t to src uses edge eid
+            let src_uses_edge = path_uses_edge(tree, src, eid);
+            // Check if the bottleneck tree path from t to dst uses edge eid
+            let dst_uses_edge = path_uses_edge(tree, dst, eid);
+
+            if src_uses_edge && dst_uses_edge {
+                // Both paths go through edge eid — this terminal can't provide
+                // an alternative path that avoids the edge. Skip it.
+                continue;
+            }
+
+            if src_uses_edge {
+                // The path t→src uses edge eid. The correct alternative is:
+                // path src→dst (via edge eid being tested has bn = cost), then dst→t.
+                // But we need a path that avoids eid entirely.
+                // Compute: bottleneck of path t→dst→...→src avoiding eid.
+                // Conservative bound: use the bd(dst, t) path (doesn't use eid)
+                // concatenated with... we can't easily extend. Skip this terminal.
+                continue;
+            }
+
+            if dst_uses_edge {
+                // Symmetric case: path t→dst uses edge eid. Skip.
+                continue;
+            }
+
+            // Neither path uses edge eid — the combined path is a valid alternative
             let through_t = bd_src.max(bd_dst);
             bsd = bsd.min(through_t);
         }
 
-        // If edge cost strictly exceeds BSD, it's not needed in any optimal solution
         if cost > bsd + 1e-9 {
             graph.remove_edge(eid);
             removed += 1;
@@ -62,12 +110,36 @@ pub fn bottleneck_reductions(graph: &mut ReducibleGraph) -> u32 {
     removed
 }
 
-/// Compute bottleneck distances from a source node to all reachable nodes.
-/// The bottleneck distance is the minimum over all paths of the maximum edge weight on that path.
-/// Uses a modified Dijkstra where we minimize the max-edge-weight (bottleneck).
-fn bottleneck_distances_from(graph: &ReducibleGraph, source: u32) -> Vec<Cost> {
+/// Bottleneck shortest path tree from a source.
+struct BnTree {
+    dist: Vec<Cost>,
+    pred_edge: Vec<i32>,
+    pred_node: Vec<u32>,
+}
+
+/// Check if the bottleneck tree path from root to `node` uses edge `eid`.
+fn path_uses_edge(tree: &BnTree, mut node: u32, eid: u32) -> bool {
+    loop {
+        let pe = tree.pred_edge[node as usize];
+        if pe < 0 {
+            return false;
+        }
+        if pe as u32 == eid {
+            return true;
+        }
+        node = tree.pred_node[node as usize];
+        if node == u32::MAX {
+            return false;
+        }
+    }
+}
+
+/// Compute bottleneck distance tree from source, recording predecessor edges and nodes.
+fn bottleneck_tree_from(graph: &ReducibleGraph, source: u32) -> BnTree {
     let n = graph.nodes.len() + 1;
     let mut dist = vec![f64::INFINITY; n];
+    let mut pred_edge: Vec<i32> = vec![-1; n];
+    let mut pred_node: Vec<u32> = vec![u32::MAX; n];
     let mut visited: HashSet<u32> = HashSet::new();
     let mut heap = BinaryHeap::new();
 
@@ -89,13 +161,16 @@ fn bottleneck_distances_from(graph: &ReducibleGraph, source: u32) -> Vec<Cost> {
             let new_bn = bottleneck.max(edge_cost);
             if new_bn < dist[neighbor as usize] {
                 dist[neighbor as usize] = new_bn;
+                pred_edge[neighbor as usize] = eid as i32;
+                pred_node[neighbor as usize] = node;
                 heap.push(BnEntry { bottleneck: new_bn, node: neighbor });
             }
         }
     }
 
-    dist
+    BnTree { dist, pred_edge, pred_node }
 }
+
 
 #[derive(Clone, PartialEq)]
 struct BnEntry {

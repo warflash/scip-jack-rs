@@ -72,6 +72,12 @@ src/
 The `papers/` directory contains the reference PDFs and their extracted content (`EXTRACTED_CONTENT.md`)
 with all mathematical formulations, transformations, and computational results.
 
+## Benchmark comparisons
+
+`BENCHMARK_REFERENCE_RESULTS.md` records the public PACE, DIMACS, SteinLib, and SCIP-Jack benchmark suites, including published solved counts, time limits, and runtime results. It also defines the end-to-end comparison protocol for adding external solver baselines.
+
+`BENCHMARK_CERTIFICATION_GUIDE.md` defines the correctness and optimality-certification contract for those benchmarks.
+
 ## License
 
 MIT

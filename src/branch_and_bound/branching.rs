@@ -81,11 +81,11 @@ impl BranchingRule {
         }
     }
 
-    pub fn select(&self, lp_solution: &[f64]) -> Option<ArcId> {
+    pub fn select(&self, lp_solution: &[f64], num_arcs: usize) -> Option<ArcId> {
         match self {
-            BranchingRule::MostFractional => select_most_fractional(lp_solution),
-            BranchingRule::StrongBranching { .. } => select_most_fractional(lp_solution),
-            BranchingRule::ReliabilityBranching { .. } => select_most_fractional(lp_solution),
+            BranchingRule::MostFractional => select_most_fractional(lp_solution, num_arcs),
+            BranchingRule::StrongBranching { .. } => select_most_fractional(lp_solution, num_arcs),
+            BranchingRule::ReliabilityBranching { .. } => select_most_fractional(lp_solution, num_arcs),
         }
     }
 
@@ -102,13 +102,11 @@ impl BranchingRule {
         &self,
         lp_solution: &[f64],
         pseudo_costs: &PseudoCosts,
+        num_arcs: usize,
     ) -> Option<ArcId> {
-        let num_arcs = lp_solution.len();
-
-        // Group arcs into undirected edges (pairs of 2i, 2i+1)
         let num_edges = num_arcs / 2;
         if num_edges == 0 {
-            return select_most_fractional(lp_solution);
+            return select_most_fractional(lp_solution, num_arcs);
         }
 
         match self {
@@ -136,10 +134,10 @@ fn edge_frac(lp_solution: &[f64], edge_idx: usize) -> f64 {
     (z - z.round()).abs()
 }
 
-fn select_most_fractional(lp_solution: &[f64]) -> Option<ArcId> {
+fn select_most_fractional(lp_solution: &[f64], num_arcs: usize) -> Option<ArcId> {
     let mut best_frac = 0.0;
     let mut best_var = None;
-    for (i, &val) in lp_solution.iter().enumerate() {
+    for (i, &val) in lp_solution.iter().take(num_arcs).enumerate() {
         let frac = (val - val.round()).abs();
         if frac > best_frac {
             best_frac = frac;

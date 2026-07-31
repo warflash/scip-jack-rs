@@ -28,23 +28,15 @@ pub fn distance_reductions(graph: &mut ReducibleGraph) -> u32 {
         .map(|&t| graph.shortest_paths_from(t))
         .collect();
 
-    // Nodes adjacent to any contracted node have distorted shortest-path distances,
-    // so edges touching those nodes must be excluded from the SD test.
-    let mut contraction_affected: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    for &eid in &graph.contracted_edges {
-        if graph.is_edge_valid(eid) {
-            let e = &graph.edges[eid as usize];
-            contraction_affected.insert(e.src);
-            contraction_affected.insert(e.dst);
-        }
-    }
-
+    // Check all valid non-contracted edges.
+    // Contracted edges represent merged paths and should not be tested
+    // (their cost already equals the sum of the merged edges).
+    // However, edges adjacent to contracted nodes CAN be tested since
+    // Dijkstra distances on the full graph are correct.
     let edges_to_check: Vec<(u32, u32, u32, f64)> = graph.edges.iter()
         .filter(|e| {
             graph.is_edge_valid(e.id)
                 && !graph.contracted_edges.contains(&e.id)
-                && !contraction_affected.contains(&e.src)
-                && !contraction_affected.contains(&e.dst)
         })
         .map(|e| (e.id, e.src, e.dst, e.cost))
         .collect();

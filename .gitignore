@@ -1,3 +1,7 @@
 /target
 /ci-benchmark-results.json
 /ci-benchmark-summary.md
+
+# Locally acquired external benchmark corpora (large, reproducible downloads).
+/benchmarks/pace2018/
+/benchmarks/pace2018-results/

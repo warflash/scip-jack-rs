@@ -22,8 +22,8 @@ pub struct LpRelaxation {
     current_row_count: usize,
     base_var_lb: Vec<f64>,
     base_var_ub: Vec<f64>,
-    var_lb: Vec<f64>,
-    var_ub: Vec<f64>,
+    pub var_lb: Vec<f64>,
+    pub var_ub: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +158,91 @@ impl LpRelaxation {
             }
         }
 
+        // FC-BCR: Forest-Closed BCR strengthening (Section 11.1 of research memo)
+        //
+        // Add activation variables s_v for each node. A tree on k used vertices
+        // has exactly k-1 edges; a non-terminal with s_v > 0 must have degree >= 2.
+        // These constraints attack fractional solutions that terminal cuts alone
+        // cannot see.
+
+        // Create activation variable columns: s_v in [0,1], zero cost
+        let all_nodes: Vec<NodeId> = graph.nodes.iter().map(|n| n.id).collect();
+        let terminal_set: std::collections::HashSet<NodeId> = terminals.iter().copied().collect();
+        let max_node_id = all_nodes.iter().copied().max().unwrap_or(0) as usize;
+
+        // Map node ID -> column index for s_v (offset by num_arcs)
+        let mut s_cols: Vec<Option<Col>> = vec![None; max_node_id + 1];
+        for &nid in &all_nodes {
+            let is_terminal = terminal_set.contains(&nid) || nid == root;
+            let (lb, ub) = if is_terminal { (1.0, 1.0) } else { (0.0, 1.0) };
+            let col = pb.add_column(0.0, lb..=ub);
+            s_cols[nid as usize] = Some(col);
+        }
+
+        // Counting constraint: sum_edges(y_fwd + y_rev) = sum_nodes(s_v) - 1
+        // Rewritten: sum_edges(y_fwd + y_rev) - sum_nodes(s_v) = -1
+        {
+            let mut row: Vec<(Col, f64)> = Vec::new();
+            for p in 0..num_pairs {
+                row.push((cols[2 * p], 1.0));
+                row.push((cols[2 * p + 1], 1.0));
+            }
+            for &nid in &all_nodes {
+                if let Some(col) = s_cols[nid as usize] {
+                    row.push((col, -1.0));
+                }
+            }
+            pb.add_row(-1.0..=-1.0, &row);
+        }
+
+        // No-leaf constraint: for each Steiner node v:
+        //   x(delta(v)) >= 2 * s_v
+        // i.e., sum of all arcs incident to v (in undirected sense) >= 2 * s_v
+        // Rewritten: sum_incident_arcs(y_a) - 2*s_v >= 0
+        for &v in steiner_nodes {
+            if let Some(sv_col) = s_cols[v as usize] {
+                let in_arcs: Vec<ArcId> = graph.delta_minus(v).iter().map(|&(_, a)| a).collect();
+                let out_arcs: Vec<ArcId> = graph.delta_plus(v).iter().map(|&(_, a)| a).collect();
+
+                let mut row: Vec<(Col, f64)> = Vec::new();
+                for &a in &in_arcs {
+                    row.push((cols[a as usize], 1.0));
+                }
+                for &a in &out_arcs {
+                    row.push((cols[a as usize], 1.0));
+                }
+                row.push((sv_col, -2.0));
+                if !row.is_empty() {
+                    pb.add_row(0.0.., &row);
+                }
+            }
+        }
+
+        // Edge-vertex coupling: for each edge {u,v} (arc pair 2i, 2i+1):
+        //   y_{uv} + y_{vu} <= s_u   AND   y_{uv} + y_{vu} <= s_v
+        for p in 0..num_pairs {
+            let fwd_arc = &graph.arcs[2 * p];
+            let u = fwd_arc.tail;
+            let v = fwd_arc.head;
+
+            if let Some(su_col) = s_cols[u as usize] {
+                // y_{uv} + y_{vu} - s_u <= 0
+                pb.add_row(..=0.0, &[
+                    (cols[2 * p], 1.0),
+                    (cols[2 * p + 1], 1.0),
+                    (su_col, -1.0),
+                ]);
+            }
+            if let Some(sv_col) = s_cols[v as usize] {
+                // y_{uv} + y_{vu} - s_v <= 0
+                pb.add_row(..=0.0, &[
+                    (cols[2 * p], 1.0),
+                    (cols[2 * p + 1], 1.0),
+                    (sv_col, -1.0),
+                ]);
+            }
+        }
+
         let base_rows = pb.num_rows();
 
         let mut model = pb.optimise(Sense::Minimise);
@@ -255,6 +340,17 @@ impl LpRelaxation {
         }
     }
 
+    /// Change variable bounds (for strong branching restore).
+    pub fn change_variable_bounds(&mut self, arc_id: ArcId, lb: f64, ub: f64) {
+        let idx = arc_id as usize;
+        if idx < self.var_lb.len() {
+            self.var_lb[idx] = lb;
+            self.var_ub[idx] = ub;
+            let model = self.model.as_mut().unwrap();
+            model.change_column_bounds(self.cols[idx], lb..=ub);
+        }
+    }
+
     /// Solve the LP using the persistent HiGHS model.
     ///
     /// The model is NOT rebuilt from scratch; HiGHS re-solves incrementally
@@ -262,7 +358,7 @@ impl LpRelaxation {
     pub fn solve(&mut self) -> f64 {
         let mut model = self.model.take().unwrap();
 
-        if self.solve_count > 0 && !self.solution.is_empty() {
+        if self.solve_count > 0 && !self.solution.is_empty() && self.solution.len() == model.num_cols() {
             model.set_solution(Some(&self.solution), None, None, None);
         }
 
@@ -287,6 +383,7 @@ impl LpRelaxation {
                 self.solution = sol.columns().to_vec();
                 self.reduced_costs = sol.dual_columns().to_vec();
                 self.dual_bound = self.solution.iter()
+                    .take(self.num_vars as usize)
                     .zip(self.objective.iter())
                     .map(|(&y, &c)| y * c)
                     .sum();

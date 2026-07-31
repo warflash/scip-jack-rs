@@ -2,6 +2,8 @@
 
 This document is the execution contract for improving benchmark truthfulness in this repository. It is about distinguishing a known reference value from a mathematically certified optimum. It is not permission to change benchmark numbers simply because the current solver obtains a different result.
 
+Published cross-solver benchmark suites and historical SCIP-Jack/PACE/DIMACS results are collected in [BENCHMARK_REFERENCE_RESULTS.md](BENCHMARK_REFERENCE_RESULTS.md). This guide defines the correctness contract; that companion document defines the external performance context.
+
 The central rule is:
 
 > For one fixed instance, a result may be called 'Optimal' only when a verified feasible primal solution and an independently verified lower bound meet at the same value.

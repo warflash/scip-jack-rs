@@ -287,34 +287,36 @@ pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (Reduc
     let mut total_fixed: Vec<EdgeId> = Vec::new();
     let mut lb_offset = 0.0;
 
-    let mut iteration = 0u32;
+    let mut _iteration = 0u32;
 
     loop {
         let (deg_removed, fixed, offset) = degree::degree_reductions(&mut rg);
         total_fixed.extend(fixed);
         lb_offset += offset;
 
-        // SD test: only on the first iteration (clean graph) or if no
-        // contractions occurred (safe to re-run).
-        let dist_removed = if iteration == 0 || rg.contracted_edges.is_empty() {
-            distance::distance_reductions(&mut rg)
-        } else {
-            0
-        };
+        // SD test: run on all iterations. Edge removal enables more removals.
+        // Safe even after contractions because contracted edges are excluded.
+        let dist_removed = distance::distance_reductions(&mut rg);
+
+        // BSD test: disabled pending further correctness investigation.
+        // The predecessor-tracking approach still has edge cases where the
+        // bottleneck tree path check gives false negatives, leading to
+        // incorrect edge removal on some instances.
+        let bn_removed = 0u32;
 
         // Implication reductions: triangle dominance + conflict propagation.
         // Only run when graph has settled (no degree reductions or SD removals
         // in this iteration), as implications depend on current graph structure.
-        let impl_removed = if deg_removed == 0 && dist_removed == 0 {
+        let impl_removed = if deg_removed == 0 && dist_removed == 0 && bn_removed == 0 {
             implications::implication_reductions(&mut rg)
         } else {
             0
         };
 
-        if deg_removed + dist_removed + impl_removed == 0 {
+        if deg_removed + dist_removed + bn_removed + impl_removed == 0 {
             break;
         }
-        iteration += 1;
+        _iteration += 1;
     }
 
     let result = PreprocessingResult {

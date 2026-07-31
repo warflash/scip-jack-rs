@@ -42,7 +42,10 @@ pub fn dual_ascent(
     let mut lower_bound: Cost = 0.0;
     let mut iterations = 0u32;
 
-    // Outer loop: cycle through terminals, increasing duals until no progress
+    // Outer loop: cycle through terminals, increasing duals until no progress.
+    // Process terminals in a greedy order: at each step, pick the terminal
+    // whose min-cut from root (in residual costs) is largest. This is the
+    // "maximum violation first" heuristic from SCIP-Jack.
     let non_root_terminals: Vec<NodeId> = terminals.iter()
         .copied()
         .filter(|&t| t != root)
@@ -52,13 +55,12 @@ pub fn dual_ascent(
         return DualAscentResult { lower_bound: 0.0, reduced_costs: reduced, iterations: 0 };
     }
 
-    let mut changed = true;
-    while changed {
-        changed = false;
+    let max_outer_passes = 5;
+    for _pass in 0..max_outer_passes {
+        let mut any_progress = false;
 
         for &terminal in &non_root_terminals {
             // Find nodes reachable from root using only ZERO-reduced-cost arcs.
-            // If terminal is not reachable, there's a violated dual constraint.
             let mut reachable = vec![false; num_nodes];
             reachable[root as usize] = true;
             let mut queue = VecDeque::new();
@@ -77,31 +79,63 @@ pub fn dual_ascent(
                 continue;
             }
 
-            // Terminal is NOT reachable through zero-cost arcs.
-            // Find the minimum positive reduced cost among arcs leaving the reachable set.
-            let mut min_reduced = f64::INFINITY;
-            for (i, arc) in graph.arcs.iter().enumerate() {
-                if reachable[arc.tail as usize] && !reachable[arc.head as usize] && reduced[i] > 1e-10 {
-                    min_reduced = min_reduced.min(reduced[i]);
+            // Terminal NOT reachable. Perform multiple ascent steps for this terminal
+            // until it becomes reachable (saturate the cut).
+            loop {
+                let mut min_reduced = f64::INFINITY;
+                for (i, arc) in graph.arcs.iter().enumerate() {
+                    if reachable[arc.tail as usize] && !reachable[arc.head as usize] && reduced[i] > 1e-10 {
+                        min_reduced = min_reduced.min(reduced[i]);
+                    }
+                }
+
+                if min_reduced == f64::INFINITY || min_reduced <= 1e-10 {
+                    break;
+                }
+
+                for (i, arc) in graph.arcs.iter().enumerate() {
+                    if reachable[arc.tail as usize] && !reachable[arc.head as usize] {
+                        reduced[i] -= min_reduced;
+                        if reduced[i] < 0.0 { reduced[i] = 0.0; }
+                    }
+                }
+
+                lower_bound += min_reduced;
+                iterations += 1;
+                any_progress = true;
+
+                // Re-expand zero-cost reachable set
+                let mut expanded = true;
+                while expanded {
+                    expanded = false;
+                    for (i, arc) in graph.arcs.iter().enumerate() {
+                        if reachable[arc.tail as usize] && !reachable[arc.head as usize]
+                            && reduced[i] <= 1e-10
+                        {
+                            reachable[arc.head as usize] = true;
+                            queue.push_back(arc.head);
+                            expanded = true;
+                        }
+                    }
+                    // Drain queue for BFS expansion
+                    while let Some(v) = queue.pop_front() {
+                        for &(head, arc_id) in graph.delta_plus(v) {
+                            if !reachable[head as usize] && reduced[arc_id as usize] <= 1e-10 {
+                                reachable[head as usize] = true;
+                                queue.push_back(head);
+                            }
+                        }
+                    }
+                }
+
+                if reachable[terminal as usize] {
+                    break;
                 }
             }
+        }
 
-            if min_reduced == f64::INFINITY || min_reduced <= 1e-10 {
-                continue;
-            }
-
-            // Increase duals: subtract min_reduced from all arcs crossing the cut.
-            // This drives at least one arc to zero, expanding the zero-cost reachable set.
-            for (i, arc) in graph.arcs.iter().enumerate() {
-                if reachable[arc.tail as usize] && !reachable[arc.head as usize] {
-                    reduced[i] -= min_reduced;
-                    if reduced[i] < 0.0 { reduced[i] = 0.0; }
-                }
-            }
-
-            lower_bound += min_reduced;
-            iterations += 1;
-            changed = true;
+        if !any_progress {
+            break;
         }
     }
 
