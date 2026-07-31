@@ -54,6 +54,7 @@
 
 use crate::graph::{Cost, NodeId};
 
+use super::csr::Csr;
 use super::ReducibleGraph;
 
 /// Chain endpoints are searched among this many nearest terminals per vertex.
@@ -237,89 +238,6 @@ fn nearest_terminals(terminals: &[NodeId], dist: &[Vec<Cost>], num_nodes: usize)
         out[v] = scratch.iter().map(|&(_, i)| i).collect();
     }
     out
-}
-
-/// Compact adjacency snapshot of the live part of a `ReducibleGraph`.
-///
-/// `ReducibleGraph::shortest_paths_from` allocates a `Vec` per settled vertex,
-/// which is far too slow to run once per terminal on the larger instances.
-struct Csr {
-    num_nodes: usize,
-    start: Vec<u32>,
-    head: Vec<u32>,
-    cost: Vec<Cost>,
-}
-
-impl Csr {
-    fn build(graph: &ReducibleGraph) -> Self {
-        let num_nodes = graph.nodes.iter().map(|n| n.id as usize).max().unwrap_or(0) + 1;
-        let mut degree = vec![0u32; num_nodes + 1];
-        let live: Vec<(NodeId, NodeId, Cost)> = graph
-            .edges
-            .iter()
-            .filter(|e| {
-                graph.is_edge_valid(e.id)
-                    && graph.is_node_valid(e.src)
-                    && graph.is_node_valid(e.dst)
-            })
-            .map(|e| (e.src, e.dst, e.cost))
-            .collect();
-        for &(a, b, _) in &live {
-            degree[a as usize + 1] += 1;
-            degree[b as usize + 1] += 1;
-        }
-        for i in 0..num_nodes {
-            degree[i + 1] += degree[i];
-        }
-        let start = degree.clone();
-        let mut fill = start.clone();
-        let mut head = vec![0u32; live.len() * 2];
-        let mut cost = vec![0.0; live.len() * 2];
-        for &(a, b, c) in &live {
-            head[fill[a as usize] as usize] = b;
-            cost[fill[a as usize] as usize] = c;
-            fill[a as usize] += 1;
-            head[fill[b as usize] as usize] = a;
-            cost[fill[b as usize] as usize] = c;
-            fill[b as usize] += 1;
-        }
-        Self { num_nodes, start, head, cost }
-    }
-
-    fn dijkstra(&self, source: NodeId) -> Vec<Cost> {
-        use std::cmp::Reverse;
-        use std::collections::BinaryHeap;
-
-        let mut dist = vec![Cost::INFINITY; self.num_nodes];
-        let mut heap: BinaryHeap<(Reverse<Ordered>, u32)> = BinaryHeap::new();
-        dist[source as usize] = 0.0;
-        heap.push((Reverse(Ordered(0.0)), source));
-        while let Some((Reverse(Ordered(d)), v)) = heap.pop() {
-            if d > dist[v as usize] + 1e-12 {
-                continue;
-            }
-            let (s, e) = (self.start[v as usize] as usize, self.start[v as usize + 1] as usize);
-            for i in s..e {
-                let u = self.head[i];
-                let nd = d + self.cost[i];
-                if nd < dist[u as usize] - 1e-12 {
-                    dist[u as usize] = nd;
-                    heap.push((Reverse(Ordered(nd)), u));
-                }
-            }
-        }
-        dist
-    }
-}
-
-#[derive(PartialEq, PartialOrd)]
-struct Ordered(Cost);
-impl Eq for Ordered {}
-#[allow(clippy::derive_ord_xor_partial_ord)]
-impl Ord for Ordered {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
-    }
 }
 
 #[cfg(test)]

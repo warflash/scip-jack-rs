@@ -66,15 +66,25 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         graph.add_edge(edge.src, edge.dst, edge.cost);
     }
 
-    let (mut work_graph, mut terminals) = if config.preprocess {
+    // Cost that classical reduction contracted out of the graph. Every bound
+    // below is stated for `work_graph`; the bound for `instance` is this plus
+    // that value, and the addition happens once, at the very end.
+    let mut base_offset: Cost = 0.0;
+    let (work_graph, terminals) = if config.preprocess {
         let (rg, pr) = preprocess(instance, &graph);
+        base_offset = pr.lower_bound_offset;
         let (ri, ru) = rg.to_instance();
         if config.verbose {
             eprintln!(
-                "[reduce] classical: {} -> {} nodes, {} -> {} edges",
-                instance.num_nodes, ri.num_nodes, instance.num_edges, ri.num_edges
+                "[reduce] classical: {} -> {} nodes, {} -> {} edges, {} -> {} terminals, offset {:.1}",
+                instance.num_nodes,
+                ri.num_nodes,
+                instance.num_edges,
+                ri.num_edges,
+                instance.terminals.len(),
+                ri.terminals.len(),
+                base_offset
             );
-            let _ = pr;
         }
         (ru, ri.terminals)
     } else {
@@ -82,10 +92,12 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     };
 
     if terminals.len() < 2 {
-        return trivial_result(start, 0.0, SolveMethod::AscendAndPrune);
+        return trivial_result(start, base_offset, SolveMethod::AscendAndPrune);
     }
 
-    if let Some(r) = try_dreyfus_wagner(&work_graph, &terminals, start) {
+    if let Some(mut r) = try_dreyfus_wagner(&work_graph, &terminals, start) {
+        r.primal_bound += base_offset;
+        r.dual_bound += base_offset;
         return r;
     }
 
@@ -114,10 +126,14 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             deadline
         };
         let outcome = finish(reduced, &config, start, pass_deadline);
-        let improved = best.as_ref().is_none_or(|b| outcome.primal_bound < b.primal_bound);
-        if improved {
-            best = Some(outcome.clone());
-        }
+        // Both bounds are valid for the same instance, so keep the better of
+        // each. A pass that fails to improve the incumbent can still have
+        // pushed the dual bound up, and discarding that would throw away the
+        // only progress it made.
+        best = Some(match best {
+            None => outcome,
+            Some(b) => merge(b, outcome, config.gap_tolerance.max(1e-6)),
+        });
         let done = best.as_ref().map(|b| b.status == SolveStatus::Optimal).unwrap_or(false);
         if done || Instant::now() >= deadline {
             break;
@@ -129,7 +145,41 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         incoming_ub = b.primal_bound;
     }
 
-    return best.unwrap_or_else(|| trivial_result(start, Cost::INFINITY, SolveMethod::AscendAndPrune));
+    let mut result =
+        best.unwrap_or_else(|| trivial_result(start, Cost::INFINITY, SolveMethod::AscendAndPrune));
+    result.primal_bound += base_offset;
+    result.dual_bound += base_offset;
+    // The gap is relative, so it has to be recomputed once both bounds are back
+    // on the original instance's scale: contracting `base_offset` out of the
+    // graph shrinks the denominator and inflates the reported percentage.
+    result.gap_pct = if result.primal_bound.is_finite() && result.dual_bound > f64::NEG_INFINITY {
+        (((result.primal_bound - result.dual_bound) / result.primal_bound.abs().max(1e-10)) * 100.0)
+            .max(0.0)
+    } else {
+        100.0
+    };
+    result.time_secs = start.elapsed().as_secs_f64();
+    result
+}
+
+/// Combine two solve outcomes for the same instance: best primal, best dual.
+fn merge(a: SolveResult, b: SolveResult, tolerance: Cost) -> SolveResult {
+    let (primal_from, other) = if b.primal_bound < a.primal_bound { (b, a) } else { (a, b) };
+    let mut out = primal_from;
+    out.dual_bound = out.dual_bound.max(other.dual_bound).min(out.primal_bound);
+    out.nodes_processed += other.nodes_processed;
+    out.cuts_added += other.cuts_added;
+    out.lp_solves += other.lp_solves;
+    out.gap_pct = if out.primal_bound.is_finite() && out.dual_bound > f64::NEG_INFINITY {
+        (((out.primal_bound - out.dual_bound) / out.primal_bound.abs().max(1e-10)) * 100.0).max(0.0)
+    } else {
+        100.0
+    };
+    if out.primal_bound.is_finite() && out.dual_bound >= out.primal_bound - tolerance {
+        out.status = SolveStatus::Optimal;
+        out.gap_pct = 0.0;
+    }
+    out
 }
 
 /// Finish a tightened instance: exact DP when cheap, otherwise branch-and-cut.
@@ -142,17 +192,23 @@ fn finish(
 
     if config.verbose {
         eprintln!(
-            "[reduce] after {} rounds: |V|={} |E|={} LB={:.1} UB={:.1}",
+            "[reduce] after {} rounds: |V|={} |E|={} |R|={} LB={:.1} UB={:.1} offset={:.1}",
             reduced.rounds,
             reduced.graph.num_nodes,
             reduced.graph.edges.len(),
+            reduced.terminals.len(),
             reduced.lower_bound,
-            reduced.upper_bound
+            reduced.upper_bound,
+            reduced.offset,
         );
     }
 
+    // Everything below is stated for `reduced.graph`; this puts the contracted
+    // cost back on at each exit.
+    let offset = reduced.offset;
+
     if reduced.proved_optimal(config.gap_tolerance.max(1e-6)) {
-        let value = reduced.upper_bound;
+        let value = reduced.upper_bound + offset;
         return SolveResult {
             status: SolveStatus::Optimal,
             primal_bound: value,
@@ -172,6 +228,7 @@ fn finish(
     let root = reduced.root;
     let root_lower_bound = reduced.lower_bound;
     let root_upper_bound = reduced.upper_bound;
+    let incumbent_arcs = reduced.incumbent_arcs;
 
     // The reduced instance may now be small enough for the exact DP.
     if let Some(mut r) = try_dreyfus_wagner(&work_graph, &terminals, start) {
@@ -181,6 +238,8 @@ fn finish(
             r.primal_bound = root_upper_bound;
             r.dual_bound = root_upper_bound;
         }
+        r.primal_bound += offset;
+        r.dual_bound += offset;
         return r;
     }
 
@@ -189,6 +248,11 @@ fn finish(
     let remaining = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
     solver.config = SolverConfig { time_limit_secs: remaining, ..config.clone() };
     solver.seed_bounds(root_lower_bound, root_upper_bound);
+    // The incumbent's arc numbering matches `work_graph` only when it survived
+    // the last shrink; `tighten` clears it otherwise, so this is always safe.
+    if let Some(arcs) = incumbent_arcs {
+        solver.seed_incumbent(arcs);
+    }
 
     let (solution, stats) = solver.solve();
 
@@ -226,8 +290,8 @@ fn finish(
 
     SolveResult {
         status,
-        primal_bound: primal,
-        dual_bound: dual,
+        primal_bound: primal + offset,
+        dual_bound: dual + offset,
         gap_pct: gap_pct.max(0.0),
         nodes_processed: stats.nodes_processed,
         cuts_added: stats.cuts_added,

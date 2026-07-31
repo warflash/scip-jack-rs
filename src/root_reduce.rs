@@ -39,7 +39,8 @@ use crate::graph::algorithms::{
     dual_ascent_masked, reduced_cost_distances, reduced_cost_fixings, ArcIndex, DualAscentResult,
 };
 use crate::graph::{Cost, DirectedGraph, NodeId, NodeType, UndirectedGraph};
-use crate::heuristics::sph::{shortest_path_heuristic, SphWorkspace};
+use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
+use crate::heuristics::sph::{shortest_path_heuristic, SphResult, SphWorkspace};
 use crate::preprocessing::preprocess;
 use crate::graph::SteinerInstance;
 
@@ -57,6 +58,10 @@ pub struct Reduced {
     pub incumbent_arcs: Option<Vec<u32>>,
     /// Certificate backing `lower_bound`, from the best root.
     pub certificate: Option<DualAscentResult>,
+    /// Cost of the edges contracted into the objective while tightening. Every
+    /// bound in this struct is stated for `graph`; the corresponding bound for
+    /// the instance handed to [`tighten`] is `offset` plus that value.
+    pub offset: Cost,
     pub rounds: u32,
 }
 
@@ -85,7 +90,7 @@ impl Default for ReduceConfig {
     fn default() -> Self {
         Self {
             roots_per_round: 4,
-            heuristic_starts: 12,
+            heuristic_starts: 64,
             max_rounds: 8,
             initial_upper_bound: Cost::INFINITY,
             deadline: None,
@@ -120,6 +125,7 @@ pub fn tighten(
     let mut upper_bound = config.initial_upper_bound;
     let mut certificate: Option<DualAscentResult> = None;
     let mut incumbent_arcs: Option<Vec<u32>> = None;
+    let mut offset: Cost = 0.0;
     let mut rounds = 0;
 
     let mut root = *terminals.first().unwrap_or(&1);
@@ -183,6 +189,13 @@ pub fn tighten(
         if ri.terminals.is_empty() {
             break;
         }
+        // Contractions moved `rg.offset` out of the graph and into the
+        // objective. Both bounds are stated for the graph, so both shift down.
+        if rg.offset > 0.0 {
+            offset += rg.offset;
+            lower_bound = (lower_bound - rg.offset).max(0.0);
+            upper_bound -= rg.offset;
+        }
         graph = ru;
         terminals = ri.terminals;
         // Node ids changed, so an incumbent recorded in the old numbering is
@@ -206,6 +219,7 @@ pub fn tighten(
         upper_bound,
         incumbent_arcs,
         certificate,
+        offset,
         rounds,
     }
 }
@@ -240,19 +254,42 @@ fn round(
 
     let true_costs: Vec<Cost> = (0..num_arcs).map(|a| idx.cost(a as u32)).collect();
     let mut ws = SphWorkspace::new(idx.num_nodes());
+    let mut kws = KeyPathWorkspace::new(idx.num_nodes());
 
     let roots = root_candidates(terminals, config.roots_per_round);
     let primary = *roots.first().unwrap_or(&terminals[0]);
 
-    // Unguided primal pass from a spread of starts. Each run is k Dijkstras on a
-    // graph that earlier rounds have already shrunk, so this stays cheap.
+    // Every constructed tree goes through key-path exchange before it is scored.
+    // The construction heuristic alone lands several percent above the optimum on
+    // the larger instances, and on those the reduced-cost eliminations are driven
+    // entirely by how tight the incumbent is.
     let mut upper_bound = incoming_ub;
     let mut incumbent_arcs: Option<Vec<u32>> = None;
     let mut pool: Vec<(Cost, Vec<NodeId>)> = Vec::new();
+
+    let mut polish = |r: SphResult,
+                      root: NodeId,
+                      kws: &mut KeyPathWorkspace,
+                      ws: &mut SphWorkspace|
+     -> SphResult {
+        match key_path_exchange(&idx, &active, root, &r, &is_terminal, 16, kws, ws) {
+            Some(better) => better,
+            None => r,
+        }
+    };
+
+    let expired = || config.deadline.is_some_and(|d| Instant::now() >= d);
+
+    // Unguided primal pass from a spread of starts. Each run is k Dijkstras on a
+    // graph that earlier rounds have already shrunk, so this stays cheap.
     for s in heuristic_starts(terminals, config.heuristic_starts) {
+        if expired() {
+            break;
+        }
         if let Some(r) =
             shortest_path_heuristic(&idx, &active, &true_costs, primary, s, terminals, &is_terminal, &mut ws)
         {
+            let r = polish(r, primary, &mut kws, &mut ws);
             pool.push((r.cost, nodes_of(&idx, &r.arcs, primary)));
             if r.cost < upper_bound - 1e-9 {
                 upper_bound = r.cost;
@@ -285,6 +322,9 @@ fn round(
         // Reduced costs make an excellent search metric: arcs the dual leaves
         // tight are exactly the ones a good solution wants.
         for s in heuristic_starts(terminals, config.heuristic_starts.min(4)) {
+            if expired() {
+                break;
+            }
             if let Some(sol) = shortest_path_heuristic(
                 &idx,
                 &active,
@@ -295,6 +335,7 @@ fn round(
                 &is_terminal,
                 &mut ws,
             ) {
+                let sol = polish(sol, r, &mut kws, &mut ws);
                 pool.push((sol.cost, nodes_of(&idx, &sol.arcs, r)));
                 if sol.cost < upper_bound - 1e-9 {
                     upper_bound = sol.cost;
@@ -341,7 +382,7 @@ fn round(
     if pool.len() >= 2 {
         pool.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         for take in [2usize, 3, 5, 8] {
-            if take > pool.len() {
+            if take > pool.len() || expired() {
                 break;
             }
             let mut union: Vec<NodeId> = pool[..take].iter().flat_map(|(_, v)| v.iter().copied()).collect();
@@ -355,6 +396,7 @@ fn round(
                 &is_terminal,
                 &mut ws,
             );
+            let merged = polish(merged, primary, &mut kws, &mut ws);
             if merged.cost < upper_bound - 1e-9 {
                 upper_bound = merged.cost;
                 incumbent_arcs = Some(merged.arcs);

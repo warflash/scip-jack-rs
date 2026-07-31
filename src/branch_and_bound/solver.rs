@@ -87,6 +87,11 @@ pub struct BranchAndCutSolver {
     total_lp_solves: u64,
     /// Nodes pruned by the dual-ascent bound without solving an LP.
     da_prunes: u64,
+    /// Wall-clock stop. Checked inside the cut loop as well as between nodes:
+    /// a root node runs a hundred cut rounds, each of which may solve dozens of
+    /// LPs, so a between-nodes check alone lets one node overrun the budget by
+    /// an order of magnitude.
+    deadline: Option<Instant>,
 }
 
 impl BranchAndCutSolver {
@@ -125,12 +130,40 @@ impl BranchAndCutSolver {
             total_cuts_added: 0,
             total_lp_solves: 0,
             da_prunes: 0,
+            deadline: None,
         }
     }
 
     pub fn with_config(mut self, config: SolverConfig) -> Self {
         self.config = config;
         self
+    }
+
+    /// Install an incumbent found before the search started.
+    ///
+    /// Unlike [`BranchAndCutSolver::seed_bounds`] this makes the solution itself
+    /// available, so the search can report and verify it instead of merely
+    /// pruning against its cost.
+    pub fn seed_incumbent(&mut self, arcs: Vec<ArcId>) {
+        if arcs.is_empty() {
+            return;
+        }
+        let mut nodes: Vec<NodeId> = Vec::with_capacity(arcs.len() + 1);
+        nodes.push(self.root);
+        let mut cost = 0.0;
+        for &a in &arcs {
+            let arc = &self.graph.arcs[a as usize];
+            nodes.push(arc.tail);
+            nodes.push(arc.head);
+            cost += arc.cost;
+        }
+        nodes.sort_unstable();
+        nodes.dedup();
+        let solution = SteinerSolution::new(arcs, nodes, cost);
+        if self.verify_solution(&solution) {
+            self.recombination.add_solution(solution.clone());
+            self.tree.update_primal(solution);
+        }
     }
 
     /// Seed the search with bounds already proved at the root by ascend-and-prune.
@@ -149,59 +182,26 @@ impl BranchAndCutSolver {
 
     pub fn solve(&mut self) -> (Option<SteinerSolution>, SolverStats) {
         let start_time = Instant::now();
+        self.deadline = Some(
+            start_time + std::time::Duration::from_secs_f64(self.config.time_limit_secs.max(0.0)),
+        );
 
         self.arc_index = Some(ArcIndex::new(&self.graph));
-        self.run_initial_heuristic();
 
-        // Dual ascent: fast lower bound + reduced-cost fixing (Wong 1984)
+        // No construction heuristic here. Ascend-and-prune has already run a
+        // far stronger primal search — many guided shortest-path starts, key-path
+        // exchange and recombination — and handed the result over through
+        // `seed_bounds`/`seed_incumbent`. Repeating a weaker search would only
+        // burn the time budget before the first LP is ever solved.
         let da_result = dual_ascent(&self.graph, self.root, &self.terminals);
         if da_result.lower_bound > self.tree.global_dual_bound {
             self.tree.global_dual_bound = da_result.lower_bound;
         }
         self.da_reduced_costs = da_result.reduced_costs.clone();
 
-        // Reduced-cost fixing: fix arcs where LB + reduced_cost > UB
         if self.tree.global_primal_bound < f64::INFINITY {
-            let fixable = reduced_cost_fixable_arcs(&da_result, self.tree.global_primal_bound);
-            for arc_id in fixable {
+            for arc_id in reduced_cost_fixable_arcs(&da_result, self.tree.global_primal_bound) {
                 self.fixed_zero_arcs.insert(arc_id);
-            }
-
-            // DA-guided primal heuristic: use reduced costs to bias construction
-            let da_weights: Vec<f64> = da_result.reduced_costs.iter()
-                .enumerate()
-                .map(|(i, &rc)| {
-                    let orig = self.graph.arcs[i].cost;
-                    if orig > 1e-10 { 1.0 - (rc / orig).min(1.0) } else { 0.0 }
-                })
-                .collect();
-
-            let mut da_constructive = ConstructiveHeuristic::new(
-                self.graph.clone(), self.root, self.terminals.clone(),
-            );
-            da_constructive = da_constructive.with_lp_weights(da_weights);
-            da_constructive.num_starts = 20;
-
-            if let Some(da_sol) = da_constructive.run() {
-                if self.verify_solution(&da_sol) && da_sol.objective_value < self.tree.global_primal_bound - 1e-9 {
-                    let mut ls = LocalSearchHeuristic::new(
-                        self.graph.clone(), self.root, self.terminals.clone(),
-                    );
-                    ls.set_incumbent(da_sol.clone());
-                    let best = match ls.run() {
-                        Some(improved) if improved.objective_value < da_sol.objective_value
-                            && self.verify_solution(&improved) => improved,
-                        _ => da_sol,
-                    };
-                    self.recombination.add_solution(best.clone());
-                    self.tree.update_primal(best);
-
-                    // Re-run reduced-cost fixing with tighter UB
-                    let fixable = reduced_cost_fixable_arcs(&da_result, self.tree.global_primal_bound);
-                    for arc_id in fixable {
-                        self.fixed_zero_arcs.insert(arc_id);
-                    }
-                }
             }
         }
 
@@ -392,6 +392,10 @@ impl BranchAndCutSolver {
         (da.lower_bound, fix.arcs)
     }
 
+    fn out_of_time(&self) -> bool {
+        self.deadline.is_some_and(|d| Instant::now() >= d)
+    }
+
     fn process_node(&mut self, node_id: u64) -> NodeResult {
         let node = &self.tree.nodes[node_id as usize];
         let fixings = node.fixings.clone();
@@ -449,6 +453,9 @@ impl BranchAndCutSolver {
         let mut stall_rounds = 0u32;
 
         for _round in 0..max_rounds {
+            if self.out_of_time() {
+                break;
+            }
             let mut obj = self.base_lp.as_mut().unwrap().solve();
             self.total_lp_solves += 1;
 
@@ -463,7 +470,7 @@ impl BranchAndCutSolver {
             // the fully resident model while the working LP stays small.
             for _ in 0..64 {
                 let added = self.base_lp.as_mut().unwrap().separate_structural(500);
-                if added == 0 {
+                if added == 0 || self.out_of_time() {
                     break;
                 }
                 self.total_cuts_added += added as u64;
@@ -777,37 +784,6 @@ impl BranchAndCutSolver {
         }
 
         best_var
-    }
-
-    fn run_initial_heuristic(&mut self) {
-        let mut constructive = ConstructiveHeuristic::new(
-            self.graph.clone(),
-            self.root,
-            self.terminals.clone(),
-        );
-        constructive.num_starts = 50;
-
-        if let Some(initial_sol) = constructive.run() {
-            if !self.verify_solution(&initial_sol) {
-                return;
-            }
-
-            let mut ls = LocalSearchHeuristic::new(
-                self.graph.clone(),
-                self.root,
-                self.terminals.clone(),
-            );
-            ls.set_incumbent(initial_sol.clone());
-
-            let best = match ls.run() {
-                Some(improved) if improved.objective_value < initial_sol.objective_value
-                    && self.verify_solution(&improved) => improved,
-                _ => initial_sol,
-            };
-
-            self.recombination.add_solution(best.clone());
-            self.tree.update_primal(best);
-        }
     }
 
     fn run_lp_heuristic(&self, lp_solution: &[f64]) -> Option<SteinerSolution> {

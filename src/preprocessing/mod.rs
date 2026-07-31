@@ -2,6 +2,9 @@ pub mod degree;
 pub mod distance;
 pub mod bottleneck;
 pub mod implications;
+pub mod csr;
+pub mod nearest_vertex;
+pub mod vertex_test;
 
 use std::collections::{HashMap, HashSet, BinaryHeap};
 use std::cmp::Ordering;
@@ -22,6 +25,9 @@ pub struct ReducibleGraph {
     pub contracted_edges: HashSet<EdgeId>,
     /// Nodes that have been contracted (degree-2 removal targets)
     pub contracted_nodes: HashSet<NodeId>,
+    /// Total cost of edges contracted into the objective. The optimum of this
+    /// graph plus `offset` is the optimum of the graph handed in.
+    pub offset: Cost,
 }
 
 impl ReducibleGraph {
@@ -51,6 +57,7 @@ impl ReducibleGraph {
             edge_valid: vec![true; m],
             contracted_edges: HashSet::new(),
             contracted_nodes: HashSet::new(),
+            offset: 0.0,
         }
     }
 
@@ -133,6 +140,65 @@ impl ReducibleGraph {
         self.adjacency.entry(n2).or_default().push((n1, new_eid));
 
         Some((new_eid, new_cost))
+    }
+
+    /// Contract edge `eid = {keep, drop}`: merge `drop` into `keep` and charge
+    /// `c(eid)` to [`ReducibleGraph::offset`].
+    ///
+    /// The caller owns the proof obligation that *some* optimal tree contains
+    /// `eid`. Given that, contraction preserves the optimum exactly:
+    ///
+    /// - `opt(G/e) <= opt(G) - c(e)`: an optimal tree `S` containing `e` maps to
+    ///   the tree `S/e`, which still spans every terminal because `keep` and
+    ///   `drop` became the same vertex.
+    /// - `opt(G) <= opt(G/e) + c(e)`: expanding a tree `S'` of `G/e` splits the
+    ///   merged vertex back into `keep` and `drop`, and adding `e` reconnects the
+    ///   two halves, so `S' + e` spans every terminal of `G`.
+    ///
+    /// `keep` must be a terminal (or become one): the merged vertex has to be
+    /// visited, since it absorbs `drop`'s incidences and at least one of the two
+    /// endpoints was required.
+    pub fn contract_edge(&mut self, eid: EdgeId, keep: NodeId, drop: NodeId) -> Cost {
+        debug_assert!(self.is_edge_valid(eid));
+        debug_assert_ne!(keep, drop);
+        let cost = self.edges[eid as usize].cost;
+        self.offset += cost;
+        self.edge_valid[eid as usize] = false;
+
+        let incident = self.adjacency.get(&drop).cloned().unwrap_or_default();
+        for (other, f) in incident {
+            if f == eid || !self.is_edge_valid(f) {
+                continue;
+            }
+            if other == keep || other == drop {
+                // Would become a self-loop at the merged vertex.
+                self.edge_valid[f as usize] = false;
+                continue;
+            }
+            let edge = &mut self.edges[f as usize];
+            if edge.src == drop {
+                edge.src = keep;
+            } else {
+                edge.dst = keep;
+            }
+            if let Some(list) = self.adjacency.get_mut(&other) {
+                for slot in list.iter_mut() {
+                    if slot.1 == f {
+                        slot.0 = keep;
+                    }
+                }
+            }
+            self.adjacency.entry(keep).or_default().push((other, f));
+        }
+
+        self.adjacency.insert(drop, Vec::new());
+        self.node_valid[drop as usize] = false;
+        self.terminals.remove(&drop);
+        self.terminals.insert(keep);
+        if self.root == Some(drop) {
+            self.root = Some(keep);
+        }
+        cost
     }
 
     /// Compute shortest paths from source to all nodes (Dijkstra on the reduced graph).
@@ -271,55 +337,58 @@ pub struct PreprocessingResult {
     pub lower_bound_offset: Cost,
 }
 
-/// Apply all reduction techniques in a sound order:
+/// Run every reduction to a fixpoint.
 ///
-/// 1. Iterative: degree reductions + SD test + implications
-///    The SD test uses contraction-aware guards to avoid removing edges
-///    whose shortest paths are distorted by degree-2 contractions.
+/// The order within a round is deliberate:
 ///
-/// The SD test only applies to edges whose BOTH endpoints are NOT adjacent
-/// to any contracted node, ensuring it operates on undistorted distances.
+/// 1. **Degree rules** — the cheapest, and they expose work for everything else.
+/// 2. **Terminal contraction** ([`nearest_vertex`]) — the only rule that shrinks
+///    the terminal set, which is what the dual ascent and the LP both scale with.
+/// 3. **Bottleneck Steiner distance** ([`bottleneck`]) — edge deletion. This
+///    subsumes the older additive test `d(u,t) + d(v,t) < c`, because
+///    `max(a, b) <= a + b` for nonnegative distances.
+/// 4. **Star domination** ([`vertex_test`]) — Steiner vertex deletion, the
+///    strongest rule on dense graphs and the most expensive.
+/// 5. **Implications** — only once the rest has settled, since they read the
+///    current structure.
+///
+/// Each rule is judged against the graph as it stands when the rule runs, and
+/// each preserves the optimum of that graph, so the composition preserves the
+/// optimum of the original. Contractions move cost into
+/// [`ReducibleGraph::offset`]; the optimum of the returned graph plus that offset
+/// is the optimum of the instance handed in.
 pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (ReducibleGraph, PreprocessingResult) {
     let mut rg = ReducibleGraph::from_instance(instance, graph);
 
     let initial_nodes = rg.num_valid_nodes();
     let initial_edges = rg.num_valid_edges();
     let mut total_fixed: Vec<EdgeId> = Vec::new();
-    let mut lb_offset = 0.0;
-
-    let mut _iteration = 0u32;
 
     loop {
-        let (deg_removed, fixed, offset) = degree::degree_reductions(&mut rg);
+        let (deg_removed, fixed, _) = degree::degree_reductions(&mut rg);
         total_fixed.extend(fixed);
-        lb_offset += offset;
 
-        // Bottleneck Steiner distance. This subsumes the older additive test
-        // `d(u,t) + d(v,t) < c`, because `max(a, b) <= a + b` for non-negative
-        // distances, so anything the additive rule removed this one removes too.
-        let dist_removed = 0;
+        let nv_removed = nearest_vertex::nearest_vertex_reductions(&mut rg);
         let bn_removed = bottleneck::bottleneck_reductions(&mut rg);
+        let vt_removed = vertex_test::vertex_reductions(&mut rg);
 
-        // Implication reductions: triangle dominance + conflict propagation.
-        // Only run when graph has settled (no degree reductions or SD removals
-        // in this iteration), as implications depend on current graph structure.
-        let impl_removed = if deg_removed == 0 && dist_removed == 0 && bn_removed == 0 {
+        let settled = deg_removed + nv_removed + bn_removed + vt_removed == 0;
+        let impl_removed = if settled {
             implications::implication_reductions(&mut rg)
         } else {
             0
         };
 
-        if deg_removed + dist_removed + bn_removed + impl_removed == 0 {
+        if settled && impl_removed == 0 {
             break;
         }
-        _iteration += 1;
     }
 
     let result = PreprocessingResult {
         nodes_removed: initial_nodes - rg.num_valid_nodes(),
         edges_removed: initial_edges - rg.num_valid_edges(),
         edges_fixed: total_fixed,
-        lower_bound_offset: lb_offset,
+        lower_bound_offset: rg.offset,
     };
 
     (rg, result)
@@ -366,8 +435,9 @@ mod tests {
 
         assert!(result.nodes_removed >= 1, "Should remove degree-1 Steiner node");
         assert!(!rg.is_node_valid(4), "Node 4 should be removed");
-        assert!(rg.is_node_valid(1), "Terminal 1 should remain");
-        assert!(rg.is_node_valid(3), "Terminal 3 should remain");
+        // Both terminals hang off a single corridor, so contraction folds the
+        // whole instance into the offset.
+        assert!((rg.offset - 2.0).abs() < 1e-9, "offset {}", rg.offset);
     }
 
     #[test]
@@ -399,14 +469,28 @@ mod tests {
         assert!(result.nodes_removed >= 1);
     }
 
+    /// Terminals may be *merged* by contraction, but the surviving terminal set
+    /// must still cover every original terminal: none may simply vanish.
     #[test]
-    fn test_terminals_never_removed() {
+    fn test_terminals_are_never_dropped_without_being_paid_for() {
         let (instance, graph) = build_degree1_instance();
         let (rg, _) = preprocess(&instance, &graph);
 
-        for &t in &instance.terminals {
-            assert!(rg.is_node_valid(t), "Terminal {} was incorrectly removed", t);
-        }
+        let survivors: Vec<NodeId> = rg
+            .terminals
+            .iter()
+            .copied()
+            .filter(|&t| rg.is_node_valid(t))
+            .collect();
+        assert!(!survivors.is_empty(), "every terminal disappeared");
+        // Whatever was contracted away is charged to the offset.
+        let live_cost: Cost = rg
+            .edges
+            .iter()
+            .filter(|e| rg.is_edge_valid(e.id))
+            .map(|e| e.cost)
+            .sum();
+        assert!(rg.offset + live_cost >= 2.0 - 1e-9);
     }
 
     #[test]

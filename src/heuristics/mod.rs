@@ -1,6 +1,7 @@
 pub mod constructive;
 pub mod local_search;
 mod recombination;
+pub mod key_path;
 pub mod sph;
 
 pub use constructive::ConstructiveHeuristic;

@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $repo = 'F:\Repositories\skip-jack-rs'
-$exe = 'C:\Users\nwies\AppData\Local\Temp\skip-jack-pace-benchmark-full.exe'
-$resultPath = Join-Path $repo 'benchmarks\pace2018-results\pace-exact-full-current.csv'
+$exe = 'C:\Users\nwies\AppData\Local\Temp\skip-jack-pace-benchmark-rebuilt.exe'
+$resultPath = Join-Path $repo 'benchmarks\pace2018-results\pace-exact-full-rebuilt.csv'
 $dataRoot = Join-Path $repo 'benchmarks\pace2018'
 $tempDir = Join-Path $env:TEMP 'skip-jack-pace-full-output-cont'
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
