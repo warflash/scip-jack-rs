@@ -277,7 +277,8 @@ pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (Reduc
         total_fixed.extend(fixed);
         lb_offset += offset;
 
-        let dist_removed = distance::distance_reductions(&mut rg);
+        // SD test disabled pending investigation of correctness on b10, b11, b13
+        let dist_removed = 0u32;
 
         // NOTE: Bottleneck reductions are disabled because the current formula
         // BSD(u,v) = min_t max(bd(u,t), bd(v,t)) is a LOWER BOUND on the true
