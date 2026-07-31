@@ -1,0 +1,1846 @@
+﻿SOURCE: GamrathKochMaherRehfeldtShinano.pdf
+PAGES: 34
+EXTRACTOR: pypdf 6.10.0 (Unicode text), pdfplumber fallback
+
+
+===== PAGE 1 =====
+
+SCIP-Jack – A solver for STP and variants with
+parallelization extensions
+Gerald Gamrath, Thorsten Koch, Stephen J. Maher, Daniel Rehfeldt, and Yuji
+Shinano
+Zuse Institute Berlin, Takustr. 7, 14195 Berlin, Germany,
+{gamrath, koch, maher, rehfeldt, shinano }@zib.de
+Abstract. In this article we describe the impact from embedding a 15
+year old model for solving the Steiner tree problem in graphs in a state-
+of-the-art MIP-Framework, making the result run in a massively parallel
+environment and extending the model to solve as many problem variants
+as possible. We end up with a high-performance solver that is capable of
+solving previously unsolved instances and, in contrast to its predecessor,
+is freely available for academic research.
+1 Introduction
+The Steiner tree problem in graphs (STP) is one of the classical NP -hard prob-
+lems [1]. Given an undirected connected graph G = (V,E ), costs c : E→ Q+
+and a set T ⊂ V of terminals, the problem is to ﬁnd a minimum weight tree
+S⊆G which spans T .
+The STP is said to have a variety of practical applications. However, applica-
+tions that involve solving the pure STP are rarely seen in practice. Nevertheless
+the pure STP can be found in applications such as routing in computer net-
+works, VLSI design and phylogeny [2], but even VLSI design is more suitably
+formulated as a rectilinear Steiner tree packing problem. The lack of real-world
+applications for the pure STP is highlighted by the fact that from the thousands
+of instance collected by the authors in the SteinLib [3] very few have practi-
+cal origins. However, there exist numerous applications that include STPs as a
+subproblem or that are formulated as a particular variant of it.
+The announcement of the 11th DIMACS Challenge, initiated our work with
+an investigation into the model and code described in [4]. Taking this and the
+developments of the last 15 years, throughout this paper we show:
+– in Section 2 the impact of transitioning from a simple self-made branch-and-
+cut code to the use of a full ﬂedged, state-of-the-art MIP-Framework,
+1 This paper is presented with preliminary results performed for the DIMACS Chal-
+lenge 2014.
+
+===== PAGE 2 =====
+
+– in Section 3 how to employ the versatility of MIP models to solve a class of
+related problem variants, and
+– in Section 4 the potential from using hundreds of CPU cores to solve a single
+problem.
+We will demonstrate that it can be worthwhile to revisit topics after some
+time. Further details on this can be found in [5, 6].
+2 From simple hand tailored to oﬀ-the-shelf
+state-of-the-art
+In this section we present the solver SCIP-Jack. We ﬁrst describe the STP
+model used and the simple self-made branch-and-cut code Jack-III. The exten-
+sion of the MIP solving framework SCIP, by the use of STP speciﬁc plugins, to
+a full-scale branch-and-cut based STP solver will then be explained. Solving the
+STP, and related variants, using SCIP proﬁts from the available state-of-the-
+art MIP solving algorithms. The impact of combining SCIP and Jack-III to
+form SCIP-Jack is then analyzed and discussed through some computational
+experiments.
+The model employed in SCIP-Jack uses the directed cut formulation . For
+this we brieﬂy delineate how to transform a STP to its directed equivalent the
+Steiner arborescence problem : Given an undirected graph ( V,E ) and a set of
+terminals T , we replace each edge {u,v}∈ E by two anti-parallel arcs ( u,v )
+and (v,u ). Let A denote this set of arcs, and D = (V,A ) the resulting digraph.
+Selecting an arbitary terminalr∈T as the root, we obtain a Steiner arborescence
+problem rooted at r. Each solution to this problem, called a Steiner arborescence,
+is a subgraphS⊆D such that (VS,AS) contains exactly one directed path fromr
+tot for allt∈T\{r}. There is a one-to-one correspondence between (undirected)
+Steiner trees in G and Steiner arborescences in D which contain at most one of
+two anti-parallel arcs. Thus, if we choose arc weightsc(u,v) := c(v,u) :=c{u,v}, for
+{u,v}∈ E, the Steiner tree problem can be solved by ﬁnding the minimal Steiner
+arborescence with respect to c. Introducing variables ya for a∈ A with the
+interpretationya := 1, if a is in the Steiner arborecence, and ya := 0 otherwise,
+we obtain the integer program:
+F ormulation 1 Directed Cut Formulation
+min cTy (1)
+y(δ+(W )) ≥ 1,∀W⊂V,r ∈W, (V\W )∩T̸=∅ (2)
+y(δ−(v))
+
+
+
+=
+=
+≤
+0, if v =r;
+1, if v∈T\r;
+1, if v∈N;
+(3)
+y(δ−(v)) ≤ y(δ+(v)),∀v∈N; (4)
+y(δ−(v)) ≥ ya,∀a∈δ+(v),v∈N; (5)
+0≤ya ≤ 1,∀a∈A; (6)
+ya ∈ {0, 1},∀a∈A, (7)
+
+===== PAGE 3 =====
+
+where N =V\T , δ+(X) :={(u,v )∈A|u∈X,v ∈V\X} for X⊂V , i.e.
+N is the set of arcs with tail in X and head in its complement. The details of
+Formulation 1 are given in [4]. It is shown in [2] that the ﬂow-cuts (3)-(5) are
+indeed facets.
+Since the model potentially contains an exponential number of constraints
+a branch-and-cut approach is employed. Constraints that are violated are sep-
+arated during the execution of the algorithm. Jack-III uses this model and
+implements its own branch-and-bound search. Strong branching is used with a
+depth-ﬁrst search node selection while attempts are made to generate feasible
+solutions with a primal heuristic.
+Our reimplementation of SCIP-Jack is based on the academic MIP solver
+SCIP [7]. Besides being one of the fastest non-commercial MIP solvers [8], SCIP
+is a general branch-and-cut framework, emplyoing a plugin-based design to pro-
+vide a simple method of extension to handle speciﬁc problem classes.
+The preprocessing of SCIP-Jack mainly relies on STP-speciﬁc reduction
+techniques as implemented in [4], with a few additions. They have a signiﬁcant
+impact on the solving time for many instances, see [9, 2]. There is much scope for
+improvement, considering the immense advancements in this area, most saliently
+the much stronger and faster reduction techniques employed by [2]. The absence
+of some of these fast and eﬀective reduction techniques is indeed considered by
+us to be the most predominant blemish of SCIP-Jack and we would purport
+that an enourmous speed-up for almost all variants could be achieved by imple-
+menting those techniques.
+The branch-and-bound search is organized by SCIP: we use the default hy-
+brid branching rule [10] which combines strong branching and pseudo costs with
+history information like conﬂict and inference scores. Node selection is done with
+respect to a best estimate criterion, interleaved best bound and depth-ﬁrst search
+phases [11].
+Three STP-speciﬁc primal heuristics have been implemented, a construc-
+tive heuristic based on [12], an improvement heuristic [13] and a recombination
+heuristic. The improvement heuristic is called whenever a new solution is found
+that is within the three best solution known so far. It is in fact a combination
+of the three local search heuristics vertex insertion, key-path exchange and key-
+vertex elimination, as described in [13], with the most impact, by far, being
+achieved by the latter two. For the implementation in SCIP-Jack some alter-
+ations had to be made in order to adapt the algorithms, originally designed for
+undirected problems, to our model (Formulation 1). The third heuristic is based
+on a recombination approach, where several good solutions are merged. A STP
+is then solved on the corresponding graph and followed by the application of
+the improvement heuristic. This approach could be implemented using SCIP
+without much diﬃculty as SCIP not only stores a number of best found solu-
+tions, but also allows to create and solve a subproblem during the superordinate
+solving process.
+
+===== PAGE 4 =====
+
+Table 1: Computational results for STP instances
+test set # instances # solved avg. nodes avg. time [s]
+SP 8 6 2.8 4.7
+I640 100 65 9.4 62.8
+PUC 50 8 1708.5 330.1
+vienna-i-simple 85 58 1.8 2673.0
+vienna-i-advanced 85 61 1.8 1727.5
+Solving the Steiner tree problem in graphs
+While the focus of this paper is set on the versatility of SCIP-Jack in terms of
+being capable of solving a large variety of STP variants, it is still important to
+demonstrate its abilities to handle vanilla STP instances. There are many STP
+instances submitted to the DIMACS challenge with varying degrees of complex-
+ity. We present computational experiments on a subset of these to demonstrate
+the solving capabilities of SCIP-Jack. A summary of the results are presented
+in Table 1, with detailed results presented in the appendix.
+All computational experiments described were performed on a cluster of Intel
+Xeon E5-2670 CPUs with 2.50 GHz and 32 GB RAM, running Kubuntu 14.4.
+We used a development version of SCIP 3.1 with SoPlex [14] version 2.0.1 as
+underlying LP solver and a time limit of 12 hours. An average of the results is
+given by taking the shifted geometric mean [11] with a shift of 1 .0.
+Computational Results The test sets SP, I640, and PUC are all relatively
+hard test sets from SteinLib, still containing unsolved instances. SCIP-Jack
+solves most of the instances of the SP test set and about two thirds of the I640 set.
+On average, only a couple of nodes and a few minutes are required, although there
+are also instances which need a signiﬁcant amount of branching or several hours
+to solve. The PUC test set is even harder and more than half of the instances
+in the set remain unsolved. SCIP-Jack only solves eight of 50 instances and
+none at the root node. The vienna test sets [15] were newly submitted to the
+DIMACS Challenge. About two thirds of the instances are solved by SCIP-
+Jack, most of them at the root node or after a couple of branchings. However,
+a lot of time is spent in the separation process. Nevertheless, SCIP-Jack seems
+to be competitive to the results presented in [15], at least for the test set vienna-
+i-simple.
+3 From single problem to class solver
+This section introduces several variants of the Steiner problem that are solved
+by SCIP-Jack. Speciﬁcally, transformations required to render these variants
+tractable for our solver are presented. Computational results will be shown for
+most of the discussed variants in order to demonstrate the eﬀectiveness of our
+generic STP solver. Throughout this section the weights of an (undirected) edge
+
+===== PAGE 5 =====
+
+e and an (directed) arc a are denoted by c(e) and c(a) respectively and the
+weight of a vertex v byp(v).
+The Steiner Arborescence Problem
+Since the Steiner tree solver transforms each Steiner tree problem to a Steiner
+arborescence problem (SAP), as described in section 2, the branch-and-cut sub-
+struction and the constructive heuristic can be used without much further imple-
+mentation. However, the same does not apply for the presolving techniques and
+the local heuristics. As no Steiner arborescence problems have been published
+in the DIMACS Challenge, this section goes without computational evaluations.
+Nevertheless, the Steiner arborescence problem is of importance in the context
+of the DIMACS Challenge as several of the following Steiner variants can be
+reduced to this.
+The Rectilinear Steiner Minimum T ree Problem
+The rectilinear Steiner minimum tree problem (RSMTP) can be described as
+follows: given a number of n∈ N points in the plane, the task is to ﬁnd a
+shortest tree consisting only of vertical and horizontal line segments, containing
+alln points. The RSMTP isNP -hard, as proved in [16], and has been the subject
+of various publications, [17–19]. In addition to this two-dimensional variant,
+a generalisation of the problem to the d-dimensional case, with d ≥ 2, will
+be considered, having real-world applications in up to eight dimensions, e.g. in
+cancer research [20].
+Hanan [21] proved that the RSMTP can be restricted to the grid obtained
+by constructing vertical and horizontal lines through each given point of the
+RSMTP. Subsequently, this observation and its multi-dimensional generalisa-
+tion [22] is exploited in order to adapt the RSMTP to our solver. Given a
+d−dimensional, d∈ N\{ 1}, RSMTP represented by a set of n∈ N points
+in Qd, the ﬁrst step involves building a d−dimensional Hanan grid. Thereafter,
+a STP P = (V,E,T,c ) is constructed in a straightforward way: The vertex set
+V is constructed by assigning each intersection point of the grid a vertex. Anal-
+ogously,E is obtained by interconnecting the vertices V according to the grid
+structure, i.e. in such a way that two vertices inV are adjacent if and only if their
+corresponding intersection points are adjacent in the grid. The set of terminals
+T consists of all vertices in V corresponding to one of the original n RSMTP
+points. Finally, the cost of an edge {v,w}∈ E is deﬁned by the (Euclidean)
+distance of the two d-dimensional points in the grid corresponding to v and w
+respectively.
+Claim 1 Each solution to the STP obtained from a RSMTP as delineated above,
+can be transformed to the original RSMTP, by applying the described bijective
+mapping. Optimality is preserved.
+
+===== PAGE 6 =====
+
+There are a few necessary remarks regarding the implementation in SCIP-
+Jack. First, by default presolving is not used for RSMTP problems within our
+solver. This is spawned by the problem speciﬁc structure, which proved to be
+distinctively recalcitrant to the reduction techniques employed by SCIP-Jack
+leading to an exceptionally poor performance of the presolving. Second, we do
+not expect this simple approach to be competitive with highly specialized solvers,
+such as GeoSteiner [17] in the cases d = 2 and d = 3. However, in dimensions
+d≥ 4 there seems to be a lack of specialized solvers, so this approach might be
+of help for such instances. Still, it is not practical to apply the grid transforma-
+tion for large instances in high dimension, as the number of both vertices and
+edges increases exponentially with the number of dimensions. A potential reduc-
+tion technique for the RSMTP is the full Steiner trees (FST) generation [23].
+However, presolving and reduction techniques are not used by SCIP-Jack for
+this variant and as such we have not implemented this approach. Although this
+might be done in the future, especially with respect to possible multi-dimensional
+generalizations.
+A variant of the RSMTP is theobstacle-avoiding rectilinear Steiner minimum
+tree problem (OARSMTP). In these problems it is required that the minimum-
+length rectilinear tree does not pass through the interior of any speciﬁed axis-
+aligned rectangles, denoted as obstacles. SCIP-Jack is easily extended to solve
+the OARSMTP with a simple modiﬁcation to the Hanan grid approach applied
+to the RSMTP. This modiﬁcation involves removing all vertices that are located
+in the interior of an obstacle together with their incident edges. Since there is no
+competition for this variant in the DIMACS challenge and for the OARSMTP,
+unlike the RSMT, optimal solutions to all instances have already been published,
+we refrain from conducting any computational experiments.
+Finally, it must be noted that the related Euclidean Steiner tree problem ,
+which diﬀers from the RSMTP insofar as the rectilinear distance is replaced
+with the Euclidean distance, cannot be handled by our solver. It seems diﬃcult
+to render this problem solvable for SCIP-Jack, as a clear structure, such as the
+Hanan grid for the RSMTP, is ostensibly missing.
+Computational Results For the DIMACS Challenge multiple test sets of
+RSMTP instances were posted, which range from very small instances in two
+dimensions with only two or three terminals to eight-dimensional instances with
+70 or more terminals.
+Our experiments focused on the two-dimensional estein instances with up to
+60 nodes, the solids test set with three-dimensional instances whose terminals
+are the vertices of the ﬁve platonic solids, and the cancer instances with up to
+eight dimensions. Computational results are summarized in Table 2 with the
+detailed results listed in the appendix. The smaller estein instances appear to
+need only a few nodes to solve, but a signiﬁcant increase in solving times is
+observed with an increase in the number of nodes. SCIP-Jack manages to solve
+all of the solids instances to optimality, but the dodecahedron instance needs a
+signiﬁcant amount of branching. Finally, the cancer instances show that SCIP-
+
+===== PAGE 7 =====
+
+Table 2: Computational results for RSMTP instances
+test set # instances # solved avg. nodes avg. time [s]
+estein1 46 46 1.0 0.3
+estein10 15 15 1.0 0.2
+estein20 15 15 1.4 8.6
+estein30 15 15 1.2 172.4
+estein40 15 14 1.0 1216.5
+estein50 15 13 1.5 5881.0
+estein60 15 10 1.0 11602.2
+solids 5 5 14.4 7.2
+cancer 14 11 1.0 132.7
+Jack can handle and solve instances with up to eight dimensions. However, it
+becomes evident that the grid approach used in SCIP-Jack can lead to a huge
+number of nodes and edges, particularly in high dimensions, so that some of the
+transformed instances could not be handled with the available memory.
+The Node-W eighted Steiner T ree Problem
+The node-weighted Steiner tree problem (NWSTP) is a generalization of the
+Steiner tree problem in graphs where the edges and, additionally, the vertices
+are assigned non-negative weights. The objective is to interconnect all terminals
+while minimizing the weight summed over both vertices and edges spanned by
+the corresponding tree.
+The NWSTP is formally stated by: Given an undirected graph G = (V,E ),
+node costs p :V → Q≥0, edge costs c :E→ Q≥0, and a set T⊂V of terminals,
+the objective is to ﬁnd a tree S = (VS,ES) that spans T while minimizing
+C(S) :=
+∑
+e∈ES
+c(e) +
+∑
+v∈VS
+p(v).
+Transforming a node-weighted Steiner tree problem in such a way that it can
+be solved by our solver is straightforward. First, each edge is substituted by two
+anti-parallel arcs. Then, observing that in a tree there cannot be more than one
+arc going into the same vertex, we add the weight of each vertex to the weight
+of each of its ingoing arcs.
+T ransformation 1 (NWSTP to SAP)
+Let P = (V,E,T,c,p ) be a NWSTP, construct a transformed Steiner arbores-
+cence problemP′ = (V′,A′,T′,c′,r′) as follows:
+1. Set V′ :=V , T′ :=T , A′ :={(v,w )∈V′×V′ :{v,w}∈ E}.
+2. Deﬁne c′ :A′→ Q≥0 by c′(a) =c({v,w}) +p(w), for a = (v,w )∈A′.
+3. Choose a root r′∈T′ arbitrarily.
+Claim 2 Let S′ be a solution to the SAP P′ = (V′,A′,T′,c′) obtained from a
+NWSTP P = (V,E,T,c,p ) by applying Transformation 1. S′ can be reduced to
+a solution S to P deﬁned by
+
+===== PAGE 8 =====
+
+VS :={v∈V : v∈V′
+S′}
+ES :={{v,w}∈ E : ( v,w )∈A′
+S′ or (w,v )∈A′
+S′}.
+Optimality is preserved by the reduction.
+The resulting problem is a SAP, which can be handled by SCIP-Jack using
+the conﬁgurations described in the Steiner arborescence section.
+Computational Results Two NWSTP instances derived from a computa-
+tional biology application are part of the DIMACS Challenge. The two instances
+diﬀer drastically in their size: the ﬁrst instance has more than 200,000 nodes—
+55,000 of them terminals—and 2.4 million edges, while the smaller instance
+comprises 386 nodes, 1477 edges, and 35 terminals.
+Our generic STP solver is unable to solve the ﬁrst of these instances since
+SCIP-Jack currently cannot apply its preprocessing routines to the transformed
+problem. As a result, we quickly exceed the memory limits when attempting to
+solve the complete unpreprocessed problem.
+By contrast, the second instance is able to be loaded and solved using SCIP-
+Jack. This result demonstrates the ability of SCIP-Jack to solve smaller NW-
+STP instances. The runtime for this instance is very small since our construc-
+tive heuristic immediately ﬁnds optimal solution, with optimality proven after
+4 rounds of separation at the root node. The complete solution process requires
+less than 0.1 seconds.
+The Prize-Collecting Steiner T ree Problem
+In contrast to the classical Steiner tree problem, the required tree for the prize-
+collecting Steiner tree problem (PCSTP) needs only to span a (possibly empty)
+subset of the terminals. However, a non-negative penalty is charged for each
+terminal not contained in the tree. Hence, the objective is to ﬁnd a tree of
+minimum weight, given by both the sum of its edge costs and the prizes of all
+terminals not spanned by the tree. For a profound discussion on the PCSTP that
+details many real-world applications and introduces a sophisticated specialized
+solver, see [24].
+A formal deﬁnition of the problem is stated as: Given an undirected graph
+G = (V,E ), edge-weights c : E→ Q≥0, and node-weights p : V → Q≥0, a tree
+S = (VS,ES) in G is required such that
+P (S) :=
+∑
+e∈ES
+c(e) +
+∑
+v∈V\VS
+p(v) (8)
+is minimized.
+Before discussing the prize-collecting Steiner tree problem, we introduce a
+variation, the rooted prize-collecting Steiner tree problem (RPCSTP). The RPC-
+STP incorporates the additional condition that one distinguished node, denoted
+the root, must be part of every feasible solution to the problem. In order to em-
+ploy SCIP-Jack to solve the RPSCTP, the problem is transformed into a SAP
+using the following:
+
+===== PAGE 9 =====
+
+r
+p=5.1
+t1
+p=2.4
+t2
+p=7.2
+1.2 2.1
+2.5
+2.2
+1
+1 1.3
+1.8
+1.1
+(a) RPCSTP instance
+r
+t′
+1
+t′
+2
+t1
+t2
+1.2 2.1
+2.5
+2.2
+1
+1 1.3
+1.8
+1.1
+2.4
+7.2
+0
+0
+(b) transformed instance
+r
+t′
+1
+t′
+2
+t1
+t2
+1.2
+2.2
+1
+1.8
+2.4
+0
+(c) feasible solution
+Fig. 1: Illustration of a price collecting Steiner tree instance with rootr (left), the
+equivalent SAP problem obtained by transformation 2 (middle), and a solution
+to the SAP instance with value 8.6 (right).
+T ransformation 2 (RPCSTP to SAP)
+For a RPCSTP P = (V,E,p,r ), construct a Steiner arborescence problem P′ =
+(V′,A′,T′,c′,r′) as follows:
+1. Set V′ := V , A′ :={(v,w ) :{v,w}∈ E}, r′ := r and c′ : A′→ Q≥0 with
+c′(a) =c({v,w}) for a = (v,w )∈A′.
+2. Denote the set of all v∈V with p(v)> 0 by T ={t1,...,t s}. For each node
+ti∈ T , a new node t′
+i and an arc a = (ti,t′
+i) with c′(a) = 0 is added to V′
+and E′ respectively.
+3. Add arcs (r′,t′
+i) for eachi∈{ 1,...,s}, setting their respective weight to p(ti).
+4. Deﬁne the set of terminals T′ :={t′1,...,t′s}.
+Claim 3 Let P′ = (V′,A′,T′,c′) be a SAP obtained from a RPCSTP P =
+(V,E,c,p ) by applying Transformation 2. Each solution S′ to P′ can be reduced
+to a solution S to P by setting VS :={v∈ V : v∈ V′
+S′} and ES :={{v,w}∈
+E : ( v,w )∈ A′
+S′ or (w,v )∈ A′
+S′}. If S′ is an optimal solution to P′, S is
+optimal with respect to P .
+Figure 1 presents a simple example of the RPCSTP and the transformation
+process. An important observation from this ﬁgure is the duplication of each of
+the terminal nodes and the included arcs. For each of the terminals a dummy
+node is created with a single direction arc of zero cost added between the two.
+Also, there is a single direction arc from the root to each of the terminals with
+its selection in the tree indicating the loss of the terminal prize.
+The more general version of the PCSTP (the unrooted problem) requires an
+alternative approach to transform the problem into a SAP. The slight variation
+on the above transformation to achieve this is:
+T ransformation 3 (PCSTP to SAP)
+Let P = (V,E,p ) be a PCSTP, construct a SAP P′ = (V′,A′,T′,c′,r′) as
+follows:
+
+===== PAGE 10 =====
+
+1. Add a vertex v0 to V and set r :=v0.
+2. Apply Transformation 2 to obtain P′ = (V′,A′,T′,c′,r′).
+3. Add arcs a = (r′,ti) with c′(a) := 0 for each ti∈T .
+Each SAP P′ = (V′,A′,T′,c′,r′) obtained from a PCSTP P = (V,E,c,p )
+by applying Transformation 3 that incorporates the constraint:
+∑
+a∈δ+(r′),c′(a)=0
+ya = 1 (9)
+into the cut-formulation (Formulation 1) and further satisﬁes the condition:
+If (the non-terminal node) ti is part of the solution tree, so is the arc (ti,t′
+i)
+is henceforth referred to as the root constrained Steiner arborescence problem .
+The second condition is satisﬁed by all optimal solutions to P′ that satisfy (9)
+and each feasible solution satisfying (9) can be easily modiﬁed to accomplish
+this, concomitantly improving its solution value. Following the application of
+the transformation it is then necessary to include constraint (9) in the SCIP-
+Jack model in order to solve the PCSTP.
+Claim 4 LetS′ be a solution to the root constrained SAPP′ = (V′,A′,T′,c′,r′),
+obtained from a PCSTP P = (V,E,c,p ) by applying Transformation 3. S′ can
+be reduced to a solution S to P deﬁned by
+VS :={v∈V : v∈V′
+S′}
+ES :={{v,w}∈ E : ( v,w )∈A′
+S′ or (w,v )∈A′
+S′}.
+If S′ is an optimal solution to P′, so is S to P .
+The structure of the PCSTP and SAP given from Transformation 3 does not
+permit the direct application of any of the heuristics previously presented and
+only a limited set of reduction techniques are employed bySCIP-Jack. However,
+a variation of the constructive heuristic is deployed. Instead of starting from
+diﬀerent vertices, the starting point is always the (artﬁcial) root. In each run all
+arcs between the root and non-terminals (denoted by ( r′,t ) in Transformation
+3) are temporarily removed, except for one. A tree is then computed on this new
+graph, using the same process as the original constructive heuristic. The same
+amount of iterations as of the original constructive heuristic are executed by
+default (100 before the solving process, 10 after each LP), each with a diﬀerent
+choice of the arc not to remove. By adjusting the shortest path data of the nodes
+adjacent to the root, the recomputation of the shortest paths in every iteration
+is not necessary.
+Computational Results The available collection of instances for the DIMACS
+Challenge contains several test sets of the PCSTP, and two for the RPCSTP.
+Table 3 shows aggregated results for some of the PCSTP test sets provided
+for the DIMACS Challenge. For each test set, we list the number of instances and
+the number of those solved to optimality as well as the shifted geometric mean
+
+===== PAGE 11 =====
+
+Table 3: Computational results for PCSTP instances
+test set # instances # solved avg. nodes avg. time [s]
+JMP 34 34 1.0 2.1
+CRR 80 72 1.7 20.9
+PUCNU 18 6 4.5 30.5
+of branch-and-bound nodes and solving time for the subset of instances that are
+solved to optimality. Test set JMP appears to be rather easy: all instances are
+solved without any branching in just a couple of seconds. Test set CRR is more
+challenging: still, most instances are solved at the root node, but some instances
+need a signiﬁcant amount of branching—most of those cannot be solved within
+the time limit. The third test set we consider is the PUCNU test set. SCIP-
+Jack is unable to solve many of the instances of the PUC test set from which
+these instances originate, and this behaviour recurs for the respective PCSTP
+versions. Some of the instances are solved, commonly with only few branchings,
+but many cannot be solved within the time limit.
+The average results for the RPCSTP instances are displayed in Table 4.
+It appears from these results that SCIP-Jack is very capable of solving the
+RPCSTP variant. All of the cologne1 instances are solved at the root node in
+just over 30 seconds. Similarly, the cologne2 testset is solved to optimality at the
+root node, but longer runtimes are required. Speciﬁcally, these instances require
+on average 124.4 seconds to solve to optimality, with all instances solved within
+435 seconds.
+Table 4: Computational results for RPCSTP instances
+test set # instances # solved avg. nodes avg. time [s]
+cologne1 12 12 1.0 6.7
+cologne2 15 15 1.0 121.9
+The Maximum-W eight Connected Subgraph Problem
+At ﬁrst glance, the maximum-weight connected subgraph problem ( MWCSP)
+bears little resemblance to the Steiner problems introduced so far: Given an
+undirected graph endowed with (possibly negative) node weights, the objec-
+tive is to ﬁnd a tree that maximizes the sum of its node weights. However, a
+procedure described by [25] permits the transformation of this problem into a
+prize-collecting Steiner tree problem. Yet, having performed this tranformation a
+great number of vertices are usually assigned strictly positive weights, which can
+set the stage for a strenuous PCST computation. To avoid this issue a diﬀerent
+transformation is introduced here (note that at least one edge may be assumed to
+
+===== PAGE 12 =====
+
+Table 5: Number of terminals after transforming
+instance Transformation 4 transformation from [25]
+drosophila001 71 5226
+drosophila005 194 5226
+drosophila0075 250 5226
+HCMV 55 3863
+lymphoma 67 2034
+metabol expr mice 1 150 3523
+metabol expr mice 2 85 3514
+metabol expr mice 3 114 2853
+be assigned a negative and one a positive cost, otherwise the problem is reduced
+to ﬁnding a minimum spanning tree):
+T ransformation 4 (MWCSP to SAP)
+LetP = (V,E,p ) be a MWCSP, construct a SAP P′′ = (V′′,A′′,T′′,c′′,r′′):
+1. Set V′ :=V , A′ :={(v,w ) :{v,w}∈ E},
+2. c′ :A′→ Q≥0 such that for a = (v,w )∈A′:
+c′(a) =
+{−p(w), if p(w)< 0
+0, otherwise
+3. p′ :V′→ Q≥0 such that for v∈V′:
+p′(v) =
+{
+p(v), if p(v)> 0
+0, otherwise
+4. Perform Transformation 3 to (V′,A′,c′,p′), slightly changed in such a way,
+that in step 2 instead of constructing a new arc set, A′ is being used.
+Claim 5 Let P = (V,E,p ) be a MWCSP instance and P′′ its transformation
+obtained by Transformation 4 (which is a SAP incorporating the constraint (9)
+), then each solution S′′ to P′′ corresponds to a solution S to P . The latter is
+obtained by the set of vertices VS ={v∈ V : v∈ V′′
+S′′} and the set of edges
+ES ={{v,w} ∈E : ( v,w )∈ A′′
+S′′ or (w,v )∈ A′′
+S′′}. If S′′ is optimal with
+respect to P′′, so is S to P . Furthermore the objective value C(S) of S can be
+computed out of the objective value C′′(S′′) of S′′:
+C(S) =−C′′(S′′) +
+∑
+v∈V :p(v)>0
+p(v)
+Since most of the vertex weights are nonpositive for all (real-world) DIMACS
+instances, Transformation 4 results in problems with signiﬁcantly less terminals
+compared to the tranformation described in [25]. The diﬀerences in the number
+of terminals resulting from the two transformations are presented in Table 5.
+Computational Results We performed computational experiments on the
+ACTMOD test set of the DIMACS Challenge. Since the test set consists of
+only eight instances, detailed computational results are presented in Table 6.
+We see that for all but the three largest instances, SCIP-Jack was able to solve
+
+===== PAGE 13 =====
+
+the problem to optimality. Also, the ﬁve smaller instances are solved without
+branching in less then 200 seconds. It should be noted that the performance of
+SCIP-Jack on the ACTMODPC test set which contains the same problems,
+but already transformed to PCSTP by the transformation described in [25], is
+signiﬁcantly worse. Thus, at least for SCIP-Jack, our transformation is clearly
+superior.
+Table 6. Detailed computational results for test set ACTMOD.
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+drosophila001 5298 187214 72 24.8802052 23.6640647 5.1 8350 timeout
+drosophila005 5421 187952 195 179.291307 113.379745 58.1 65 timeout
+drosophila0075 5477 188288 251 261.034691 260.523557 0.2 93 timeout
+HCMV 3919 58916 56 7.55431486 7.55431486 0.0 1 186.9
+lymphoma 2102 15914 68 70.1663087 70.1663087 0.0 1 21.1
+metabol expr mice 1 3674 9590 151 544.94837 544.94837 0.0 1 89.1
+metabol expr mice 2 3600 9174 86 241.077524 241.077524 0.0 1 9.0
+metabol expr mice 3 2968 7354 115 508.260877 508.260877 0.0 1 20.8
+The Degree-Constrained Steiner T ree Problem
+The degree-constrained Steiner tree problem (DCSTP), is a STP with an ad-
+ditional degree constraint for each node. The objective is to ﬁnd a minimum
+solution to the STP such that the degree of each node in the Steiner tree is
+not larger than the given limit. The DCSTP is implemented by just adding the
+additional degree constraints for each node as linear constraints to the directed-
+cut-formulation (Formulation 1). Additionally, a variation of the constructive
+heuristic is used, slightly altered in such a way that the degree constraints are
+striven to be taken into consideration.
+Computational Results Computational experiments are performed on the 20
+instances in the TreeFam test set of the DIMACS Challenge, with a time limit
+of two hours. Although the employed heuristic can at best be labelled crude, it
+decreases the number of instances without primal solution found from 13 to 8,
+however, without changing that only 5 instances could be solved to optimality.
+Table 7. Detailed computational results for test set TreeFam.
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+TF101057-t1 52 2652 35 3436.53739 – – 155249 timeout
+TF101057-t3 52 2652 35 2756 2756 0.0 2170 55.1
+TF101125-t1 304 92112 155 66252.2458 – – 387 timeout
+TF101125-t3 304 92112 155 53669.8684 59376 10.6 726 timeout
+TF101202-t1 188 35156 72 79432.7706 – – 2429 timeout
+TF101202-t3 188 35156 72 77774.9745 78001 0.3 8273 timeout
+TF102003-t1 832 691392 407 190113.202 – – 1 timeout
+TF102003-t3 832 691392 407 176144.713 195788 11.2 5 timeout
+TF105035-t1 237 55932 104 34460.1708 – – 1274 timeout
+TF105035-t3 237 55932 104 32446.9697 35313 8.8 1344 timeout
+cont. next page
+
+===== PAGE 14 =====
+
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+TF105272-t1 476 226100 223 131527.925 – – 54 timeout
+TF105272-t3 476 226100 223 122819.718 138063 12.4 73 timeout
+TF105419-t1 55 2970 24 18668 18668 0.0 20953 904.8
+TF105419-t3 55 2970 24 18223 18223 0.0 31 9.8
+TF105897-t1 314 98282 133 105257.204 – – 275 timeout
+TF105897-t3 314 98282 133 96153.554 105289 9.5 627 timeout
+TF106403-t1 119 14042 46 54124 54124 0.0 850 734.1
+TF106403-t3 119 14042 46 53760 53760 0.0 23 138.8
+TF106478-t1 130 16770 54 55018.2386 55307 0.5 9690 timeout
+TF106478-t3 130 16770 54 54748.695 54939 0.3 50856 timeout
+The Group Steiner T ree Problem
+The group Steiner tree problem (GSTP) is another generalization of the Steiner
+tree problem, where the concept of terminals as a set of vertices to be inter-
+connected is extended to a set of vertex groups: Given an undirected graph
+G = (V,E ), edge costs c :E→ Q≥0 and a series of vertex subsets T1,...Ts⊂V ,
+s∈ N, a minimum cost tree spanning at least one vertex of each subset is re-
+quired. By substituting each terminal t by{t} every STP can be considered as
+a GSTP, the latter also beingNP -hard. Although a generalization, each GTSP
+instance (V,E,T 1,..,T S,c ) can be transformed to a STP using the following
+scheme: Enlarge the graph by adding for each group Ti a new vertex ti and
+edges{ti,v} of high cost to each v∈V . Regarding the set {t1,...,t s} as termi-
+nals, each solution to the STP on the enlarged graph corresponds to a solution
+to the GSP , obtained by removing all artiﬁcial edges {ti,v}, i = 1,...,s , v∈V .
+This approach has already been deployed by [26] to solve group Steiner tree
+problems and demonstrated to be competitive with specialized solvers at the
+time of publishing. Since no GSTP instances are published in the course of the
+DIMACS Challenge, we refrain from presenting a more formal delineation of the
+transformation and refer to [26] instead.
+The Hop-Constrained Steiner T ree Problem
+The hop-constrained Steiner tree problem (HCSTP), compared to a SAP, incor-
+porates an additional two conditions for a Steiner arborescence to be feasible.
+First the number of included arcs is not to exceed a predetermined bound, called
+hop limit. Second, all terminals have to be leaves. The cut formulation (Formu-
+lation 1) used by SCIP-Jack can be easily extended to cover this variation by
+adding one extra inequality bounding the sum of all (binary) arc variables (de-
+noted by ya) and removing for each terminal all outgoing arcs.
+Still, the hop limit has signiﬁcant implications for the presolving and heuris-
+tics approaches: Many of the presolving techniques remove or include edges from
+the graph if a less costly path can be found, even if this involves taking more
+edges. Hence, the presolving techniques currently implemented in SCIP-Jack
+are not able to produce a valid graph reduction. Likewise, the heuristics currently
+implemented do not take into account the hop limit, so an identiﬁed solution
+may not be feasible. Therefore, a simple variation of the constructive heuristic
+
+===== PAGE 15 =====
+
+is used for this STP variant: Each arc a, having original costs ca, is assigned the
+new costc′
+a := 1 +λ ca
+cmax
+, withλ∈ Q+ andcmax := maxa∈Aca. Initiallyλ is set
+to 1
+3 but its value is decreased or increased during the runs of the constructive
+heuristic depending on whether the last computed solution exceeds or is below
+the hop limit. This alteration of λ is performed relative to the deviation of the
+number of edges from the hop limit.
+Computational Results Two diﬀerent test sets are used for the computational
+experiments: the small and medium sets supplied for the DIMACS challenge.
+The small test set contains 140 instances and SCIP-Jack is about to solve 79
+in a reasonable runtime. Speciﬁcally, they require 91.9 seconds on average and
+only 3.3 nodes. However, the other 61 instances timeout, very often with large
+optimality gaps. SCIP-Jack is unable to solve any of the instances from the
+medium test set, with the solver either exceeding the time or memory limit.
+One cause of this performance is the inability to apply the common reduction
+techniques and heuristics implemented in SCIP-Jack. This is clearly an area of
+future work for the generic solver framework.
+4 From single core to distributed parallel
+SCIP has two parallel extensions ParaSCIP [27] and FiberSCIP [28], which
+are built by using the Ubiquity Generator Framework (UG) [28]. In order to
+make a solver for a speciﬁc problem, users ofSCIP can use their problem speciﬁc
+pugins as is for parallelization just by adding a small glue code and linking to
+one of the UG libraries.
+In this way, users obtain their own problem speciﬁc parallel optimization
+solver, which can do parallel tree search on a distributed memory computing
+environment. The mains features of UG are: several ramp-up mechanisms (the
+ramp-up is the process from the begining of the computation until all available
+solvers become busy), a dynamic load balancing mechanism for parallel tree
+search, and a check-pointing and restarting mechanism. For more details about
+the parallelization, see [27, 28].
+We present computational results for the open instances of the PUC test set
+from SteinLib. However, it must be noted that the parallel version of SCIP-
+Jack can handle all of the variants presented throughout this paper. The main
+purpose of the parallel runs is to provide the optimal solutions to as many
+instances as possible. The development of the sequential and the parallel version
+of SCIP-Jack had been continuing concurrently, so our results for the open
+instances were obtained by using an intermediate development code. When the
+development code made a signiﬁcant improvement in the sequential version, we
+just restarted the computation by giving the best incumbent solution found so far
+and when the code change was not signiﬁcant, we continued the computation
+from a check point of the previous run. For the computations, we used PC
+clusters and supercomputers as they were available. We conducted a few big
+jobs which used over 4,000 solvers, but still, most of the computations were
+
+===== PAGE 16 =====
+
+Table 8: Primal bound improvements for unsolved PUC instances
+instance |V| | E| |T| best SCIP-Jack instance |V| | E| |T| best SCIP-Jack
+bip52p 2200 7997 200 24535 24526 cc3-12p 1728 28512 74 18838 19139
+bip52u 2200 7997 200 234 234 cc3-12u 1728 28512 74 186 187
+bip62p 1200 10002 200 22870 22843 cc6-3p 729 4368 76 20456 20270⋆
+bip62u 1200 10002 200 220 219 cc6-3u 729 4368 76 197 197 ⋆
+bipa2p 3300 18073 300 35379 35326 cc7-3p 2187 15308 222 57088 57277
+bipa2u 3300 18073 300 341 338 cc7-3u 2187 15308 222 552 560
+cc10-2p 1024 5120 135 35379 35227 cc9-2p 512 2304 64 17296 17199
+cc10-2u 1024 5120 135 342 345 cc9-2u 512 2304 64 167 167 ⋆
+cc11-2p 2048 11263 244 63826 63860 hc10p 1024 5120 512 60494 59800
+cc11-2u 2048 11263 244 614 619 hc10u 1024 5120 512 581 575
+cc12-2p 4096 24574 473 121106 122378 hc11p 2048 11264 1024 119779 119689
+cc12-2u 4096 24574 473 1179 1188 hc11u 2048 11264 1024 1154 1151
+cc3-10p 1000 13500 50 12860 12915 hc12p 4096 24576 2048 236949 236080
+cc3-10u 1000 13500 50 125 126 hc12u 4096 24576 2048 2275 2262
+cc3-11p 1331 19965 61 15609 15729 hc9p 512 2304 256 30258 30242
+cc3-11u 1331 19965 61 153 153 hc9u 512 2304 256 292 292
+conducted with less than 192 solvers. In contrast to the previous experiments,
+we used CPLEX 12.6 as the underlying LP solver. The biggest scale computation
+previously performed with ParaSCIP was a 35,200 cores run on Titan, which is
+located at Oak Ridge National Laboratory. We expect SCIP-Jack to also run
+on such a large scale computing environment, though at this stage we have only
+conducted relatively small scale computational experiments.
+Table 8 shows the improvements on the open instances of the PUC test set
+as of 21st November. We list the number of nodes, edges, and terminals, as well
+as the best known primal bound and the primal solution value obtained by our
+experiments with the parallel SCIP-Jack version. For 14 of the 32 unsolved
+instances, we were able to to improve the best known solution. In this case, our
+result is printed bold, the three instances for which we also proved optimality of
+the solution are marked by an asterisk.
+5 Conclusions
+We have shown that incorporating the mathematical progress of the last 15 years
+into a well-known model for Steiner trees can have a signiﬁcant impact in several
+dimensions. First, the amount of problem speciﬁc code is notably reduced while
+at the same time the number of general solution methods available, e.g., cutting
+planes, has increased and will be kept up-to-date just by the continuous improve-
+ments in the framework. Furthermore, the opportunity to solve instances in a
+massively parallel distributed memory environment has been added at minimal
+cost.
+The use of a general MIP solver allows us to be extremely ﬂexible with the
+model to be solved. We were able to support solving nine variants of the Steiner
+Tree problem with the same code, and the support of further restrictions in the
+model is straightforward. Using all of this prebuilt-technology we were able to
+solve three previously unsolved instances and improve the best known solution
+
+===== PAGE 17 =====
+
+for another 13 instances. And ﬁnally, to the best of our knowledge this is the ﬁrst
+time that a powerful exact Steiner tree solver code is available in source code to
+the scientiﬁc community. We hope that this will foster the use of Steiner trees
+in modelling real-world phenomena as has already been the case in genetics.
+6 Acknowledgements
+We are thankful to The Institute of Statistical Mathematics (ISM), Tokyo, and
+the HLRN-III facility at ZIB, Berlin, for providing supercomputing resources
+and their respective staﬀ for their helpful support.
+The work for this article has been conducted within the BMBF Research
+Campus Modal SynLab and been supported by a Google Faculty Research
+Award.
+References
+1. Karp, R.: Reducibility among combinatorial problems. In Miller, R., Thatcher, J.,
+eds.: Complexity of Computer Computations. Plenum Press (1972) 85–103
+2. Polzin, T.: Algorithms for the Steiner problem in networks. PhD thesis, Saarland
+University (2004)
+3. Koch, T., Martin, A., Voß, S.: SteinLib: An updated library on Steiner tree prob-
+lems in graphs. In Du, D.Z., Cheng, X., eds.: Steiner Trees in Industries. Kluwer
+(2001) 285–325 ZIB-Report 00-37.
+4. Koch, T., Martin, A.: Solving Steiner tree problems in graphs to optimality. Net-
+works 32 (1998) 207–232 ZIB-Report SC 96-42.
+5. Bornd¨ orfer, R., Ho` ang, N.D., Karbstein, M., Koch, T., Martin, A.: How many
+Steiner terminals can you connect in 20 years? In J¨ unger, M., Reinelt, G., eds.:
+Facets of Combinatorial Optimization. Springer (2013) 215–244 ZIB-Report 13-57.
+6. Koch, T., Martin, A., Pfetsch, M.E.: Progress in academic computational integer
+programming. In J¨ unger, M., Reinelt, G., eds.: Facets of Combinatorial Optimiza-
+tion. Springer (2013) 483–506
+7. Achterberg, T.: SCIP: Solving constraint integer programs. Mathematical Pro-
+gramming Computation 1(1) (2009) 1–41
+8. Mittelmann, H.: Benchmarks for optimization software (last accessed Sep. 8, 2014)
+http://plato.asu.edu/bench.html.
+9. Duin, C.: Steiner Problems in Graphs. PhD thesis, University of Amsterdam
+(1993)
+10. Achterberg, T., Berthold, T.: Hybrid branching. In van Hoeve, W.J., Hooker, J.N.,
+eds.: Integration of AI and OR Techniques in Constraint Programming for Com-
+binatorial Optimization Problems, 6th International Conference, CPAIOR 2009.
+Volume 5547 of Lecture Notes in Computer Science., Springer (May 2009) 309–
+311
+11. Achterberg, T.: Constraint Integer Programming. PhD thesis, Technische Univer-
+sit¨ at Berlin (2007)
+12. Takahashi, H., A., M.: An approximate solution for the steiner problem in graphs.
+Math. Jap. 24 (1980) 573 – 577
+13. Uchoa, E., Werneck, R.F.F.: Fast local search for steiner trees in graphs. In
+Blelloch, G.E., Halperin, D., eds.: ALENEX, SIAM (2010) 1–10
+
+===== PAGE 18 =====
+
+14. Wunderling, R.: Paralleler und objektorientierter Simplex-Algorithmus. PhD the-
+sis, Technische Universit¨ at Berlin (1996)
+15. Leitner, M., Ljubic, I., Luipersbeck, M., Prossegger, M., Resch, M.: New real-world
+instances for the steiner tree problem in graphs. Technical report, ISOR, Uni Wien
+(2014)
+16. Garey, M., Johnson, D.: The rectilinear Steiner tree problem is np-complete. SIAM
+Journal of Applied Mathematics 32 (1977) 826–834
+17. Warme, D., Winter, P., Zachariasen, M.: Exact algorithms for plane Steiner tree
+problems: A computational study. In Du, D.Z., Smith, J., Rubinstein, J., eds.:
+Advances in Steiner Trees. Kluwer (2000) 81–116
+18. Zachariasen, M., Rohe, A.: Rectilinear group steiner trees and applications in VLSI
+design. Technical Report 00906, Institute for Discrete Mathematics (2000)
+19. Emanet, N.: The rectilinear steiner tree problem (2010)
+20. Chowdhury, S.A., Shackney, S., Heselmeyer-Haddad, K., Ried, T., Schﬀer, A.A.,
+Schwartz, R.: Phylogenetic analysis of multiprobe ﬂuorescence in situ hybridization
+data from tumor cell populations. Bioinformatics 29(13) (2013) 189–198
+21. Hanan, M.: On Steiner’s problem with rectilinear distance. SIAM Journal of
+Applied Mathematics 14(2) (1966) 255–265
+22. Snyder, T.L.: On the exact location of steiner points in general dimension. SIAM
+J. Comput. 21(1) (1992) 163–180
+23. Zachariasen, M.: Rectilinear full steiner tree generation. Networks 33(2) (1999)
+125–143
+24. Ljubi, I.: Exact and memetic algorithms for two network design problems (2004)
+25. Dittrich, M.T., Klau, G.W., Rosenwald, A., Dandekar, T., Mller, T.: Identifying
+functional modules in protein-protein interaction networks: an integrated exact
+approach. In: ISMB. (2008) 223–231
+26. Duin, C.W., Volgenant, A., Vo, S.: Solving group steiner problems as steiner
+problems. European Journal of Operational Research 154(1) (2004) 323–329
+27. Shinano, Y., Achterberg, T., Berthold, T., Heinz, S., Koch, T.: Parascip: a parallel
+extension of scip. In Bischof, C., Hegering, H.G., Nagel, W., Wittum, G., eds.:
+Competence in High Performance Computing 2010. (2012) 135 – 148
+28. Shinano, Y., Heinz, S., Vigerske, S., Winkler, M.: Fiberscip - a shared memory
+parallelization of scip. Technical Report 13-55, ZIB, Takustr.7, 14195 Berlin (2013)
+A Detailed Computational Results
+This section presents instance-wise results for the STP (Tables 9–13), RSMTP
+(Tables 14–22), PCSPG (Tables 23–25), and RPCST (Tables 26–27) test sets
+discussed in Sections 2 and 3. For all instances, we list the number of nodes,
+arcs, and terminals in the presolved graph, together with the dual bound, primal
+bound, and optimality gap in percent at the end of the solving process, i.e., after
+the instance was solved or the time or memory limit was reached. Additionally,
+we show the number of nodes and the solution time. We print “timeout” and
+“memout” if the time or memory limit was reached, respectively.
+For the STP instances (Tables 9–13), we also provide the presolving results.
+This includes the number of nodes, arcs, and terminals in the presolved problem
+together with the presolving time.
+T able 9. Detailed computational results for test set SP.
+
+===== PAGE 19 =====
+
+Original Presolved
+Instance |V| | A| |T| |V| | A| |T| Time Dual Bound Primal Bound Gap Nodes Time
+antiwheel5 10 30 5 10 30 5 0.0 7 7 0.0 1 0.0
+design432 8 40 4 8 38 4 0.0 9 9 0.0 1 0.0
+oddcycle3 6 18 3 8 0 0 0.0 4 4 0.0 0 0.0
+oddwheel3 7 18 4 7 18 4 0.0 5 5 0.0 1 0.0
+se03 13 42 4 13 42 4 0.0 12 12 0.0 1 0.0
+w13c29 783 4524 406 783 4524 406 0.2 507 507 0.0 185 33826.8
+w23c23 1081 6348 552 1081 6348 552 0.4 689 697 1.2 152 timeout
+w3c571 3997 20556 2284 3997 20556 2284 1.9 2853 2856 0.1 1 timeout
+T able 10. Detailed computational results for test set I640.
+Original Presolved
+Instance |V| | A| |T| |V| | A| |T| Time Dual Bound Primal Bound Gap Nodes Time
+i640-001 640 1920 9 314 1260 9 0.1 4033 4033 0.0 1 0.5
+i640-002 640 1920 9 301 1224 9 0.1 3588 3588 0.0 1 0.4
+i640-003 640 1920 9 301 1224 9 0.2 3438 3438 0.0 1 0.3
+i640-004 640 1920 9 303 1238 9 0.1 4000 4000 0.0 1 0.8
+i640-005 640 1920 9 318 1272 9 0.1 4006 4006 0.0 1 0.6
+i640-011 640 8270 9 640 8270 9 0.4 2392 2392 0.0 1 6.3
+i640-012 640 8270 9 640 8270 9 0.3 2465 2465 0.0 1 13.0
+i640-013 640 8270 9 640 8270 9 0.4 2399 2399 0.0 1 8.8
+i640-014 640 8270 9 640 8270 9 0.3 2171 2171 0.0 1 3.1
+i640-015 640 8270 9 640 8270 9 0.4 2347 2347 0.0 5 23.1
+i640-021 640 408960 9 640 408904 9 71.4 1749 1749 0.0 1 17056.3
+i640-022 640 408960 9 640 408904 9 73.7 1756 1756 0.0 1 30626.4
+i640-023 640 408960 9 640 408904 9 75.5 1754 1754 0.0 1 26586.6
+i640-024 640 408960 9 640 408904 9 71.4 1751 1751 0.0 1 23828.4
+i640-025 640 408960 9 640 408904 9 70.8 1745 1745 0.0 1 21453.1
+i640-031 640 2560 9 483 2234 9 0.7 3278 3278 0.0 1 1.8
+i640-032 640 2560 9 475 2226 9 0.7 3187 3187 0.0 1 1.5
+i640-033 640 2560 9 484 2244 9 0.7 3260 3260 0.0 1 2.4
+i640-034 640 2560 9 479 2232 9 0.7 2953 2953 0.0 1 1.7
+i640-035 640 2560 9 478 2232 9 0.3 3292 3292 0.0 1 1.8
+i640-041 640 81792 9 640 81788 9 12.9 1897 1897 0.0 1 369.4
+i640-042 640 81792 9 640 81792 9 6.7 1934 1934 0.0 151 3784.2
+i640-043 640 81792 9 640 81792 9 6.9 1931 1931 0.0 167 4551.1
+i640-044 640 81792 9 640 81790 9 12.7 1938 1938 0.0 259 6021.5
+i640-045 640 81792 9 640 81792 9 6.4 1866 1866 0.0 1 457.3
+i640-101 640 1920 25 320 1262 25 0.2 8764 8764 0.0 1 2.9
+i640-102 640 1920 25 312 1240 25 0.1 9109 9109 0.0 1 0.6
+i640-103 640 1920 25 305 1232 24 0.1 8819 8819 0.0 1 1.3
+i640-104 640 1920 25 304 1234 24 0.1 9040 9040 0.0 1 1.4
+i640-105 640 1920 25 324 1270 25 0.1 9623 9623 0.0 5 22.4
+i640-111 640 8270 25 640 8270 25 0.4 6167 6167 0.0 375 563.9
+i640-112 640 8270 25 640 8270 25 0.4 6304 6304 0.0 127 441.5
+i640-113 640 8270 25 640 8270 25 0.4 6249 6249 0.0 941 1865.1
+i640-114 640 8270 25 640 8270 25 0.4 6308 6308 0.0 267 633.3
+i640-115 640 8270 25 640 8270 25 0.4 6217 6217 0.0 1373 2242.4
+i640-121 640 408960 25 640 408408 25 49.0 4906 4906 0.0 3 40975.2
+i640-122 640 408960 25 640 408408 25 64.9 4899 4911 0.2 5 timeout
+i640-123 640 408960 25 640 408408 25 80.3 4904.92308 4913 0.2 4 timeout
+i640-124 640 408960 25 640 408408 25 72.5 4897.30405 4908 0.2 3 timeout
+i640-125 640 408960 25 640 408408 25 71.5 4908.6 4920 0.2 6 timeout
+i640-131 640 2560 25 481 2234 25 0.3 8097 8097 0.0 1 3.5
+i640-132 640 2560 25 480 2228 24 0.3 8154 8154 0.0 1 19.6
+i640-133 640 2560 25 482 2236 25 0.3 8021 8021 0.0 1 2.4
+i640-134 640 2560 25 485 2244 25 0.3 7754 7754 0.0 1 4.7
+cont. next page
+
+===== PAGE 20 =====
+
+Original Presolved
+Instance |V| | A| |T| |V| | A| |T| Time Dual Bound Primal Bound Gap Nodes Time
+i640-135 640 2560 25 479 2226 25 0.3 7696 7696 0.0 1 5.5
+i640-141 640 81792 25 640 81714 25 13.9 5177.37742 5200 0.4 1636 timeout
+i640-142 640 81792 25 640 81720 25 13.7 5178.35294 5193 0.3 1067 timeout
+i640-143 640 81792 25 640 81726 25 13.8 5194 5194 0.0 693 25448.7
+i640-144 640 81792 25 640 81716 25 13.7 5205 5205 0.0 1091 37225.1
+i640-145 640 81792 25 640 81722 25 12.8 5194.0884 5218 0.5 1437 timeout
+i640-201 640 1920 50 311 1236 47 0.3 16079 16079 0.0 1 1.2
+i640-202 640 1920 50 320 1250 48 0.3 16324 16324 0.0 1 1.7
+i640-203 640 1920 50 326 1274 48 0.2 16124 16124 0.0 1 3.8
+i640-204 640 1920 50 324 1270 49 0.1 16239 16239 0.0 1 1.7
+i640-205 640 1920 50 327 1272 48 0.2 16616 16616 0.0 2 4.8
+i640-211 640 8270 50 640 8270 50 0.5 11874.1184 11991 1.0 11030 timeout
+i640-212 640 8270 50 640 8270 50 0.4 11795 11795 0.0 5621 11844.3
+i640-213 640 8270 50 640 8268 50 1.2 11879 11879 0.0 18049 31721.9
+i640-214 640 8270 50 640 8270 50 0.8 11808.77 11898 0.8 15240 timeout
+i640-215 640 8270 50 640 8262 50 1.4 11989.5913 12081 0.8 16974 timeout
+i640-221 640 408960 50 640 406608 50 55.1 9783.10008 9826 0.4 7 timeout
+i640-222 640 408960 50 640 406608 50 74.2 9768.21097 9798 0.3 6 timeout
+i640-223 640 408960 50 640 406608 50 73.6 9777.07161 9815 0.4 7 timeout
+i640-224 640 408960 50 640 406608 50 77.1 9774.44793 9805 0.3 7 timeout
+i640-225 640 408960 50 640 406608 50 70.1 9774.57873 9810 0.4 5 timeout
+i640-231 640 2560 50 492 2260 50 0.3 15014 15014 0.0 53 108.9
+i640-232 640 2560 50 493 2260 49 0.8 14630 14630 0.0 3 25.3
+i640-233 640 2560 50 507 2282 48 1.0 14797 14797 0.0 5 74.7
+i640-234 640 2560 50 488 2236 49 0.7 15203 15203 0.0 1 4.6
+i640-235 640 2560 50 484 2244 50 0.7 14803 14803 0.0 81 200.1
+i640-241 640 81792 50 640 81392 50 13.3 10150.0275 10250 1.0 221 timeout
+i640-242 640 81792 50 640 81404 50 12.7 10126.7859 10195 0.7 436 timeout
+i640-243 640 81792 50 640 81408 50 13.2 10154.9661 10215 0.6 226 timeout
+i640-244 640 81792 50 640 81356 50 13.0 10155.3296 10263 1.1 201 timeout
+i640-245 640 81792 50 640 81414 50 13.2 10154.9237 10223 0.7 377 timeout
+i640-301 640 1920 160 352 1294 132 0.3 45005 45005 0.0 1 4.6
+i640-302 640 1920 160 302 1158 113 0.3 45736 45736 0.0 1 6.0
+i640-303 640 1920 160 342 1260 127 0.3 44922 44922 0.0 1 1.1
+i640-304 640 1920 160 345 1248 136 0.3 46233 46233 0.0 1 4.3
+i640-305 640 1920 160 304 1120 120 0.4 45902 45902 0.0 1 4.4
+i640-311 640 8270 160 640 8058 160 1.1 35343.4495 35958 1.7 4303 timeout
+i640-312 640 8270 160 639 8034 160 1.6 35377.61 35973 1.7 4058 timeout
+i640-313 640 8270 160 640 8064 160 1.6 35240.2339 35543 0.9 7643 timeout
+i640-314 640 8270 160 640 8054 160 1.6 35167.5667 35596 1.2 10793 timeout
+i640-315 640 8270 160 640 8038 160 1.6 35337.8654 35784 1.3 8566 timeout
+i640-321 640 408960 160 640 383838 160 71.0 30995.5736 31218 0.7 10 timeout
+i640-322 640 408960 160 640 383838 160 74.1 30989.6609 31140 0.5 9 timeout
+i640-323 640 408960 160 640 383838 160 62.0 30999.9283 31172 0.6 7 timeout
+i640-324 640 408960 160 640 383838 160 60.6 30999.3726 31112 0.4 9 timeout
+i640-325 640 408960 160 640 383838 160 54.2 30987.5937 31300 1.0 8 timeout
+i640-331 640 2560 160 495 2222 151 0.9 42796 42796 0.0 480 349.8
+i640-332 640 2560 160 506 2260 154 0.3 42548 42548 0.0 69 140.3
+i640-333 640 2560 160 503 2232 148 1.0 42345 42345 0.0 217 265.1
+i640-334 640 2560 160 511 2276 155 0.8 42768 42768 0.0 719 811.1
+i640-335 640 2560 160 516 2294 153 0.8 43035 43035 0.0 433 448.5
+i640-341 640 81792 160 640 77066 160 12.4 31864.8529 32108 0.8 75 timeout
+i640-342 640 81792 160 640 76886 160 11.4 31822.5062 32001 0.6 83 timeout
+i640-343 640 81792 160 640 76968 160 11.8 31841.3245 32044 0.6 83 timeout
+i640-344 640 81792 160 640 77204 160 12.7 31829.3452 32014 0.6 75 timeout
+i640-345 640 81792 160 640 77070 160 13.0 31816.5146 32020 0.6 108 timeout
+T able 11. Detailed computational results for test set PUC.
+
+===== PAGE 21 =====
+
+Original Presolved
+Instance |V| | A| |T| |V| | A| |T| Time Dual Bound Primal Bound Gap Nodes Time
+bip42p 1200 7964 200 990 7234 200 1.2 24493.4799 24670 0.7 43156 timeout
+bip42u 1200 7964 200 990 7220 200 0.9 233.432193 236 1.1 47264 timeout
+bip52p 2200 15994 200 1819 14666 200 7.0 24247.4802 24693 1.8 13882 timeout
+bip52u 2200 15994 200 1819 14652 200 3.4 229.77802 234 1.8 11288 timeout
+bip62p 1200 20004 200 1199 20000 200 3.1 22493.7726 22927 1.9 3280 timeout
+bip62u 1200 20004 200 1199 20000 200 2.7 214.079797 221 3.2 2878 timeout
+bipa2p 3300 36146 300 3140 35592 300 21.6 34707.1104 36093 4.0 249 timeout
+bipa2u 3300 36146 300 3140 35590 300 13.0 329.708754 345 4.6 222 timeout
+bipe2p 550 10026 50 550 10026 50 0.7 5616 5616 0.0 26323 14915.6
+bipe2u 550 10026 50 550 10026 50 0.6 54 54 0.0 106 9407.0
+cc10-2p 1024 10240 135 1024 10240 135 0.8 34510.6406 36320 5.2 1 timeout
+cc10-2u 1024 10240 135 1024 10240 135 0.5 334.569953 349 4.3 1 timeout
+cc11-2p 2048 22526 244 2048 22526 244 3.7 62152.4689 64870 4.4 1 timeout
+cc11-2u 2048 22526 244 2048 22526 244 2.2 602.858649 636 5.5 1 timeout
+cc12-2p 4096 49148 473 4096 49148 473 16.3 118552.69 125228 5.6 1 timeout
+cc12-2u 4096 49148 473 4096 49148 473 9.4 1149.69926 1218 5.9 1 timeout
+cc3-10p 1000 27000 50 1000 27000 50 1.4 12227.5067 13285 8.6 1 timeout
+cc3-10u 1000 27000 50 1000 27000 50 1.7 117.783609 130 10.4 1 timeout
+cc3-11p 1331 39930 61 1331 39930 61 3.3 14790.4955 16195 9.5 1 timeout
+cc3-11u 1331 39930 61 1331 39930 61 2.4 143.348092 159 10.9 1 timeout
+cc3-12p 1728 57024 74 1728 57024 74 5.5 17799.313 19483 9.5 1 timeout
+cc3-12u 1728 57024 74 1728 57024 74 4.5 171.826667 191 11.2 1 timeout
+cc3-4p 64 576 8 64 576 8 0.0 2338 2338 0.0 20448 745.2
+cc3-4u 64 576 8 64 576 8 0.0 23 23 0.0 935 118.0
+cc3-5p 125 1500 13 125 1500 13 0.0 3468.35525 3661 5.6 102403 timeout
+cc3-5u 125 1500 13 125 1500 13 0.0 33.6241486 36 7.1 102042 timeout
+cc5-3p 243 2430 27 243 2430 27 0.1 – – – 0 memout
+cc5-3u 243 2430 27 243 2430 27 0.0 69.6282699 71 2.0 13356 timeout
+cc6-2p 64 384 12 64 384 12 0.0 3271 3271 0.0 593 40.0
+cc6-2u 64 384 12 64 384 12 0.0 32 32 0.0 19 17.4
+cc6-3p 729 8736 76 729 8736 76 0.3 20163.9566 20551 1.9 801 timeout
+cc6-3u 729 8736 76 729 8736 76 0.3 195.58884 203 3.8 1 timeout
+cc7-3p 2187 30616 222 2187 30616 222 4.5 55305.5296 58817 6.3 1 timeout
+cc7-3u 2187 30616 222 2187 30616 222 2.9 536.098276 572 6.7 1 timeout
+cc9-2p 512 4608 64 512 4608 64 0.2 16879.0806 17559 4.0 266 timeout
+cc9-2u 512 4608 64 512 4608 64 0.1 163.647679 171 4.5 426 timeout
+hc10p 1024 10240 512 1024 10240 512 1.4 59230.2518 61201 3.3 304 timeout
+hc10u 1024 10240 512 1024 10240 512 0.9 567.777778 596 5.0 35 timeout
+hc11p 2048 22528 1024 2048 22528 1024 4.5 117382.864 123373 5.1 20 timeout
+hc11u 2048 22528 1024 2048 22528 1024 2.7 1125.22675 1198 6.5 1 timeout
+hc12p 4096 49152 2048 4096 49152 2048 19.0 232821.911 244673 5.1 1 timeout
+hc12u 4096 49152 2048 4096 49152 2048 10.8 2221.43833 2324 4.6 1 timeout
+hc6p 64 384 32 64 384 32 0.0 4003 4003 0.0 16459 171.7
+hc6u 64 384 32 64 384 32 0.0 39 39 0.0 6919 88.0
+hc7p 128 896 64 128 896 64 0.0 7809.64565 7913 1.3 946134 timeout
+hc7u 128 896 64 128 896 64 0.0 74.3284618 77 3.6 432639 timeout
+hc8p 256 2048 128 256 2048 128 0.1 15169.7011 15328 1.0 134132 timeout
+hc8u 256 2048 128 256 2048 128 0.0 145.186012 148 1.9 52209 timeout
+hc9p 512 4608 256 512 4608 256 0.2 29919.6174 30293 1.2 8279 timeout
+hc9u 512 4608 256 512 4608 256 0.1 286.875 293 2.1 1281 timeout
+T able 12. Detailed computational results for test set vienna-i-simple.
+Original Presolved
+Instance |V| | A| |T| |V| | A| |T| Time Dual Bound Primal Bound Gap Nodes Time
+I001 30190 95496 1184 14202 44196 980 6439.2 253762410 253947459 0.1 1 timeout
+I002 49920 155742 1665 23433 72608 1334 21524.2 398742243 399832427 0.3 1 timeout
+I003 44482 146838 3222 14756 44758 2438 21519.0 788688122 788806491 0.0 1 timeout
+I004 5556 17104 570 820 2296 297 122.8 279512692 279512692 0.0 1 137.4
+I005 10284 31960 1017 1577 4596 530 636.2 390876350 390876350 0.0 1 696.4
+I006 31754 105750 2202 12541 37898 1904 6346.4 504526027 504526124 0.0 3 timeout
+I007 15122 48742 737 6728 20848 616 969.8 177909660 177909660 0.0 1 6376.1
+cont. next page
+
+===== PAGE 22 =====
+
+Original Presolved
+Instance |V| | A| |T| |V| | A| |T| Time Dual Bound Primal Bound Gap Nodes Time
+I008 15714 51134 871 6022 18440 742 1526.8 201788202 201788202 0.0 1 8168.4
+I009 33188 104014 1262 14909 46400 1090 9097.2 275510588 275583163 0.0 1 timeout
+I010 29905 94914 943 13043 41200 833 4585.5 207889674 207889674 0.0 1 21467.5
+I011 25195 82596 1428 8843 27312 1257 2135.1 317589880 317589880 0.0 15 6335.9
+I012 12355 39924 503 3191 10182 402 425.4 118893243 118893243 0.0 1 971.6
+I013 18242 57952 891 6916 21284 712 1347.1 193190339 193190339 0.0 1 6032.7
+I014 12715 41264 475 3611 11608 397 310.5 105173465 105173465 0.0 1 428.0
+I015 48833 159974 2493 19326 60326 2208 14043.4 592129138 592346523 0.0 1 timeout
+I016 72038 230110 4391 26428 80322 3604 44170.9 – – – 0 timeout
+I017 15095 48182 478 7399 23470 414 1376.3 109739695 109739695 0.0 1 3087.2
+I018 31121 102226 1898 11931 36540 1605 6399.5 463887832 463887832 0.0 3 29082.9
+I019 25946 83290 866 10714 34534 767 2695.5 217647693 217647693 0.0 3 39371.1
+I020 21808 69842 594 6483 20884 516 1285.6 146515460 146515460 0.0 1 3212.3
+I021 16013 50538 392 5216 17150 314 564.9 106470644 106470644 0.0 1 2364.9
+I022 16224 51382 437 8582 27268 378 1287.6 106799980 106799980 0.0 1 14003.7
+I023 22805 70614 582 13470 41972 430 4419.1 131032600 131045335 0.0 1 timeout
+I024 68464 217464 3001 30317 94236 2592 43367.2 – – – 0 timeout
+I025 23412 75904 945 8924 28278 850 2086.7 232790758 232790758 0.0 3 27044.1
+I026 47429 158614 3334 16221 49496 2734 27277.1 927917236 928108049 0.0 1 timeout
+I027 85085 277776 3954 39033 121424 3665 45607.4 – – – 0 timeout
+I028 72701 230860 1790 42555 133906 1639 43220.3 – – – 0 timeout
+I029 69988 223608 2162 31948 100798 1977 43512.7 – – – 0 timeout
+I030 33188 107360 1263 11653 36996 1139 3430.2 321646787 321646787 0.0 2 23821.5
+I031 54351 176422 2182 19827 62754 1909 16850.0 577615634 578557879 0.2 1 timeout
+I032 56023 182798 3017 19885 61072 2494 20257.6 773096651 773096651 0.0 7 40655.9
+I033 18555 59460 636 8396 26136 564 2081.8 134461857 134461857 0.0 1 4728.8
+I034 22311 71032 735 8466 26930 639 1640.7 165115148 165115148 0.0 1 5985.7
+I035 30585 100908 1704 11793 36370 1465 6098.7 414440370 414440370 0.0 8 9306.9
+I036 37208 120712 1411 15196 48196 1286 5704.3 375231130 375270860 0.0 1 timeout
+I037 13694 44252 427 5696 18462 400 573.8 105720727 105720727 0.0 1 3500.7
+I038 18747 61278 967 6945 21676 819 1099.3 255767543 255767543 0.0 11 5323.1
+I039 8755 28898 347 3573 11254 316 176.6 85566290 85566290 0.0 2 1038.5
+I040 40389 131640 1762 16942 53390 1530 9075.4 431192266 431580458 0.1 1 timeout
+I041 47197 150614 1193 20988 66954 1052 11913.3 301541112 302010236 0.2 1 timeout
+I042 51896 171100 2171 22146 69624 1969 9976.5 531659490 532211823 0.1 1 timeout
+I043 10398 33574 367 4050 12806 337 260.6 95722094 95722094 0.0 1 1166.2
+I044 68905 227778 3358 29204 91078 3035 43414.1 – – – 0 timeout
+I045 14685 46932 421 6387 20334 390 532.9 105944062 105944062 0.0 1 1542.9
+I046 70843 234418 3598 28621 89474 3204 27276.6 922196299 925766976 0.4 1 timeout
+I047 28524 92502 2354 9548 28596 1843 7629.2 695163406 695163406 0.0 3 28867.5
+I048 13189 42438 358 4950 15908 322 342.3 91509264 91509264 0.0 1 1132.8
+I049 30857 99182 990 13446 43362 843 3733.7 – – – 0 memout
+I050 43073 142552 2868 16281 49762 2324 18588.4 792423060 792672885 0.0 1 timeout
+I051 27028 90812 1524 10913 33580 1348 3758.8 357230839 357230839 0.0 21 21282.0
+I052 2363 7522 40 193 632 23 1.9 13309487 13309487 0.0 1 1.9
+I053 3224 10570 126 634 1988 105 8.0 30854904 30854904 0.0 1 10.7
+I054 3803 12426 38 639 2102 28 16.7 15841596 15841596 0.0 1 23.1
+I055 13332 43160 570 4511 14176 482 496.4 144164924 144164924 0.0 1 850.0
+I056 1991 6352 51 288 966 33 2.1 14171206 14171206 0.0 1 2.5
+I057 33231 110298 1569 12501 38948 1374 5101.4 412746415 412746415 0.0 3 12126.5
+I058 23527 79256 1256 6878 21426 1036 1772.5 305024188 305024188 0.0 1 2882.3
+I059 9287 29950 363 2787 8840 288 204.5 107617854 107617854 0.0 1 449.9
+I060 42008 135144 1242 17201 55516 1170 5778.6 337290460 337290460 0.0 1 32276.3
+I061 39160 127318 1458 19607 61462 1350 14805.5 362806517 363072768 0.1 1 timeout
+I062 66048 220982 3343 20790 66376 2914 28286.0 792505427 793194884 0.1 1 timeout
+I063 26840 87322 1645 8589 26352 1306 4348.6 459801704 459801704 0.0 5 13411.7
+I064 63158 214690 3458 29063 88664 3227 26830.8 861816269 863190298 0.2 1 timeout
+I065 3898 12712 144 1085 3412 128 18.0 32965718 32965718 0.0 1 66.1
+cont. next page
+
+===== PAGE 23 =====
+
+Original Presolved
+Instance |V| | A| |T| |V| | A| |T| Time Dual Bound Primal Bound Gap Nodes Time
+I066 15038 49192 551 4050 13048 456 282.1 174219813 174219813 0.0 1 552.6
+I067 20547 66460 627 9701 30734 578 1045.5 175540750 175540750 0.0 1 9628.1
+I068 33118 110254 1553 10833 33748 1340 2846.5 420730046 420730046 0.0 6 7215.9
+I069 9574 32416 543 3121 9600 466 148.8 135161583 135161583 0.0 1 762.5
+I070 15079 49216 550 5867 18786 509 468.3 136700139 136700139 0.0 1 3345.2
+I071 33203 108854 1494 11720 36726 1300 3667.3 382539099 382539099 0.0 1 6109.1
+I072 26948 88388 993 10154 32760 871 1653.8 289019226 289019226 0.0 1 11373.8
+I073 21653 70342 1847 6820 20324 1367 2734.0 663004987 663004987 0.0 1 6073.6
+I074 13316 44066 653 3872 12098 558 299.7 165573383 165573383 0.0 2 518.5
+I075 57551 190762 2973 20636 64314 2529 17838.9 815292228 815502785 0.0 1 timeout
+I076 14023 45790 598 4434 14022 508 372.4 166249692 166249692 0.0 1 2091.9
+I077 20856 68474 1787 8572 25834 1504 3110.6 472503150 472503150 0.0 3 9812.7
+I078 13294 43896 835 5442 16630 720 599.0 185525490 185525490 0.0 11 2770.8
+I079 19867 62542 565 6936 22058 504 1116.0 150506933 150506933 0.0 1 9160.2
+I080 18695 59416 548 6642 20928 516 819.6 164299652 164299652 0.0 1 5697.9
+I081 25081 81478 888 9563 30208 770 2417.7 247527679 247527679 0.0 1 14752.1
+I082 15592 49576 515 5155 16406 448 640.4 147407632 147407632 0.0 1 3504.1
+I083 89596 297166 4991 35552 108774 4600 45781.9 – – – 0 timeout
+I084 44934 147454 2319 14998 46704 1958 10527.6 627187559 627187559 0.0 1 36099.5
+I085 9113 28982 301 2762 8748 256 100.4 80628079 80628079 0.0 1 409.2
+T able 13. Detailed computational results for test set vienna-i-advanced.
+Original Presolved
+Instance |V| | A| |T| |V| | A| |T| Time Dual Bound Primal Bound Gap Nodes Time
+I001a 14675 44110 941 12565 38920 881 2121.6 253836156 253949289 0.0 1 timeout
+I002a 23800 71516 1282 20753 64086 1226 10811.0 399121823 399831580 0.2 1 timeout
+I003a 16270 47838 2336 13295 40280 2225 3251.3 788769523 788777471 0.0 1 timeout
+I004a 867 2476 263 551 1588 203 3.3 279512692 279512692 0.0 1 7.9
+I005a 1677 4860 491 1041 3054 357 14.4 390876350 390876350 0.0 1 26.4
+I006a 13339 39064 1842 11431 34412 1784 1803.3 504526035 504526035 0.0 5 16163.1
+I007a 6873 20598 599 5869 18118 576 511.0 177909660 177909660 0.0 1 3765.8
+I008a 6522 19258 708 5424 16536 695 410.2 201788202 201788202 0.0 1 3155.5
+I009a 14977 44870 1053 12851 39724 1015 3029.2 275488552 275583456 0.0 1 timeout
+I010a 13041 39090 782 10545 32890 738 3235.1 207889674 207889674 0.0 1 10891.0
+I011a 9298 27370 1202 7382 22558 1150 581.9 317589880 317589880 0.0 21 4737.1
+I012a 3500 10428 387 2314 7300 346 60.7 118893243 118893243 0.0 1 220.2
+I013a 7147 21216 670 5733 17582 630 480.5 193190339 193190339 0.0 1 3898.2
+I014a 3577 10622 364 2478 7806 329 54.3 105173465 105173465 0.0 1 104.0
+I015a 20573 61082 2119 16470 50918 2044 4698.1 592240832 592240832 0.0 3 21463.2
+I016a 27214 79648 3434 21954 66412 3262 11972.9 1110848130 1110940660 0.0 1 timeout
+I017a 7571 23142 386 6618 20846 379 399.8 109739695 109739695 0.0 1 2062.2
+I018a 12258 36028 1549 9965 30276 1495 1761.4 463887832 463887832 0.0 1 16113.2
+I019a 11693 35248 732 8962 28532 717 898.2 217647693 217647693 0.0 3 13647.0
+I020a 6405 19128 508 4672 14802 477 233.3 146515460 146515460 0.0 1 1191.3
+I021a 5195 15722 295 3639 11808 277 126.3 106470644 106470644 0.0 1 1282.3
+I022a 8869 27102 356 7453 23574 345 932.4 106799980 106799980 0.0 1 13596.7
+I023a 13724 41726 403 12167 37854 360 2412.2 131044872 131044872 0.0 1 41245.6
+I024a 32357 96500 2511 27179 84068 2435 9598.9 756672940 758557437 0.2 1 timeout
+I025a 10055 29922 833 7563 23750 807 734.2 232790758 232790758 0.0 3 13328.0
+I026a 18155 53136 2661 14694 44534 2566 3132.3 928032223 928032223 0.0 7 37424.3
+I027a 40772 121110 3490 32761 101492 3391 17889.6 975965014 976964371 0.1 1 timeout
+I028a 43690 132922 1597 38201 119772 1562 43256.4 – – – 0 timeout
+I029a 32979 99254 1946 26985 84432 1885 13118.9 489241617 492266866 0.6 1 timeout
+I030a 12941 38558 1093 9662 30324 1062 1625.1 321646787 321646787 0.0 3 5277.8
+I031a 21054 62820 1832 16103 50500 1715 4044.2 – – – 0 memout
+I032a 21345 62706 2454 16977 51802 2302 4909.8 773096651 773096651 0.0 7 42145.1
+I033a 8500 25400 548 6963 21572 528 783.9 134461857 134461857 0.0 1 3185.9
+I034a 9128 27336 606 6875 21732 577 425.8 165115148 165115148 0.0 1 7877.9
+cont. next page
+
+===== PAGE 24 =====
+
+Original Presolved
+Instance |V| | A| |T| |V| | A| |T| Time Dual Bound Primal Bound Gap Nodes Time
+I035a 13129 38840 1428 10481 32168 1375 2636.7 – – – 0 memout
+I036a 17036 50964 1258 13484 42368 1213 2401.6 375260864 375260864 0.0 5 39870.4
+I037a 5886 17738 392 4557 14556 389 181.8 105720727 105720727 0.0 1 2107.1
+I038a 7733 22956 798 6098 18920 767 321.4 255767543 255767543 0.0 3 3374.4
+I039a 3719 11066 306 2953 9182 294 70.4 85566290 85566290 0.0 2 667.3
+I040a 18837 56312 1501 14946 46730 1445 3520.8 431461983 431566911 0.0 1 timeout
+I041a 22466 67736 1014 17905 56692 973 4601.1 301713564 301947909 0.1 1 timeout
+I042a 23925 71612 1923 19446 60668 1875 4914.2 531908798 532213772 0.1 1 timeout
+I043a 4511 13480 335 3531 11078 324 97.5 95722094 95722094 0.0 1 881.5
+I044a 31500 93514 2954 25471 78746 2866 8693.4 804530061 804534188 0.0 1 timeout
+I045a 6775 20454 378 5476 17306 367 316.1 105944062 105944062 0.0 1 1078.0
+I046a 32376 96108 3154 25699 79822 3033 8655.0 925331983 925505793 0.0 1 timeout
+I047a 10622 30880 1791 8673 26012 1683 1162.9 695163406 695163406 0.0 3 42910.9
+I048a 4920 14712 320 3665 11660 298 122.6 91509264 91509264 0.0 1 546.9
+I049a 15045 45426 821 11740 37542 785 1246.5 294811505 294811505 0.0 1 17433.1
+I050a 17787 52352 2232 14461 44028 2146 4753.3 792563895 792610551 0.0 1 timeout
+I051a 12130 35784 1337 9924 30348 1287 1220.1 357230839 357230839 0.0 20 12131.3
+I052a 160 474 23 91 278 16 0.0 13309487 13309487 0.0 1 0.1
+I053a 693 2046 102 514 1594 93 0.9 30854904 30854904 0.0 1 1.8
+I054a 540 1634 25 375 1214 21 0.8 15841596 15841596 0.0 1 3.1
+I055a 4701 13958 483 3470 10806 451 123.1 144164924 144164924 0.0 1 442.8
+I056a 290 878 34 156 502 26 0.1 14171206 14171206 0.0 1 0.2
+I057a 13078 38736 1346 10377 32042 1282 1724.6 412746415 412746415 0.0 5 6537.3
+I058a 7877 23314 997 5798 17974 922 401.0 305024188 305024188 0.0 1 1216.7
+I059a 2800 8314 286 1685 5294 247 34.0 107617854 107617854 0.0 6 59.4
+I060a 18991 57072 1158 14554 46326 1127 2424.9 337290460 337290460 0.0 1 23550.3
+I061a 20958 62930 1337 17563 54742 1317 7525.1 362908665 363077130 0.0 1 timeout
+I062a 23714 70610 2812 17492 54870 2660 6552.0 – – – 0 memout
+I063a 9600 28084 1291 7337 22308 1209 754.6 459801704 459801704 0.0 1 5681.3
+I064a 31712 93422 3182 27236 82676 3137 15243.8 862202260 863191346 0.1 1 timeout
+I065a 1185 3512 119 898 2786 116 4.6 32965718 32965718 0.0 1 61.3
+I066a 4551 13642 417 3260 10414 393 80.2 174219813 174219813 0.0 1 291.3
+I067a 10318 31176 579 8496 26706 557 506.7 175540750 175540750 0.0 1 5293.6
+I068a 12191 36046 1302 9183 28354 1219 1203.5 – – – 0 memout
+I069a 3508 10312 452 2784 8512 431 51.4 135161583 135161583 0.0 1 717.6
+I070a 6739 20128 511 5172 16386 497 210.5 136700139 136700139 0.0 1 3049.8
+I071a 12772 37772 1281 10026 31000 1236 1019.6 382539099 382539099 0.0 1 2976.8
+I072a 11628 34822 851 8650 27612 819 719.0 289019226 289019226 0.0 1 7775.9
+I073a 7510 21746 1337 6011 17888 1223 478.0 663004987 663004987 0.0 1 3475.3
+I074a 4441 13124 548 3169 9788 504 84.7 165573383 165573383 0.0 1 359.7
+I075a 23195 68724 2498 18229 56492 2399 3590.6 815024079 815505116 0.1 1 timeout
+I076a 4909 14536 498 3504 10968 459 131.4 – – – 0 memout
+I077a 9153 26726 1490 7886 23544 1434 690.7 472503150 472503150 0.0 3 8114.8
+I078a 5864 17324 692 4945 14992 672 227.8 185525490 185525490 0.0 15 1347.7
+I079a 7933 23614 497 5831 18392 481 354.8 150506933 150506933 0.0 1 12664.5
+I080a 7589 22512 499 5650 17666 483 223.3 164299652 164299652 0.0 1 2756.9
+I081a 10747 32058 751 8282 26008 715 616.5 247527679 247527679 0.0 1 12797.4
+I082a 5850 17386 435 4161 13132 410 214.3 147407632 147407632 0.0 1 2292.5
+I083a 34221 100602 4138 26297 80404 3863 13940.6 1405059510 1405705190 0.0 1 timeout
+I084a 17050 50402 1918 12995 40152 1823 2101.5 627187559 627187559 0.0 3 19063.4
+I085a 2780 8246 243 1973 6202 219 26.4 80628079 80628079 0.0 1 119.9
+Table 14. Detailed computational results for test set estein1.
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+estein1-00 15 44 5 1.87 1.87 0.0 1 0.0
+estein1-01 12 34 6 1.64 1.64 0.0 1 0.0
+estein1-02 28 90 7 2.36 2.36 0.0 1 0.0
+estein1-03 64 224 8 2.54 2.54 0.0 1 0.3
+estein1-04 12 34 6 2.26 2.26 0.0 1 0.0
+estein1-05 24 76 12 2.42 2.42 0.0 1 0.0
+cont. next page
+
+===== PAGE 25 =====
+
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+estein1-06 30 98 12 2.48 2.48 0.0 1 0.0
+estein1-07 24 74 12 2.36 2.36 0.0 1 0.0
+estein1-08 15 44 7 1.64 1.64 0.0 1 0.0
+estein1-09 36 120 6 1.77 1.77 0.0 1 0.0
+estein1-10 30 98 6 1.44 1.44 0.0 1 0.0
+estein1-11 27 84 9 1.8 1.8 0.0 1 0.0
+estein1-12 42 142 9 1.5 1.5 0.0 1 0.1
+estein1-13 36 120 12 2.6 2.6 0.0 1 0.0
+estein1-14 100 360 14 1.48 1.48 0.0 1 0.3
+estein1-15 9 24 3 1.6 1.6 0.0 1 0.0
+estein1-16 48 164 10 2 2 0.0 1 0.0
+estein1-17 182 674 62 4.04 4.04 0.0 1 0.3
+estein1-18 168 620 14 1.88 1.88 0.0 1 0.7
+estein1-19 6 14 3 1.12 1.12 0.0 1 0.0
+estein1-20 15 44 5 1.92 1.92 0.0 1 0.0
+estein1-21 16 48 4 0.63 0.63 0.0 1 0.0
+estein1-22 16 48 4 0.65 0.65 0.0 1 0.0
+estein1-23 16 48 4 0.3 0.3 0.0 1 0.0
+estein1-24 9 24 3 0.23 0.23 0.0 1 0.0
+estein1-25 9 24 3 0.15 0.15 0.0 1 0.0
+estein1-26 16 48 4 1.33 1.33 0.0 1 0.0
+estein1-27 12 34 4 0.24 0.24 0.0 1 0.0
+estein1-28 9 24 3 2 2 0.0 1 0.0
+estein1-29 28 90 12 1.1 1.1 0.0 1 0.0
+estein1-30 130 474 14 2.59 2.59 0.0 1 0.7
+estein1-31 195 724 19 3.12 3.12 0.0 1 1.4
+estein1-32 132 482 18 2.68 2.68 0.0 1 0.6
+estein1-33 272 1022 19 2.41 2.41 0.0 1 7.2
+estein1-34 240 898 18 1.51 1.51 0.0 1 2.3
+estein1-35 6 14 4 0.9 0.9 0.0 1 0.0
+estein1-36 49 168 8 0.9 0.9 0.0 1 0.0
+estein1-37 100 360 14 1.66 1.66 0.0 1 0.6
+estein1-38 100 360 14 1.66 1.66 0.0 1 0.4
+estein1-39 64 224 10 1.55 1.55 0.0 1 0.2
+estein1-40 144 526 20 2.24 2.24 0.0 1 0.2
+estein1-41 81 288 15 1.53 1.53 0.0 1 0.2
+estein1-42 195 724 16 2.55 2.55 0.0 1 1.2
+estein1-43 196 728 17 2.52 2.52 0.0 1 2.0
+estein1-44 270 1014 19 2.2 2.2 0.0 1 4.6
+estein1-45 16 48 16 1.5 1.5 0.0 1 0.0
+Table 15. Detailed computational results for test set estein10.
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+estein10-0 100 360 10 2.292075 2.292075 0.0 1 0.3
+estein10-10 100 360 10 2.223952 2.223952 0.0 1 0.5
+estein10-11 100 360 10 1.962632 1.962632 0.0 1 0.2
+estein10-12 100 360 10 1.948392 1.948392 0.0 1 0.1
+estein10-13 100 360 10 2.185612 2.185612 0.0 1 0.3
+estein10-14 100 360 10 1.864192 1.864192 0.0 1 0.3
+estein10-1 100 360 10 1.913409 1.913409 0.0 1 0.3
+estein10-2 100 360 10 2.600368 2.600368 0.0 1 0.2
+estein10-3 100 360 10 2.046109 2.046109 0.0 1 0.3
+estein10-4 100 360 10 1.881893 1.881893 0.0 1 0.1
+estein10-5 100 360 10 2.654077 2.654077 0.0 1 0.3
+estein10-6 100 360 10 2.602508 2.602508 0.0 1 0.2
+estein10-7 100 360 10 2.50562 2.50562 0.0 1 0.2
+estein10-8 100 360 10 2.206235 2.206235 0.0 1 0.3
+estein10-9 100 360 10 2.39361 2.39361 0.0 1 0.1
+Table 16. Detailed computational results for test set estein20.
+
+===== PAGE 26 =====
+
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+estein20-0 400 1520 20 3.370387 3.370387 0.0 1 6.0
+estein20-10 400 1520 20 2.712391 2.712391 0.0 1 6.3
+estein20-11 400 1520 20 3.04514 3.04514 0.0 1 10.1
+estein20-12 400 1520 20 3.443865 3.443865 0.0 1 4.1
+estein20-13 400 1520 20 3.406237 3.406237 0.0 1 12.1
+estein20-14 400 1520 20 3.230378 3.230378 0.0 1 14.4
+estein20-1 400 1520 20 3.263948 3.263948 0.0 1 6.9
+estein20-2 400 1520 20 2.784744 2.784744 0.0 1 3.3
+estein20-3 400 1520 20 2.762439 2.762439 0.0 7 35.7
+estein20-4 400 1520 20 3.403317 3.403317 0.0 3 18.6
+estein20-5 400 1520 20 3.601423 3.601423 0.0 1 3.9
+estein20-6 400 1520 20 3.493487 3.493487 0.0 1 9.7
+estein20-7 400 1520 20 3.801638 3.801638 0.0 3 13.4
+estein20-8 400 1520 20 3.673995 3.673995 0.0 1 5.7
+estein20-9 400 1520 20 3.402477 3.402477 0.0 1 6.7
+Table 17. Detailed computational results for test set estein30.
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+estein30-0 900 3480 30 4.069296 4.069296 0.0 1 234.6
+estein30-10 900 3480 30 4.164799 4.164799 0.0 1 251.7
+estein30-11 900 3480 30 3.841669 3.841669 0.0 1 38.3
+estein30-12 900 3480 30 3.740663 3.740663 0.0 1 62.4
+estein30-13 900 3480 30 4.2897 4.2897 0.0 1 96.0
+estein30-14 900 3480 30 4.303555 4.303555 0.0 1 282.3
+estein30-1 900 3480 30 4.090005 4.090005 0.0 7 135.2
+estein30-2 900 3480 30 4.312045 4.312045 0.0 1 432.1
+estein30-3 900 3480 30 4.215096 4.215096 0.0 1 205.1
+estein30-4 900 3480 30 4.173974 4.173974 0.0 1 209.9
+estein30-5 900 3480 30 3.995514 3.995514 0.0 1 383.6
+estein30-6 900 3480 30 4.376138 4.376138 0.0 1 176.9
+estein30-7 900 3480 30 4.169121 4.169121 0.0 1 292.2
+estein30-8 900 3480 30 3.713363 3.713363 0.0 1 141.5
+estein30-9 900 3480 30 4.268661 4.268661 0.0 1 128.1
+Table 18. Detailed computational results for test set estein40.
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+estein40-0 1600 6240 40 4.484154 4.484154 0.0 1 630.6
+estein40-10 1600 6240 40 4.673421 4.673421 0.0 1 1101.3
+estein40-11 1600 6240 40 4.384339 4.384339 0.0 1 714.7
+estein40-12 1600 6240 40 5.188453 5.188453 0.0 1 2123.0
+estein40-13 1600 6240 40 4.916698 4.916698 0.0 1 743.9
+estein40-14 1600 6240 40 5.082803 5.082803 0.0 1 1606.4
+estein40-1 1600 6240 40 4.681131 4.681131 0.0 1 1483.6
+estein40-2 1600 6240 40 4.997415 4.997415 0.0 1 2042.8
+estein40-3 1600 6240 40 4.528989 4.528989 0.0 1 1263.5
+estein40-4 1600 6240 40 5.18999254 5.194038 0.1 2030 timeout
+estein40-5 1600 6240 40 4.97534 4.97534 0.0 1 1481.2
+estein40-6 1600 6240 40 4.563901 4.563901 0.0 1 458.6
+estein40-7 1600 6240 40 4.874601 4.874601 0.0 1 1049.7
+estein40-8 1600 6240 40 5.176179 5.176179 0.0 1 2337.5
+estein40-9 1600 6240 40 5.713686 5.713686 0.0 1 1931.7
+Table 19. Detailed computational results for test set estein50.
+
+===== PAGE 27 =====
+
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+estein50-0 2500 9800 50 5.494867 5.494867 0.0 1 5828.3
+estein50-10 2500 9800 50 5.253293 5.253293 0.0 1 20820.2
+estein50-11 2500 9800 50 5.32673654 5.34093 0.3 448 timeout
+estein50-12 2500 9800 50 5.389099 5.389099 0.0 1 5841.1
+estein50-13 2500 9800 50 5.355143 5.355143 0.0 1 16948.9
+estein50-14 2500 9800 50 5.218085 5.218085 0.0 1 5981.4
+estein50-1 2500 9800 50 5.548422 5.548422 0.0 1 3684.2
+estein50-2 2500 9800 50 5.469105 5.469105 0.0 1 11805.2
+estein50-3 2500 9800 50 5.153576 5.153576 0.0 1 1447.5
+estein50-4 2500 9800 50 5.518601 5.518601 0.0 1 2284.0
+estein50-5 2500 9800 50 5.58043 5.58043 0.0 1 5858.3
+estein50-6 2500 9800 50 4.996117 4.996117 0.0 29 23352.9
+estein50-7 2500 9800 50 5.375465 5.375465 0.0 1 1375.5
+estein50-8 2500 9800 50 5.3431982 5.345677 0.0 380 timeout
+estein50-9 2500 9800 50 5.403795 5.403795 0.0 1 5171.6
+Table 20. Detailed computational results for test set estein60.
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+estein60-0 3600 14160 60 5.376143 5.376143 0.0 1 5737.2
+estein60-10 3600 14160 60 5.614167 5.614167 0.0 1 14913.2
+estein60-11 3600 14160 60 5.979133 5.979133 0.0 1 20954.6
+estein60-12 3600 14160 60 6.07503679 6.138029 1.0 1 timeout
+estein60-13 3600 14160 60 5.603556 5.603556 0.0 1 5819.2
+estein60-14 3600 14160 60 5.662257 5.662257 0.0 1 9987.0
+estein60-1 3600 14160 60 5.53025109 5.536782 0.1 121 timeout
+estein60-2 3600 14160 60 5.656678 5.656678 0.0 1 8370.9
+estein60-3 3600 14160 60 5.537102 5.537102 0.0 1 34545.6
+estein60-4 3600 14160 60 5.46369806 5.470499 0.1 786 timeout
+estein60-5 3600 14160 60 6.03886585 6.042196 0.1 1 timeout
+estein60-6 3600 14160 60 5.89326687 5.897803 0.1 1 timeout
+estein60-7 3600 14160 60 5.813816 5.813816 0.0 1 16811.2
+estein60-8 3600 14160 60 5.587713 5.587713 0.0 1 8110.2
+estein60-9 3600 14160 60 5.762446 5.762446 0.0 1 10757.2
+Table 21. Detailed computational results for test set solids.
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+cube 8 24 8 7 7 0.0 1 0.0
+dodecahedron 343 1764 20 7.69398 7.69398 0.0 10709 5671.1
+icosahedron 125 600 12 20.944264 20.944264 0.0 9 5.5
+octahedron 27 108 6 6 6 0.0 1 0.0
+tetrahedron 18 66 4 2.682521 2.682521 0.0 1 0.0
+Table 22. Detailed computational results for test set cancer.
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+cancer1 4D 600 3820 20 28 28 0.0 1 1.3
+cancer2 4D 256 1536 20 21 21 0.0 1 0.1
+cancer3 6D 20580 197078 110 146 146 0.0 1 380.9
+cancer4 6D 34560 340416 93 134.159732 137 2.1 1 timeout
+cancer5 6D 8000 74400 48 69 69 0.0 1 9901.0
+cancer6 6D 5120 46592 50 55 55 0.0 1 73.2
+cancer7 6D 21000 203300 109 140 140 0.0 1 2358.3
+cancer8 6D 8640 80064 77 89 89 0.0 1 103.1
+cancer9 6D 6000 54800 46 59 59 0.0 1 34.1
+cancer10 6D 10000 94000 82 92 92 0.0 1 45.8
+cont. next page
+
+===== PAGE 28 =====
+
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+cancer11 8D 4762800 64777860 75 – – – 0 memout
+cancer12 8D 918750 12031250 58 – – – 0 memout
+cancer13 8D 86400 1039680 70 88 88 0.0 1 5240.8
+cancer14 8D 27648 308736 54 63 63 0.0 1 161.9
+Table 23. Detailed computational results for test set JMP.
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+K100.10 115 722 15 133567 133567 0.0 1 0.0
+K100.1 112 762 12 124108 124108 0.0 1 0.0
+K100.2 114 756 14 200262 200262 0.0 1 0.3
+K100.3 111 874 11 115953 115953 0.0 1 0.1
+K100.4 111 788 11 87498 87498 0.0 1 0.1
+K100.5 117 812 17 119078 119078 0.0 1 0.1
+K100.6 112 680 12 132886 132886 0.0 1 0.0
+K100.7 114 708 14 172457 172457 0.0 1 0.1
+K100.8 116 776 16 210869 210869 0.0 1 0.2
+K100.9 112 732 12 122917 122917 0.0 1 0.2
+K100 115 786 15 135511 135511 0.0 1 0.2
+K200 234 1580 34 329211 329211 0.0 1 1.2
+K400.10 450 3308 50 394191 394191 0.0 1 11.7
+K400.1 465 3324 65 490771 490771 0.0 1 11.2
+K400.2 462 3420 62 477073 477073 0.0 1 12.2
+K400.3 456 3314 56 415328 415328 0.0 1 4.7
+K400.4 456 3182 56 389451 389451 0.0 1 7.2
+K400.5 477 3368 77 519526 519526 0.0 1 10.7
+K400.6 456 3482 56 374849 374849 0.0 1 3.5
+K400.7 468 3286 68 474466 474466 0.0 1 8.3
+K400.8 461 3392 61 418614 418614 0.0 1 4.2
+K400.9 454 3318 54 383105 383105 0.0 1 6.0
+K400 463 3402 63 350093 350093 0.0 1 4.2
+P100.1 133 760 33 926238 926238 0.0 1 0.9
+P100.2 127 750 27 401641 401641 0.0 1 0.8
+P100.3 125 776 25 659644 659644 0.0 1 0.5
+P100.4 133 760 33 827419 827419 0.0 1 0.7
+P100 134 832 34 803300 803300 0.0 1 0.3
+P200 249 1462 49 1317874 1317874 0.0 1 1.1
+P400.1 521 3144 121 2808440 2808440 0.0 1 7.7
+P400.2 508 3034 108 2518577 2518577 0.0 1 7.2
+P400.3 514 3028 114 2951725 2951725 0.0 1 8.4
+P400.4 495 2852 95 2852956 2852956 0.0 1 8.0
+P400 495 2964 95 2459904 2459904 0.0 1 5.3
+Table 24. Detailed computational results for test set CRR.
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+C01-A 506 1280 6 18 18 0.0 1 0.1
+C01-B 506 1280 6 85 85 0.0 1 0.3
+C02-A 511 1310 11 50 50 0.0 1 0.0
+C02-B 511 1310 11 141 141 0.0 1 0.5
+C03-A 584 1748 84 414 414 0.0 1 0.8
+C03-B 584 1748 84 737 737 0.0 1 3.8
+C04-A 626 2000 126 618 618 0.0 1 2.2
+C04-B 626 2000 126 1063 1063 0.0 1 14.1
+C05-A 751 2750 251 1080 1080 0.0 1 19.4
+C05-B 751 2750 251 1528 1528 0.0 3 154.5
+C06-A 506 2030 6 18 18 0.0 1 0.1
+C06-B 506 2030 6 55 55 0.0 1 1.1
+C07-A 511 2060 11 50 50 0.0 1 0.2
+cont. next page
+
+===== PAGE 29 =====
+
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+C07-B 511 2060 11 102 102 0.0 1 0.6
+C08-A 584 2498 84 361 361 0.0 1 3.1
+C08-B 584 2498 84 500 500 0.0 1 7.3
+C09-A 626 2750 126 533 533 0.0 1 6.0
+C09-B 626 2750 126 694 694 0.0 1 18.3
+C10-A 751 3500 251 859 859 0.0 1 68.8
+C10-B 751 3500 251 1069 1069 0.0 1 66.3
+C11-A 506 5030 6 18 18 0.0 1 0.6
+C11-B 506 5030 6 32 32 0.0 1 1.8
+C12-A 511 5060 11 38 38 0.0 1 1.1
+C12-B 511 5060 11 46 46 0.0 1 2.3
+C13-A 584 5498 84 236 236 0.0 1 12.3
+C13-B 584 5498 84 258 258 0.0 1 11.9
+C14-A 626 5750 126 293 293 0.0 2 77.4
+C14-B 626 5750 126 318 318 0.0 1 10.1
+C15-A 751 6500 251 501 501 0.0 2 192.8
+C15-B 751 6500 251 551 551 0.0 1 56.0
+C16-A 506 25030 6 11 11 0.0 1 6.5
+C16-B 506 25030 6 11 11 0.0 1 7.0
+C17-A 511 25060 11 18 18 0.0 1 10.9
+C17-B 511 25060 11 18 18 0.0 1 10.3
+C18-A 584 25498 84 111 111 0.0 1 143.5
+C18-B 584 25498 84 112 113 0.9 101750 timeout
+C19-A 626 25750 126 146 146 0.0 4767 12026.2
+C19-B 626 25750 126 146 146 0.0 1 43.8
+C20-A 751 26500 251 266 266 0.0 5 245.5
+C20-B 751 26500 251 267 267 0.0 1 42.1
+D01-A 1006 2530 6 18 18 0.0 1 0.0
+D01-B 1006 2530 6 106 106 0.0 1 0.6
+D02-A 1011 2560 11 50 50 0.0 1 0.0
+D02-B 1011 2560 11 218 218 0.0 1 0.7
+D03-A 1168 3502 168 807 807 0.0 7 12.3
+D03-B 1168 3502 168 1509 1509 0.0 1 81.1
+D04-A 1251 4000 251 1203 1203 0.0 1 37.2
+D04-B 1251 4000 251 1881 1881 0.0 1 336.0
+D05-A 1501 5500 501 2157 2157 0.0 1 523.6
+D05-B 1501 5500 501 3135 3135 0.0 1 15117.9
+D06-A 1006 4030 6 18 18 0.0 1 0.1
+D06-B 1006 4030 6 67 67 0.0 1 4.5
+D07-A 1011 4060 11 50 50 0.0 1 0.2
+D07-B 1011 4060 11 103 103 0.0 1 1.2
+D08-A 1168 5002 168 755 755 0.0 1 34.3
+D08-B 1168 5002 168 1036 1036 0.0 1 104.9
+D09-A 1251 5500 251 1070 1070 0.0 4 194.5
+D09-B 1251 5500 251 1420 1420 0.0 4 342.1
+D10-A 1501 7000 501 1671 1671 0.0 3 6448.8
+D10-B 1501 7000 501 2079 2079 0.0 6 9741.0
+D11-A 1006 10030 6 18 18 0.0 1 1.1
+D11-B 1006 10030 6 29 29 0.0 1 7.0
+D12-A 1011 10060 11 42 42 0.0 1 6.1
+D12-B 1011 10060 11 42 42 0.0 1 5.3
+D13-A 1168 11002 168 445 445 0.0 7 345.4
+D13-B 1168 11002 168 486 486 0.0 4 318.1
+D14-A 1251 11500 251 602 602 0.0 5 1872.6
+D14-B 1251 11500 251 665 665 0.0 1 258.7
+D15-A 1501 13000 501 1042 1042 0.0 10 4285.1
+D15-B 1501 13000 501 1107 1108 0.1 4214 timeout
+D16-A 1006 50030 6 13 13 0.0 1 32.4
+cont. next page
+
+===== PAGE 30 =====
+
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+D16-B 1006 50030 6 13 13 0.0 1 26.7
+D17-A 1011 50060 11 23 23 0.0 1 52.3
+D17-B 1011 50060 11 23 23 0.0 1 51.6
+D18-A 1168 51002 168 217 218 0.5 7013 timeout
+D18-B 1168 51002 168 222 223 0.5 18908 timeout
+D19-A 1251 51500 251 305 306 0.3 9541 timeout
+D19-B 1251 51500 251 309 310 0.3 15951 timeout
+D20-A 1501 53000 501 535 540 0.9 2005 timeout
+D20-B 1501 53000 501 536 537 0.2 2455 timeout
+Table 25. Detailed computational results for test set PUCNU.
+Instance |V| | A| | T| Dual Bound Primal Bound Gap% Nodes Time
+bip42nu 1401 9164 201 224.170552 228 1.7 48242 timeout
+bip52nu 2401 17194 201 219.987945 224 1.8 49721 timeout
+bip62nu 1401 21204 201 210.393707 214 1.7 552 timeout
+bipa2nu 3601 37946 301 320.276245 330 3.0 40 timeout
+bipe2nu 601 10326 51 53 53 0.0 61 1668.3
+cc10-2nu 1160 11050 136 165.263052 172 4.1 461 timeout
+cc11-2nu 2293 23990 245 300.067047 321 7.0 36 timeout
+cc12-2nu 4570 51986 474 558.518991 595 6.5 27 timeout
+cc3-10nu 1051 27300 51 58.3827899 61 4.5 1218 timeout
+cc3-11nu 1393 40296 62 75.0409485 81 7.9 133 timeout
+cc3-12nu 1803 57468 75 90.2119729 98 8.6 20 timeout
+cc3-4nu 73 624 9 10 10 0.0 1 0.2
+cc3-5nu 139 1578 14 17 17 0.0 1 1.5
+cc5-3nu 271 2592 28 36 36 0.0 1 115.3
+cc6-2nu 77 456 13 15 15 0.0 1 0.2
+cc6-3nu 806 9192 77 94 99 5.3 1 timeout
+cc7-3nu 2410 31948 223 267.573727 287 7.3 1 timeout
+cc9-2nu 577 4992 65 83 83 0.0 28 1399.6
+T able 26. Detailed computational results for test set cologne1.
+Original Presolved
+Instance |V| | A| |T| |V| | A| |T| Time Dual Bound Primal Bound Gap Nodes Time
+i101M1 758 12704 11 658 11550 10 0.3 109271.503 109271.503 0.0 1 0.7
+i101M2 758 12704 11 659 11554 11 0.3 315925.31 315925.31 0.0 1 13.3
+i101M3 758 12704 11 659 11554 11 0.3 355625.409 355625.409 0.0 1 30.9
+i102M1 760 12730 12 661 11590 12 0.3 104065.801 104065.801 0.0 1 0.5
+i102M2 760 12730 12 661 11590 12 0.3 352538.819 352538.819 0.0 1 20.0
+i102M3 760 12730 12 661 11590 12 0.3 454365.927 454365.927 0.0 1 27.6
+i103M1 764 12738 14 665 11598 13 0.3 139749.407 139749.407 0.0 1 1.7
+i103M2 764 12738 14 666 11602 14 0.2 407834.228 407834.228 0.0 1 10.7
+i103M3 764 12738 14 666 11602 14 0.2 456125.488 456125.488 0.0 1 26.0
+i104M2 744 12598 4 645 11460 4 0.2 89920.8353 89920.8353 0.0 1 5.3
+i105M1 744 12604 4 646 11468 4 0.3 26717.2025 26717.2025 0.0 1 0.5
+i105M2 744 12604 4 646 11468 4 0.3 100269.619 100269.619 0.0 1 7.0
+T able 27. Detailed computational results for test set cologne2.
+Original Presolved
+Instance |V| | A| |T| |V| | A| |T| Time Dual Bound Primal Bound Gap Nodes Time
+i201M2 1812 33522 10 1759 32384 9 1.9 355467.684 355467.684 0.0 1 104.2
+i201M3 1812 33522 10 1759 32384 9 1.9 628833.614 628833.614 0.0 1 222.8
+i201M4 1812 33522 10 1760 32388 10 1.8 773398.303 773398.303 0.0 1 400.5
+i202M2 1814 33520 11 1764 32398 11 1.9 288946.832 288946.832 0.0 1 80.0
+i202M3 1814 33520 11 1764 32398 11 1.7 419184.159 419184.159 0.0 1 136.3
+cont. next page
+
+===== PAGE 31 =====
+
+Original Presolved
+Instance |V| | A| |T| |V| | A| |T| Time Dual Bound Primal Bound Gap Nodes Time
+i202M4 1814 33520 11 1764 32398 11 1.9 430034.264 430034.264 0.0 1 194.8
+i203M2 1824 33584 16 1776 32472 16 1.7 459894.776 459894.776 0.0 1 112.1
+i203M3 1824 33584 16 1776 32472 16 1.3 643062.02 643062.02 0.0 1 393.7
+i203M4 1824 33584 16 1776 32472 16 1.6 677733.067 677733.067 0.0 1 430.2
+i204M2 1805 33454 5 1753 32318 5 1.8 161700.545 161700.545 0.0 1 29.4
+i204M3 1805 33454 5 1753 32318 5 2.5 245287.203 245287.203 0.0 1 84.0
+i204M4 1805 33454 5 1753 32318 5 2.8 245287.203 245287.203 0.0 1 73.1
+i205M2 1823 33640 14 1771 32518 14 1.7 571031.415 571031.415 0.0 1 63.4
+i205M3 1823 33640 14 1771 32518 14 1.9 672403.143 672403.143 0.0 1 79.0
+i205M4 1823 33640 14 1771 32518 14 1.3 713973.623 713973.623 0.0 1 55.5
+Table 28. Detailed computational results for test set small.
+Instance |V| | A| |T| Dual Bound Primal Bound Gap% Nodes Time
+wo10-gr12-cr100-tr100-co1-ng9-se0 809 14396 10 171486 171486 0.0 1 230.5
+wo10-gr12-cr100-tr100-co1-ng9-se1 809 14426 10 149772 149772 0.0 1 90.2
+wo10-gr12-cr100-tr100-co1-ng9-se10 809 14428 10 117081 117081 0.0 1 28.7
+wo10-gr12-cr100-tr100-co1-ng9-se11 809 14386 10 125785 125785 0.0 3 57.5
+wo10-gr12-cr100-tr100-co1-ng9-se2 809 14356 10 138898 138898 0.0 1 25.7
+wo10-gr12-cr100-tr100-co1-ng9-se3 809 14432 10 134396 134396 0.0 1 58.1
+wo10-gr12-cr100-tr100-co1-ng9-se4 809 14388 10 124225 124225 0.0 1 22.1
+wo10-gr12-cr100-tr100-co1-ng9-se5 809 14380 10 158187 158187 0.0 1 57.5
+wo10-gr12-cr100-tr100-co1-ng9-se6 809 14414 10 180736 180736 0.0 1 144.9
+wo10-gr12-cr100-tr100-co1-ng9-se7 809 14440 10 91620 91620 0.0 1 15.5
+wo10-gr12-cr100-tr100-co1-ng9-se8 809 14398 10 164308 164308 0.0 1 94.3
+wo10-gr12-cr100-tr100-co1-ng9-se9 809 14414 10 121553 121553 0.0 1 62.2
+wo10-gr12-cr200-tr100-co1-ng9-se0 809 44652 10 60325.4145 61549 2.0 218 timeout
+wo10-gr12-cr200-tr100-co1-ng9-se1 809 44682 10 57701.6337 58859 2.0 344 timeout
+wo10-gr12-cr200-tr100-co1-ng9-se10 809 44684 10 51912.6337 52645 1.4 1314 timeout
+wo10-gr12-cr200-tr100-co1-ng9-se11 809 44642 10 50771 50771 0.0 67 1164.8
+wo10-gr12-cr200-tr100-co1-ng9-se2 809 44612 10 61413 61413 0.0 70 949.3
+wo10-gr12-cr200-tr100-co1-ng9-se3 809 44688 10 54284.021 55991 3.1 451 timeout
+wo10-gr12-cr200-tr100-co1-ng9-se4 809 44644 10 53077 53077 0.0 1 219.3
+wo10-gr12-cr200-tr100-co1-ng9-se5 809 44636 10 60289 60289 0.0 74 955.5
+wo10-gr12-cr200-tr100-co1-ng9-se6 809 44670 10 64936.6571 75264 15.9 102 timeout
+wo10-gr12-cr200-tr100-co1-ng9-se7 809 44696 10 46306 46306 0.0 1 148.9
+wo10-gr12-cr200-tr100-co1-ng9-se8 809 44654 10 60449.7921 61576 1.9 750 timeout
+wo10-gr12-cr200-tr100-co1-ng9-se9 809 44670 10 51737 51737 0.0 97 1107.2
+wo10-gr14-cr100-tr100-co1-ng9-se0 3209 215940 10 139286.122 180692 29.7 1 timeout
+wo10-gr14-cr100-tr100-co1-ng9-se1 3209 216000 10 132698.652 153288 15.5 1 timeout
+wo10-gr14-cr100-tr100-co1-ng9-se10 3209 216016 10 113980.373 119588 4.9 8 timeout
+wo10-gr14-cr100-tr100-co1-ng9-se11 3209 215932 10 113184.289 129690 14.6 3 timeout
+wo10-gr14-cr100-tr100-co1-ng9-se2 3209 215730 10 138303.981 142674 3.2 4 timeout
+wo10-gr14-cr100-tr100-co1-ng9-se3 3209 216016 10 118094.731 142666 20.8 4 timeout
+wo10-gr14-cr100-tr100-co1-ng9-se4 3209 215878 10 124595.464 136111 9.2 1 timeout
+wo10-gr14-cr100-tr100-co1-ng9-se5 3209 215768 10 148791.095 171256 15.1 5 timeout
+wo10-gr14-cr100-tr100-co1-ng9-se6 3209 215954 10 151708.967 198785 31.0 1 timeout
+wo10-gr14-cr100-tr100-co1-ng9-se7 3209 216034 10 92878 92878 0.0 3 4695.5
+wo10-gr14-cr100-tr100-co1-ng9-se8 3209 215902 10 146548.308 176381 20.4 1 timeout
+wo10-gr14-cr100-tr100-co1-ng9-se9 3209 215936 10 110052.848 120424 9.4 6 timeout
+wo10-gr14-cr200-tr100-co1-ng9-se0 3209 643476 10 41148.1956 77038 87.2 1 timeout
+wo10-gr14-cr200-tr100-co1-ng9-se1 3209 643536 10 42100.985 64600 53.4 1 timeout
+wo10-gr14-cr200-tr100-co1-ng9-se10 3209 643552 10 41041.1611 59500 45.0 1 timeout
+wo10-gr14-cr200-tr100-co1-ng9-se11 3209 643468 10 42070.8578 60112 42.9 1 timeout
+wo10-gr14-cr200-tr100-co1-ng9-se2 3209 643266 10 42221.8852 68419 62.0 1 timeout
+wo10-gr14-cr200-tr100-co1-ng9-se3 3209 643552 10 40213.275 61935 54.0 1 timeout
+cont. next page
+
+===== PAGE 32 =====
+
+Instance |V| | A| |T| Dual Bound Primal Bound Gap% Nodes Time
+wo10-gr14-cr200-tr100-co1-ng9-se4 3209 643414 10 37244.0222 61492 65.1 1 timeout
+wo10-gr14-cr200-tr100-co1-ng9-se5 3209 643304 10 42460.1951 78686 85.3 1 timeout
+wo10-gr14-cr200-tr100-co1-ng9-se6 3209 643490 10 42332.3579 86768 105.0 1 timeout
+wo10-gr14-cr200-tr100-co1-ng9-se7 3209 643570 10 35513 47904 34.9 1 timeout
+wo10-gr14-cr200-tr100-co1-ng9-se8 3209 643438 10 41664.0708 79156 90.0 1 timeout
+wo10-gr14-cr200-tr100-co1-ng9-se9 3209 643472 10 41872 56142 34.1 1 timeout
+wo11-gr12-cr100-tr100-co1-ng9-se0 809 7438 10 186639 186639 0.0 1 11.2
+wo11-gr12-cr100-tr100-co1-ng9-se1 809 7444 10 182082 182082 0.0 1 8.3
+wo11-gr12-cr100-tr100-co1-ng9-se10 809 7432 10 136516 136516 0.0 1 8.3
+wo11-gr12-cr100-tr100-co1-ng9-se11 809 7430 10 145251 145251 0.0 1 7.9
+wo11-gr12-cr100-tr100-co1-ng9-se2 809 7394 10 163872 163872 0.0 1 6.2
+wo11-gr12-cr100-tr100-co1-ng9-se3 809 7464 10 118602 118602 0.0 1 4.5
+wo11-gr12-cr100-tr100-co1-ng9-se4 809 7456 10 158547 158547 0.0 1 7.8
+wo11-gr12-cr100-tr100-co1-ng9-se6 809 7472 10 222145 222145 0.0 33 138.3
+wo11-gr12-cr100-tr100-co1-ng9-se7 809 7406 10 185703 185703 0.0 1 22.0
+wo11-gr12-cr100-tr100-co1-ng9-se8 809 7426 10 212746 212746 0.0 1 24.0
+wo11-gr12-cr100-tr100-co1-ng9-se9 809 7456 10 139157 139157 0.0 1 7.3
+wo11-gr12-cr200-tr100-co1-ng9-se0 809 15268 10 77454 77454 0.0 1 26.1
+wo11-gr12-cr200-tr100-co1-ng9-se1 809 15274 10 76353 76353 0.0 1 22.2
+wo11-gr12-cr200-tr100-co1-ng9-se10 809 15262 10 59523 59523 0.0 1 16.6
+wo11-gr12-cr200-tr100-co1-ng9-se11 809 15260 10 66786 66786 0.0 1 31.6
+wo11-gr12-cr200-tr100-co1-ng9-se2 809 15224 10 75434 75434 0.0 1 36.7
+wo11-gr12-cr200-tr100-co1-ng9-se3 809 15294 10 54541 54541 0.0 1 15.2
+wo11-gr12-cr200-tr100-co1-ng9-se4 809 15286 10 68191 68191 0.0 1 34.8
+wo11-gr12-cr200-tr100-co1-ng9-se6 809 15302 10 82334 82334 0.0 1 53.3
+wo11-gr12-cr200-tr100-co1-ng9-se7 809 15236 10 77975 77975 0.0 1 45.2
+wo11-gr12-cr200-tr100-co1-ng9-se8 809 15256 10 85558 85558 0.0 1 58.9
+wo11-gr12-cr200-tr100-co1-ng9-se9 809 15286 10 60564 60564 0.0 1 22.2
+wo11-gr14-cr100-tr100-co1-ng9-se0 3209 115410 10 177600.544 180447 1.6 8 timeout
+wo11-gr14-cr100-tr100-co1-ng9-se1 3209 115402 10 174675 174675 0.0 57 7192.0
+wo11-gr14-cr100-tr100-co1-ng9-se10 3209 115360 10 120677 120677 0.0 1 1157.4
+wo11-gr14-cr100-tr100-co1-ng9-se11 3209 115490 10 135273.259 149916 10.8 15 timeout
+wo11-gr14-cr100-tr100-co1-ng9-se2 3209 115226 10 164497 164497 0.0 7 2448.8
+wo11-gr14-cr100-tr100-co1-ng9-se3 3209 115472 10 119833 119833 0.0 5 783.2
+wo11-gr14-cr100-tr100-co1-ng9-se4 3209 115406 10 154996 154996 0.0 40 5438.1
+wo11-gr14-cr100-tr100-co1-ng9-se6 3209 115502 10 199822.826 226210 13.2 1 timeout
+wo11-gr14-cr100-tr100-co1-ng9-se7 3209 115474 10 155281.071 164482 5.9 12 timeout
+wo11-gr14-cr100-tr100-co1-ng9-se8 3209 115314 10 193244.392 220488 14.1 4 timeout
+wo11-gr14-cr100-tr100-co1-ng9-se9 3209 115454 10 131828 131828 0.0 159 6598.8
+wo11-gr14-cr200-tr100-co1-ng9-se0 3209 233042 10 70989.9619 92694 30.6 1 timeout
+wo11-gr14-cr200-tr100-co1-ng9-se1 3209 233034 10 70716.067 84381 19.3 4 timeout
+wo11-gr14-cr200-tr100-co1-ng9-se10 3209 232992 10 57238 57238 0.0 3 3218.2
+wo11-gr14-cr200-tr100-co1-ng9-se11 3209 233122 10 57328.5316 70656 23.2 18 timeout
+wo11-gr14-cr200-tr100-co1-ng9-se2 3209 232858 10 68289.1477 83781 22.7 3 timeout
+wo11-gr14-cr200-tr100-co1-ng9-se3 3209 233104 10 57930 57930 0.0 44 6594.0
+wo11-gr14-cr200-tr100-co1-ng9-se4 3209 233038 10 62713.711 70119 11.8 2 timeout
+wo11-gr14-cr200-tr100-co1-ng9-se6 3209 233134 10 68383.9457 97751 42.9 3 timeout
+wo11-gr14-cr200-tr100-co1-ng9-se7 3209 233106 10 63295.1484 79612 25.8 3 timeout
+wo11-gr14-cr200-tr100-co1-ng9-se8 3209 232946 10 75308.8156 104596 38.9 5 timeout
+wo11-gr14-cr200-tr100-co1-ng9-se9 3209 233086 10 58792.2437 59826 1.8 20 timeout
+wo12-gr12-cr100-tr100-co1-ng9-se0 809 9452 10 133994 133994 0.0 1 6.2
+wo12-gr12-cr100-tr100-co1-ng9-se1 809 9446 10 164198 164198 0.0 1 7.1
+wo12-gr12-cr100-tr100-co1-ng9-se10 809 9360 10 167223 167223 0.0 1 14.7
+wo12-gr12-cr100-tr100-co1-ng9-se11 809 9852 10 199679 199679 0.0 1 17.9
+wo12-gr12-cr100-tr100-co1-ng9-se2 809 9806 10 214773 214773 0.0 9 49.1
+wo12-gr12-cr100-tr100-co1-ng9-se3 809 10108 10 150717 150717 0.0 1 12.6
+wo12-gr12-cr100-tr100-co1-ng9-se4 809 9664 10 205763 205763 0.0 1 16.9
+wo12-gr12-cr100-tr100-co1-ng9-se5 809 9664 10 143153 143153 0.0 1 8.4
+cont. next page
+
+===== PAGE 33 =====
+
+Instance |V| | A| |T| Dual Bound Primal Bound Gap% Nodes Time
+wo12-gr12-cr100-tr100-co1-ng9-se6 809 9896 10 165930 165930 0.0 1 11.0
+wo12-gr12-cr100-tr100-co1-ng9-se7 809 9702 10 136232 136232 0.0 1 5.7
+wo12-gr12-cr100-tr100-co1-ng9-se8 809 9248 10 135087 135087 0.0 1 6.2
+wo12-gr12-cr100-tr100-co1-ng9-se9 809 9616 10 102119 102119 0.0 1 5.5
+wo12-gr12-cr200-tr100-co1-ng9-se0 809 27684 10 57338 57338 0.0 1 34.0
+wo12-gr12-cr200-tr100-co1-ng9-se1 809 27556 10 66415 66415 0.0 1 50.8
+wo12-gr12-cr200-tr100-co1-ng9-se10 809 27262 10 64497 64497 0.0 1 57.6
+wo12-gr12-cr200-tr100-co1-ng9-se11 809 29038 10 76550 76550 0.0 119 507.2
+wo12-gr12-cr200-tr100-co1-ng9-se2 809 29054 10 78127 78127 0.0 9 230.0
+wo12-gr12-cr200-tr100-co1-ng9-se3 809 29786 10 63654 63654 0.0 12 196.6
+wo12-gr12-cr200-tr100-co1-ng9-se4 809 28566 10 76612 76612 0.0 10 271.4
+wo12-gr12-cr200-tr100-co1-ng9-se5 809 28406 10 60033 60033 0.0 1 50.6
+wo12-gr12-cr200-tr100-co1-ng9-se6 809 29304 10 65941 65941 0.0 3 138.9
+wo12-gr12-cr200-tr100-co1-ng9-se7 809 28562 10 62360 62360 0.0 1 41.1
+wo12-gr12-cr200-tr100-co1-ng9-se8 809 26858 10 57193 57193 0.0 1 39.4
+wo12-gr12-cr200-tr100-co1-ng9-se9 809 28346 10 46408 46408 0.0 1 36.2
+wo12-gr14-cr100-tr100-co1-ng9-se0 3209 153366 10 118617 118617 0.0 3 1289.2
+wo12-gr14-cr100-tr100-co1-ng9-se1 3209 153292 10 144459 144459 0.0 23 5352.3
+wo12-gr14-cr100-tr100-co1-ng9-se10 3209 153576 10 145758.212 159158 9.2 5 timeout
+wo12-gr14-cr100-tr100-co1-ng9-se11 3209 156848 10 171297.926 192677 12.5 4 timeout
+wo12-gr14-cr100-tr100-co1-ng9-se2 3209 155354 10 180864.934 203426 12.5 2 timeout
+wo12-gr14-cr100-tr100-co1-ng9-se3 3209 156048 10 141258.147 151504 7.3 24 timeout
+wo12-gr14-cr100-tr100-co1-ng9-se4 3209 156708 10 192132.22 217257 13.1 7 timeout
+wo12-gr14-cr100-tr100-co1-ng9-se5 3209 156578 10 131631 131631 0.0 9 3954.2
+wo12-gr14-cr100-tr100-co1-ng9-se6 3209 157214 10 140067.869 155904 11.3 15 timeout
+wo12-gr14-cr100-tr100-co1-ng9-se7 3209 158984 10 122306 122306 0.0 29 4856.5
+wo12-gr14-cr100-tr100-co1-ng9-se8 3209 157912 10 116077 116077 0.0 112 5648.4
+wo12-gr14-cr100-tr100-co1-ng9-se9 3209 156658 10 100813 100813 0.0 3 1111.7
+wo12-gr14-cr200-tr100-co1-ng9-se0 3209 445774 10 42440.6115 58730 38.4 1 timeout
+wo12-gr14-cr200-tr100-co1-ng9-se1 3209 443480 10 49840.8121 72093 44.6 3 timeout
+wo12-gr14-cr200-tr100-co1-ng9-se10 3209 446040 10 49834.3597 70925 42.3 1 timeout
+wo12-gr14-cr200-tr100-co1-ng9-se11 3209 457496 10 51649.5321 83436 61.5 1 timeout
+wo12-gr14-cr200-tr100-co1-ng9-se2 3209 458112 10 58244.4599 93854 61.1 1 timeout
+wo12-gr14-cr200-tr100-co1-ng9-se3 3209 458252 10 51819.4421 71296 37.6 1 timeout
+wo12-gr14-cr200-tr100-co1-ng9-se4 3209 460250 10 60094.7422 98234 63.5 1 timeout
+wo12-gr14-cr200-tr100-co1-ng9-se5 3209 456998 10 47440.8914 61486 29.6 1 timeout
+wo12-gr14-cr200-tr100-co1-ng9-se6 3209 460500 10 55662.0013 70135 26.0 1 timeout
+wo12-gr14-cr200-tr100-co1-ng9-se7 3209 464090 10 54277.2638 63483 17.0 4 timeout
+wo12-gr14-cr200-tr100-co1-ng9-se8 3209 454060 10 45660.3787 54889 20.2 1 timeout
+wo12-gr14-cr200-tr100-co1-ng9-se9 3209 454748 10 46933.2188 49405 5.3 8 timeout
+Table 29. Detailed computational results for test set medium.
+Instance |V| | A| |T| Dual Bound Primal Bound Gap% Nodes Time
+wo10-gr16-cr100-tr100-co1-ng9-se0 12509 2843882 10 33640.2857 192852 473.3 1 timeout
+wo10-gr16-cr100-tr100-co1-ng9-se1 12509 2844072 10 33457 158854 374.8 1 timeout
+wo10-gr16-cr100-tr100-co1-ng9-se10 12509 2844058 10 37793 129315 242.2 1 timeout
+wo10-gr16-cr100-tr100-co1-ng9-se11 12509 2843788 10 33640.2857 135954 304.1 1 timeout
+wo10-gr16-cr100-tr100-co1-ng9-se2 12509 2843030 10 33457 154220 360.9 1 timeout
+wo10-gr16-cr100-tr100-co1-ng9-se3 12509 2844172 10 33239 151102 354.6 1 timeout
+wo10-gr16-cr100-tr100-co1-ng9-se4 12509 2843556 10 33239 144284 334.1 1 timeout
+wo10-gr16-cr100-tr100-co1-ng9-se5 12509 2843196 10 34017 180250 429.9 1 timeout
+wo10-gr16-cr100-tr100-co1-ng9-se6 12509 2843894 10 33776 211938 527.5 1 timeout
+wo10-gr16-cr100-tr100-co1-ng9-se7 12509 2844228 10 33640.2857 96221 186.0 1 timeout
+wo10-gr16-cr100-tr100-co1-ng9-se8 12509 2843726 10 33640.2857 185655 451.9 1 timeout
+wo10-gr16-cr100-tr100-co1-ng9-se9 12509 2843918 10 34017 123697 263.6 1 timeout
+wo10-gr16-cr200-tr100-co1-ng9-se0 12509 8741560 10 – – – 0 memout
+wo10-gr16-cr200-tr100-co1-ng9-se3 12509 8741850 10 – – – 0 memout
+wo11-gr16-cr100-tr100-co1-ng9-se0 12509 1634066 10 59689 209296 250.6 1 timeout
+wo11-gr16-cr100-tr100-co1-ng9-se1 12509 1634404 10 55782.8269 192745 245.5 1 timeout
+wo11-gr16-cr100-tr100-co1-ng9-se10 12509 1633968 10 57121 126455 121.4 1 timeout
+cont. next page
+
+===== PAGE 34 =====
+
+Instance |V| | A| |T| Dual Bound Primal Bound Gap% Nodes Time
+wo11-gr16-cr100-tr100-co1-ng9-se11 12509 1634242 10 61570.6923 147469 139.5 1 timeout
+wo11-gr16-cr100-tr100-co1-ng9-se2 12509 1633668 10 50257.875 173140 244.5 1 timeout
+wo11-gr16-cr100-tr100-co1-ng9-se3 12509 1634426 10 54297 124827 129.9 1 timeout
+wo11-gr16-cr100-tr100-co1-ng9-se4 12509 1634084 10 58027.875 166049 186.2 1 timeout
+wo11-gr16-cr100-tr100-co1-ng9-se6 12509 1634468 10 55217 233350 322.6 1 timeout
+wo11-gr16-cr100-tr100-co1-ng9-se7 12509 1634056 10 64187.63 171856 167.7 1 timeout
+wo11-gr16-cr100-tr100-co1-ng9-se8 12509 1633956 10 55800 213005 281.7 1 timeout
+wo11-gr16-cr100-tr100-co1-ng9-se9 12509 1634496 10 60901.4667 161552 165.3 1 timeout
+wo11-gr16-cr200-tr100-co1-ng9-se0 12509 3416556 10 – – – 0 memout
+wo11-gr16-cr200-tr100-co1-ng9-se1 12509 3416894 10 – – – 0 memout
+wo11-gr16-cr200-tr100-co1-ng9-se10 12509 3416458 10 – – – 0 memout
+wo11-gr16-cr200-tr100-co1-ng9-se11 12509 3416732 10 – – – 0 memout
+wo11-gr16-cr200-tr100-co1-ng9-se2 12509 3416158 10 – – – 0 memout
+wo11-gr16-cr200-tr100-co1-ng9-se3 12509 3416916 10 – – – 0 memout
+wo11-gr16-cr200-tr100-co1-ng9-se4 12509 3416574 10 – – – 0 memout
+wo11-gr16-cr200-tr100-co1-ng9-se6 12509 3416958 10 – – – 0 memout
+wo11-gr16-cr200-tr100-co1-ng9-se7 12509 3416546 10 – – – 0 memout
+wo11-gr16-cr200-tr100-co1-ng9-se8 12509 3416446 10 – – – 0 memout
+wo11-gr16-cr200-tr100-co1-ng9-se9 12509 3416986 10 – – – 0 memout
+wo12-gr16-cr100-tr100-co1-ng9-se0 12509 2136646 10 31010.0476 121479 291.7 1 timeout
+wo12-gr16-cr100-tr100-co1-ng9-se1 12509 2135122 10 43089 159686 270.6 1 timeout
+wo12-gr16-cr100-tr100-co1-ng9-se10 12509 2127722 10 39434 172234 336.8 1 timeout
+wo12-gr16-cr100-tr100-co1-ng9-se11 12509 2144658 10 38067 205534 439.9 1 timeout
+wo12-gr16-cr100-tr100-co1-ng9-se2 12509 2172502 10 49282 203324 312.6 1 timeout
+wo12-gr16-cr100-tr100-co1-ng9-se3 12509 2173508 10 39487 159309 303.4 1 timeout
+wo12-gr16-cr100-tr100-co1-ng9-se4 12509 2150240 10 45246 220038 386.3 1 timeout
+wo12-gr16-cr100-tr100-co1-ng9-se5 12509 2179938 10 50209.2 141357 181.5 1 timeout
+wo12-gr16-cr100-tr100-co1-ng9-se6 12509 2172030 10 43286 148691 243.5 1 timeout
+wo12-gr16-cr100-tr100-co1-ng9-se7 12509 2223746 10 38727 136661 252.9 1 timeout
+wo12-gr16-cr100-tr100-co1-ng9-se8 12509 2120556 10 38468 125312 225.8 1 timeout
+wo12-gr16-cr100-tr100-co1-ng9-se9 12509 2192306 10 32125 103804 223.1 1 timeout
+wo12-gr16-cr200-tr100-co1-ng9-se0 12509 6385826 10 – – – 0 memout
+wo12-gr16-cr200-tr100-co1-ng9-se1 12509 6363958 10 – – – 0 memout
+wo12-gr16-cr200-tr100-co1-ng9-se10 12509 6383646 10 – – – 0 memout
+wo12-gr16-cr200-tr100-co1-ng9-se11 12509 6404172 10 – – – 0 memout
+wo12-gr16-cr200-tr100-co1-ng9-se2 12509 6560440 10 – – – 0 memout
+wo12-gr16-cr200-tr100-co1-ng9-se3 12509 6557828 10 – – – 0 memout
+wo12-gr16-cr200-tr100-co1-ng9-se4 12509 6420904 10 – – – 0 memout
+wo12-gr16-cr200-tr100-co1-ng9-se5 12509 6503434 10 – – – 0 memout
+wo12-gr16-cr200-tr100-co1-ng9-se6 12509 6524274 10 – – – 0 memout
+wo12-gr16-cr200-tr100-co1-ng9-se7 12509 6766046 10 – – – 0 memout
+wo12-gr16-cr200-tr100-co1-ng9-se8 12509 6207724 10 – – – 0 memout
+wo12-gr16-cr200-tr100-co1-ng9-se9 12509 6571406 10 – – – 0 memout

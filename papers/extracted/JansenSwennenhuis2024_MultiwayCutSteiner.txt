@@ -1,0 +1,1199 @@
+﻿SOURCE: JansenSwennenhuis2024_MultiwayCutSteiner.pdf
+PAGES: 23
+EXTRACTOR: pypdf 6.10.0 (Unicode text), pdfplumber fallback
+
+
+===== PAGE 1 =====
+
+Steiner Tree Parameterized by Multiway Cut and
+Even Less
+Bart M.P. Jansen /envel⌢pe
+Eindhoven University of Technology, The Netherlands
+Céline M.F. Swennenhuis /envel⌢pe
+Eindhoven University of Technology, The Netherlands
+Abstract
+In theSteiner Tree problem we are given an undirected edge-weighted graph as input, along with a
+setK of vertices calledterminals. The task is to output a minimum-weight connected subgraph that
+spans all the terminals. The famous Dreyfus-Wagner algorithm running in3|K|poly(n) time shows
+that the problem is fixed-parameter tractable parameterized by the number of terminals. We present
+fixed-parameter tractable algorithms forSteiner Tree using structurally smaller parameterizations.
+Our first result concerns the parameterization by a multiway cutS of the terminals, which is a
+vertex setS (possibly containing terminals) such that each connected component ofG−S contains
+at most one terminal. We show thatSteiner Tree can be solved in2O(|S|log |S|)poly(n) time and
+polynomial space, whereS is a minimum multiway cut forK. The algorithm is based on the insight
+that, after guessing how an optimal Steiner tree interacts with a multiway cutS, computing a
+minimum-cost solution of this type can be formulated as minimum-cost bipartite matching.
+Our second result concerns a new hybrid parameterization calledK-free treewidth that simul-
+taneously refines the number of terminals|K|and the treewidth of the input graph. By utilizing
+recent work onH-Treewidth in order to find a corresponding decomposition of the graph, we
+give an algorithm that solvesSteiner Tree in time 2O(k)poly(n), wherek denotes theK-free
+treewidth of the input graph. To obtain this running time, we show how therank-basedapproach for
+solving Steiner Tree parameterized by treewidth can be extended to work in the setting ofK-free
+treewidth, by exploiting existing algorithms parameterized by|K|to compute the table entries of
+leaf bags of a treeK-free decomposition.
+2012 ACM Subject ClassificationTheory of computation→Graph algorithms analysis; Theory of
+computation→Fixed parameter tractability
+Keywords and phrasesfixed-parameter tractability, Steiner Tree, structural parameterization, H-
+treewidth
+Funding This project has received funding from the European Research Council (ERC) under the
+European Union’s Horizon 2020 research and innovation programme (grant agreement No 803421,
+ReduceSearch).
+arXiv:2406.19819v1  [cs.DS]  28 Jun 2024
+
+===== PAGE 2 =====
+
+2 Steiner Tree Parameterized by Multiway Cut and Even Less
+1 Introduction
+Steiner Tree is a famous problem in algorithmic graph theory [10, 23, 27]. In this problem,
+we are given an undirected edge-weighted graphG and a setK of terminal verticesthat we
+need to connect using edges of the graph. The goal is to find a minimum-weight connected
+subgraph that spans all these terminals, commonly known as a Steiner tree. The problem has
+a wide array of applications in industry, such as telecommunications, designing integrated
+circuits, molecular biology, and object detection (e.g., [16, 22, 23, 28, 29]).
+Since the Steiner Tree problem is NP-hard, we cannot hope to design an exact
+polynomial-time algorithm for this problem [20]. However, a popular approach is to bound
+the running time not just in terms of the input sizen, but to also take the influence of a
+secondary measurementk (referred to as theparameter) into account. In particular, we
+are interested in parameters that allow for fixed-parameter tractable (FPT) algorithms, i.e.,
+algorithms that run in timef(k)·poly(n) where n is the size of the input,k the parameter,
+and f(·) some computable function. One of the most natural parameters to consider for
+Steiner Tree is|K|, the number of terminals. The famous algorithm by Dreyfus and
+Wagner [11] computes a minimum Steiner tree of ann-vertex graph in time3|K|·poly(n)
+using exponential space, which was later improved by several authors [14, 24]. In particular,
+Fomin, Kaski, Lokshtanov, Panolan, and Saurabh [13] present an algorithm that runs in
+single-exponential time 7.97|K|·poly(n) and usespolynomial space. Another commonly-used
+parameter for Steiner Tree is thetreewidth tw(G) of the input graphG, which measures
+its structural similarity to a tree. A straight-forward dynamic program solves the problem in
+time 2O(tw(G) log tw(G))poly(n). Using representative sets, a single-exponential running time
+of 2O(tw(G))poly(n) can be obtained (cf. [9]).
+For many other combinatorial problems on graphs, including graph modification problems
+such as Vertex Cover and Odd Cycle Transversal , a lot of effort has been invested
+into developing FPT algorithms using structurallysmaller parameterizations than standard
+measures of solution size or treewidth [1, 2, 12, 15, 18]. But to the best of our knowledge,
+no previous papers present FPT algorithms forSteiner Tree using parameterizations
+structurally smaller than the number of terminals. As our main contributions, we identify
+two relevant terminal-aware refined parameterizations for Steiner Tree and develop
+corresponding FPT algorithms.
+Multiway cut The first parameter we consider is the size of a (node) multiway cut for the
+terminals, i.e., a set of verticesS⊆V (G) such that every connected component ofG−S
+contains at most one terminal. SinceS is allowed to contain terminals, any instance has
+a multiway cut of size|K|−1. In general, the size of a minimum multiway cut can be
+arbitrarily much smaller than|K|. We show that we can solveSteiner Tree in FPT time
+and polynomial space when we parameterize it by the size of a multiway cut for the terminals.
+▶ Theorem 1.1. There is a polynomial-space algorithm that, given as input a graphG with
+weight function cost: E(G)→N, a set of terminalsK⊆V (G), and a multiway cutS for K,
+outputs a minimum-weight Steiner tree in time2O(|S|log|S|)poly(n).
+Our algorithm handles graphs whose weights are encoded in binary, as opposed to some
+other algorithms in the literature ([24, 25]) whose running time scales linearly with the value
+of the largest weight. The assumption that a multiway cutS for K is given as input is
+not restrictive, as a minimum multiwayS cut forK can be found in4|S|poly(n) time and
+
+===== PAGE 3 =====
+
+B.M.P. Jansen and C.M.F. Swennenhuis 3
+polynomial space1, due to an algorithm by Chen, Liu, and Lu [7]. Theorem 1.1 improves upon
+an elementaryexponential-spacealgorithm with the same running time that was presented
+in a master’s thesis supervised by the first author [30].
+K-free treewidth The second parameterization we utilize refines the size of a multiway
+cut. To motivate the parameter, consider the following one-player game on a graphG with
+terminal verticesK. In each round, one vertex is removed from each connected component.
+The game ends when each connected component contains at most one terminal. If there is a
+multiway cutS ={s1,...,sk}of sizek, then the game can be won in at mostk rounds by
+choosing vertexsi in roundi (or earlier, if not all remaining vertices ofS belong to the same
+connected component). The minimum number of rounds needed is therefore never larger
+than the size of a minimum multiway cut. It can be arbitrarily much smaller: if deletions
+early in the game split the graph into multiple components, these are handled ‘in parallel’ in
+subsequent rounds of the game.
+For technical reasons, it will be convenient to consider the variation of the game that only
+ends whenall terminals have been removed from the graph, rather than ending when all
+terminals are separated. The number of rounds needed to win the latter variation is at most
+one more than the original: all terminals belong to different components when the original
+game ends, so at that point one additional round can delete one vertex from each connected
+component to eliminate all the terminals. LetedK(G,K ) (the elimination distance to a
+K-free graph) denote the minimum number of rounds needed to eliminate all terminals from
+the graph. The previous discussion shows that ifS is a multiway cut forK in G, then we
+have edK(G,K )≤|S|+ 1≤|K|; hence it is a refined parameterization forSteiner Tree.
+The exponential dependence of our second algorithm can be bounded in terms ofedK(G,K ).
+But there is an even smaller parameterization, calledK-free treewidth, that can be used
+to upper-bound the running time of the second algorithm we present. To introduce it, we
+briefly summarize an analogous range of parameterizations for vertex-deletion problems.
+Our refined parameterizations forSteiner Tree are inspired by recent work on parame-
+terized algorithms forH-Deletion, which asks to find a minimum vertex setX in an input
+graph G that ensuresG−X belongs to graph classH. The Odd Cycle Transversal
+problem is a prime example, which arises by lettingH be the classbip of bipartite graphs.
+Recent work onH-Deletion [1, 2, 12, 18, 19] has focused on improving parameterizations by
+the size of the deletion setX to parameterizations in terms of theelimination distanceedH(G)
+toH, which is the minimum number of rounds needed to obtain a graph inH when removing
+one vertex from each connected component in each round. One of the results from this
+direction of work shows thatOdd Cycle Transversal can be solved in time2O(k)poly(n),
+wherek = edbip(G) [19]. Through work of Bulian and Dawar [5], it is known that the concept
+of elimination distance is related to thetreedepth [26] of a graphG: the treedepth is the
+minimum number of rounds needed to eliminateall vertices.
+The famous graph parametertreewidth is never larger than treedepth, but can be much
+smaller. Eiben et al. [12] proposed the notion ofH-treewidth, whereH is a class of graphs.
+Roughly speaking, theH-treewidth twH(G) of a graphG can be defined in terms of the
+minimum cost of a tree decomposition of a certain kind, in which (potentially large) leaf bags
+that induce a subgraph belonging toH do not contribute to the cost. HenceH-treewidth
+captures how efficiently a graph can be decomposed into subgraphs belonging toH along
+1 The algorithm from Chen, Liu, and Lu [7] is a bounded-depth branching algorithm, branching on
+important separators, making it a polynomial-space algorithm.
+
+===== PAGE 4 =====
+
+4 Steiner Tree Parameterized by Multiway Cut and Even Less
+S
+s1 s2 s3 s4 s5 s6 s7
+k1 k2 k3 k4 k5 k6
+Figure 1The multiway cutS ={s1,s 2,s 3,s 4,s 5,s 6,s 7}ensures that no two terminals (squares)
+belong to the same connected component ofG−S. The gray areas indicate the setS and the
+components ofG−S. The lines are a visual representation of a Steiner treeF for the terminals,
+split atS, such thatF is partitioned into three trees of category 1 (solid trees, note the solid tree
+betweens5 ands6), one tree of category 2 (dotted trees) and five paths of category 3 (dashed paths).
+small separators in a treelike manner. It is known [18, Lemma 2.4] thattwH(G)≤edH(G)
+for all graphsG, so that the resulting parameterization refines theH-elimination distance. At
+the same time,twH(G) is not larger than the standard treewidth ofG, so that the resulting
+parameterization is a hybrid [2] of standard treewidth and the solution size forH-deletion.
+In their work onH-treewidth, Jansen, de Kroon and Włordarczyk [18] suggested that it
+may be interesting to explore variations of this parameter in the context of a set of terminal
+vertices. This is the route we pursue forSteiner Tree.
+We complete the analogy between hybrid parameterizations forH-Deletion and our
+parameterizations for Steiner Tree by introducing a notion calledK-free treewidth, de-
+noted twK(G,K ) for a graphG with terminal setK. While we defer formal definitions to Sec-
+tion 3, it intuitively captures how efficiently the input graph can be decomposed into terminal-
+free subgraphs along small separators in a tree-like manner. Using the correspondence between
+treewidth and treedepth, it follows thattwK(G,K )≤edK(G,K )≤|S|+ 1≤|K|where S is
+a minimum multiway cut. Our second main result shows that the resulting parameterization
+admits an algorithm whose running time and space usage are single-exponential.
+▶ Theorem 1.2. There is an algorithm that takes as input a graphG with weight func-
+tion cost: E(G)→N, and a setK⊆V (G) of terminals, that computes a minimum-weight
+Steiner tree in2O(twK (G,K))poly(n) time and space.
+Theorem 1.2 shows that optimal solutions toSteiner Tree can still be found efficiently in
+inputs that can be decomposed into terminal-free (but potentially dense and large) subgraphs
+along small separators. The single-exponential dependence ontwK(G,K ) in the running time
+of our algorithm is optimal under theExponential Time Hypothesis[17], and matches the
+single-exponential running times of the current-best algorithms parameterized by the number
+of terminals|K|[13, 25] or treewidth [4]. Hence Theorem 1.2 shows that the generality of
+the refined parametertwK does not incur a significant computational overhead.
+Techniques Both of our algorithms utilize a subroutine to solveSteiner Tree for a small
+set of terminal vertices. The manner in which these subroutine results are employed differs
+greatly between the two, however.
+We first sketch the main idea behind Theorem 1.1, which aims to find a minimum Steiner
+tree by utilizing a known multiway cutS. We can partition the edges of any minimum
+
+===== PAGE 5 =====
+
+B.M.P. Jansen and C.M.F. Swennenhuis 5
+Steiner treeF by splittingF at the vertices of the multiway cutS (see Figure 1), such that
+any treeF′in the resulting partition intersects with at most one component ofG−S and
+falls into one of the following categories:
+1. F′is a minimum-weight Steiner tree for a subset ofS,
+2. F′is a minimum-weight Steiner tree for a subset ofS and exactly onek∈K, or
+3. F′is a minimum-weight path from a terminalk∈K to some vertex ofS.
+There can never be two or more vertices fromK\S in a single treeF′, as these terminals
+live in different components ofG−S. Note that the paths of category 3 can be found quickly
+by computing a shortest path. Moreover, we prove that the Steiner trees of categories 1
+and 2 are Steiner trees for a vertex set of size at most|S|+ 1, hence we can compute the
+minimum weights of such Steiner trees in polynomial space with the algorithm by Fomin,
+Kaski, Lokshtanov, Panolan, and Saurabh [13].
+We introduce the notion ofS-connecting systemto characterize how a Steiner treeF
+interacts with the setS. Intuitively, anS-connecting system records which types of treesF′(in
+terms of the classification above) arise when splittingF atS, and which vertices fromS∪K are
+connected by these trees. The algorithm will iterate over all2O(|S|log|S|) distinctS-connecting
+systems. For each such system, we can compute an edge-weighted bipartite graphB such
+that an optimal Steiner tree consistent with theS-connecting system corresponds to a
+minimum-weight maximum matching inB. The edges ofB correspond to the weights of
+optimal Steiner trees corresponding to either category 1 or 2. By exploiting the fact that
+each treeF′obtained by splitting an optimal treeF at S involves only few terminals, each
+bipartite graphB can be computed in single-exponential time.
+For Theorem 1.2, the algorithm builds upon the2O(tw(G))poly(n) time algorithm from
+Bodlaender, Cygan, Kratsch, and Nederlof [4]. Recall that any nodex of a rooted tree
+decomposition can be associated with a subgraphGx, which contains all subgraphs of its
+children. Note that its bag χ(x)⊆V (G) is the boundary of Gx, i.e., the only vertices
+of Gx that can have neighbors outsideGx belong toχ(x). The algorithm goes over the tree
+decomposition, keeping track of possiblepartial solutions, which are Steiner trees restricted to
+the subgraphGx. Instead of storing actual partial solutions, the algorithm stores how these
+partial solution are connected to the boundary in the form of partitions. In principle, this
+could lead totw(G)O(tw(G)) different partitions that would need to be stored as any bagχ(x)
+is of size at mosttw(G) + 1by definition. However, using the rank-based approach [4], one
+only needs to keep arepresentative setof partitions of size at most2tw(G); we sketch the
+main ideas in the following paragraph.
+To obtain an algorithm parameterized bytwK(G,K ), for the parts of the decomposition
+corresponding to small separators we can use the same techniques as employed for standard
+treewidth. For the parts of the decomposition that are large, the decomposition ensures us
+that terminals can only lie on the boundary. Hence, there are onlytwK(G,K ) + 1terminals
+in Gx for such nodesx and we can use the Dreyfus-Wagner algorithm [11] to obtain a
+fixed-parameter tractable algorithm to compute partial solutions ofGx. Since there might
+be twK(G,K )O(twK (G,K)) partial solutions, this does not directly yield a single-exponential
+running time. To obtain Theorem 1.2, we apply the rank-based approach for these nodes, by
+iteratively increasing the set of vertices of the boundary that are used by considered partial
+solutions. As far as we know, our algorithm is the first to incorporate advanced dynamic-
+programming ideas such as the rank-based approach with hybrid graph decompositions. To
+obtain a decomposition to which we can apply this scheme, we show that a recent FPT
+5-approximation to computeH-treewidth [19] can be leveraged forK-free treewidth.
+
+===== PAGE 6 =====
+
+6 Steiner Tree Parameterized by Multiway Cut and Even Less
+Organization We give the polynomial-space algorithm of Theorem 1.1 in Section 2. In
+Section 3 we formally defineK-free treewidth and give an FPT 5-approximation. In Section 4
+we prove Theorem 1.2, i.e., we give a single-exponential algorithm forSteiner Tree when
+parameterized byK-free treewidth. We conclude in Section 5.
+We use standard terminology for graphs and parameterized algorithms. Terms not defined
+here can be found in a textbook [8]. We write[m] for{1,...,m}and definemin{∅}=∞.
+2 Polynomial-space algorithm parameterized by multiway cut
+In this section, we will considerSteiner Tree parameterized by the size of a given multiway
+cut S for the terminal setK. In other words, each connected component ofG−S contains
+at most one terminal. Note thatS can contain terminals.
+2.1 S-connecting systems
+The following concept is the main focus of this section.
+▶Definition 2.1(S-connecting system). Consider a graphG andS⊆V (G). AnS-connecting
+system in G is a tuple(S,T ), whereS ={S1,S 2,...,Sm}is a collection of subsets ofS and
+T is a tree, such that:
+1. V (T ) =S∪{u1,...,um}, form =|S|;
+2. for alli∈[m] we haveSi =NT (ui)⊆S and dT (ui)> 1; and
+3. for all distincts,s′∈S it holds that if{s,s′}∈E(T ), then{s,s′}∈E(G).
+We will use the following notion of self-reachable to describe that vertices are part of a
+common connected component.
+▶ Definition 2.2 (Self-reachable). Consider a graphG and S⊆V (G). The setS is self-
+reachable in G if S is contained in a single connected component ofG, i.e., when there is a
+path inG between any pair of verticess,s′∈S.
+Intuitively, ifS is a multiway cut for terminal setK in graphG, andF is a Steiner
+tree forK, then there is anS-connecting systemS that represents the interaction between
+the Steiner treeF and the multiway cutS. The treeT of thisS-connecting system can
+be obtained fromF by contracting each tree ofF−S into a single vertex, while removing
+the degree-1 vertices of the resulting tree that do not belong toS. Definition 2.1 ensures
+the corresponding setS is uniquely determined byT . We say that the treeF realizes the
+resulting S-connecting system (S,T ).
+The following lemma follows from the definitions by a simple induction. It shows
+that when H is a subgraph ofG in which each setSi of an S-connecting system (S =
+{S1,...,Sm},T ) is self-reachable, then the connectivity structure of the treeT ensures that
+the entire setS is self-reachable.
+▶ Lemma 2.3. Let (S,T ) be anS-connecting system and letH⊆G be a subgraph ofG
+such that for alli∈[m], the set Si is self-reachable inH. Then S is self-reachable in
+H′=H∪T[S].
+Proof. We prove that any pair{s,s′}of vertices fromS is self-reachable inH, by induction
+on the distance froms to s′inT . Note that the base case is evidently true, as for distance0
+we haves =s′. Consider an arbitrary pair{s,s′}and letℓbe the distance between them
+inT ; the induction hypothesis is that any pair fromS whose distance inT is less thanℓ, is
+self-reachable inH′.
+
+===== PAGE 7 =====
+
+B.M.P. Jansen and C.M.F. Swennenhuis 7
+Let s = x0,x 1,...,xℓ= s′be a path inT from s to s′. If xℓ−1 ∈S, we find that
+by induction that{s,xℓ−1}is self-reachable in H′. Moreover, {xℓ−1,s′} ∈E(T [S]) so
+{s′′,s′}∈E(H′) and we find that{xℓ−1,s′}is self-reachable inH′. Hence,{s,s′}is self-
+reachable inH′.
+If xℓ−1̸∈S, then by definition ofS-connecting system, we see thatxℓ−2∈S as xℓ−1 can
+then only contain vertices fromS as its neighbors. Moreover, since we havexℓ−2,s′∈N(xℓ−1)
+we find thatxℓ−2,s′∈Si for somei∈[m]. By assumption,Si is self-reachable inH′, so
+in particular{xℓ−2,s′}is self-reachable inH′. Again by induction we find that{s,xℓ−2}is
+self-reachable inH′. Hence,{s,s′}is self-reachable inH′. ◀
+Next, we will prove that there are at most2O(|S|log|S|) differentS-connecting systems.
+For this, we first prove the following claim, bounding the size ofS.
+▶ Lemma 2.4. Let G be a graph andS⊆V (G). Any S-connecting system (S,T ) in G
+satisfies|S|≤|S|−1.
+Proof. Let (S,T ) be anS-connecting system. LetS ={S1,...,Sm}; we prove thatm≤
+|S|−1. Let V (T ) = S∪{u1,...,um}such thatNT (ui) = Si for alli∈[m]. RootT at
+an arbitrary vertex s∗∈S. Note that for anyi∈[m], ui is not a leaf ofT and has only
+neighbors inS by definition of theS-connecting system. Hence, everyui is a parent of at
+least ones∈S\{s∗}. Since everys∈S has at most one parent we findm≤|S|−1. ◀
+▶ Lemma 2.5. For any graphG and vertex setS⊆V (G), there are at most2O(|S|log|S|)
+differentS-connecting systems.
+Proof. Consider an arbitraryS-connecting system (S,T ) in G. Item 1 of Definition 2.1
+ensures that|V (T )|≤|S|+|S|, while Lemma 2.4 ensures|S|≤|S|−1. Hence|V (T )|≤
+2|S|−1. By Cayley’s formula, there arenn−2 different labeled trees onn vertices. Therefore,
+the number of different choices forT is bounded by∑2|S|−1
+i=1 ii−2≤(2|S|−1) (2|S|−1)2|S|−3,
+i.e., by2O(|S|log|S|). By Definition 2.1, the collectionS is uniquely determined byT . ◀
+2.2 The algorithm
+Before we present Theorem 1.1, we describe at a high level howS-connecting systems
+facilitate a reduction to bipartite matching. The starting observation is that, by trying all
+possible subsets of the multiway cutS, we may assume that the Steiner tree we are looking
+for contains all vertices ofS. The connectivity pattern of each Steiner tree with respect
+to S can then be summarized by anS-connecting system. To assemble a Steiner tree that
+realizes a givenS-connecting system, a naïve approach is the following: pick a shortest path
+from each terminal toS, and for each subsetSi of theS-connecting system, pick a subtree
+containingSi to makeSi self-reachable. This approach leads to some redundancy: we might
+be able to re-use some edges if the path used to connect a terminaltp to S, shares some
+edges with a subtree that makes a subsetSi self-reachable.
+Due toS being a multiway cut, a tree ofG−S that makes a subsetSi self-reachable can
+live in only one component ofG−S, and can therefore only involve at most one terminal.
+For each choice of terminaltp and subsetSi, we can use the polynomial-space FPT algorithm
+for Steiner Tree parameterized by|K| [13] to compute the cost of a tree making{tp}∪Si
+self-reachable, and compare it to the shortest-path distance betweentp and the closest vertex
+of S to see how much we would benefit from combining the task of makingtp reachable
+from S with the task of makingSi self-reachable. As each terminal can only be involved in
+making one setSi self-reachable, we now see a weighted bipartite matching problem appear:
+
+===== PAGE 8 =====
+
+8 Steiner Tree Parameterized by Multiway Cut and Even Less
+we are looking for a pairing of setsSi with terminalstp so that the overallsavings, compared
+to making each terminal individually reachable fromS by a shortest path and separately
+adding a subtree making eachSi self-reachable into the Steiner tree, are as large as possible.
+These ideas are formalized in the proof of the following theorem.
+▶ Theorem 1.1. There is a polynomial-space algorithm that, given as input a graphG with
+weight function cost: E(G)→N, a set of terminalsK⊆V (G), and a multiway cutS for K,
+outputs a minimum-weight Steiner tree in time2O(|S|log|S|)poly(n).
+Proof. Consider the multiway cutS. LetC1,...,Cq denote the vertex sets of the connected
+components ofG−S, so that eachCp contains at most one terminal. For a vertex setX,
+we denote byδ(X) the set of edges ofG that have exactly one endpoint insideX. Hence
+for p∈[q], each edge ofδ(Cp) has one endpoint inCp and one endpoint inS. We define
+kp :=Cp∩K for allp∈[q].
+In our algorithm, we will guess which verticesS′⊆S will be used by the Steiner
+tree. For each such guess forS′, we will consider all possibleS′-connecting systems (S,T ).
+For each such system, we create a weighted complete bipartite graphB with partition
+V (B) ={S}∪{P}where P ={(p,j ): p∈{1,...,q},j ∈{0,...,|S|}}. For eachp∈[q] we
+defineGp asG[Cp]∪δ(Cp), i.e., the graph induced onCp together with the edges betweenCp
+andS. The goal is to find a minimum weight maximum matching inB, which represents how
+each setSi∈Sis self-reachable. IfSi is matched with(p, 0), it indicates that the subtree
+making Si self-reachable is contained inGp, and thatkp is contained in this subtree. IfSi
+is matched with(p,j ) for j >0, it indicates that the subtree makingSi self-reachable is
+contained inGp (not necessarily using terminalkp if it exists). Note that the specific value
+of j does not carry any meaning, but we need to be able to useGp multiple (and at most
+|S|) times to make different sets inS self-reachable.
+To determine the weights ofB, we have to solve severalSteiner Tree problems in
+succession. Let MST[H,X ] denote an arbitrary minimum-cost Steiner tree for terminal set
+X in graphH and let MST[H,X ] =∅if no such Steiner tree exists. Moreover, forX⊆V (G)
+and k∈V (G) we refer toSP[X,k ] as an arbitrary shortest path fromk to some vertex of
+X and we setSP[X,k ] =∅is no such path exists. We extend this notation for the setskp
+defined above, which are either singletons or empty. Ifkp ={tp}is a singleton set containing
+a terminal, we letSP[X,kp] = SP[X,tp]. Ifkp =∅, then SP[X,kp] =∅.
+Some of the edges ofB can have infinite weight, indicating that a certain Steiner tree
+does not exist. We define a cost functionωfor the edges ofB as follows. For allSi∈Sand
+p∈[q] we set
+ω(Si, (p, 0)) =
+
+
+
+∞ if SP[S′,kp] =∅,
+cost(MST[Gp,Si∪{kp}])−cost(SP[S′,kp]) else ifCp∩K̸=∅,
+∞ otherwise,
+and for allSi∈S, p∈[q], andj∈[|S|] we set
+ω(Si, (p,j )) = cost(MST[Gp,Si]).
+Note that each of these values can be computed in polynomial space and2O(|S′|)poly(n)
+time using the algorithm by Fomin, Kaski, Lokshtanov, Panolan, and Saurabh [13]. Since
+the bipartite graphB is of polynomial size, we can constructB in polynomial space and
+2O(|S′|)poly(n) time. We claim that we can reconstruct a Steiner tree, based on a minimum
+weight maximum matching ofB, if its weight is finite.
+
+===== PAGE 9 =====
+
+B.M.P. Jansen and C.M.F. Swennenhuis 9
+▷ Claim 2.6. Consider S′⊆S such thatK∩S⊆S′, with anS′-connecting system (S,T ).
+Let M be a minimum weight maximum matching ofB of finite weight. Then a Steiner tree
+TM for terminalsK can be constructed inpoly(n) time with
+cost(TM)≤ω(M) + cost(T [S′]) +
+∑
+k∈K
+cost(SP[S′,k ]).
+Proof. We let
+TM =T [S′]∪{MST[Gp,Si∪{kp}]: (Si, (p, 0))∈M}
+∪{MST[Gp,Si]: (Si, (p,j ))∈M and j >0}
+∪{SP[S′,kp]: kp∈K\S and (kp, 0) not incident toM}.
+Clearly we have thatcost(TM)≤ω(M) + cost(T [S′]) +∑
+k∈K cost(SP[S′,k ]). Moreover,
+TM can easily be computed based onM in polynomial time. We now prove thatK∪S′is
+self-reachable inTM.
+First we prove that everySi∈Sis self-reachable inTM. SinceM is a maximum matching
+of finite weight andB is a complete bipartite graph with|S|<|P|, we find that all ofS is
+matched inM and each edge ofM has a finite weight. If(Si, (p, 0))∈M, then all ofSi∪{kp}
+is self-reachable inTM by MST[Gp,Si∪{kp}]. Else, we have(Si, (p,j ))∈M for somej >0,
+then all ofSi is self-reachable inTM by MST[Gp,Si]. We can then use Lemma 2.3 to infer
+that S′is self-reachable inTM.
+Now we prove that each terminalk∈K is reachable from some vertex inS′in TM. If
+k∈S′, then this is clearly true. Otherwise we havek = kp for somep∈{1,...,q}. If
+(Si, (p, 0))∈M for someSi∈S, thenkp is reachable fromS′through MST[Gp,Si∪{kp}].
+Else, we have thatSP[S′,kp] was added toTM, which is a path fromkp to some vertex ofS′.
+Hence, we can conclude thatK∪S′is self-reachable inTM.
+Since TM has a connected componentT′containingS′∪K and has total cost at most
+the claimed amount, while the weight of any edge is non-negative, any spanning tree forT′
+forms a Steiner tree forK whose cost is at most the claimed amount. Since we can compute
+a spanning tree in linear time, the claim follows. ◁
+We are now ready to present our algorithm. For allS′⊆S such thatS∩K⊆S′, for all
+S′-connecting systems (S,T ), construct the weighted complete bipartite graphB as above.
+Then compute a minimum weight maximum matchingM ofB. Using Claim 2.6 we construct
+a Steiner tree if the weight ofB is finite in polynomial time. Finally, the algorithm outputs
+the minimum-weight Steiner tree found during this process.
+The algorithm runs in2O(|S|log|S|)poly(n) time and polynomial space: we consider2|S|
+different setsS′, for each there are at most2O(|S′|log|S′|) differentS′-connecting systems by
+Lemma 2.5. Computing the weights ofB then takes 2O(|S′|)poly(n) time and polynomial
+space using the algorithm by Fomin, Kaski, Lokshtanov, Panolan, and Saurabh [13]. Finding
+a minimum-cost maximum matching ofB takes poly(n) time and space. Constructing a
+Steiner tree based onB takes only polynomial time and space. It remains to prove that the
+output of the algorithm is a minimum Steiner tree.
+▷ Claim 2.7. The algorithm outputs a minimum-weight Steiner tree.
+Proof. Given a minimum-weight Steiner treeF, we prove that the algorithm finds a Steiner
+tree of weight at mostcost(F). We construct anS′-connecting system based on the choices
+made byF, and show that in the iteration where the algorithm considered thisS′-connecting
+system, it found a Steiner tree whose cost is not larger than that ofF and therefore optimal
+
+===== PAGE 10 =====
+
+10 Steiner Tree Parameterized by Multiway Cut and Even Less
+Let S′⊆S be the set of vertices ofS used byF. BecauseF is a Steiner tree for terminals
+K, we findS∩K⊆S′.
+Starting from the graphF, contract each connected component ofF−S into a single
+vertex. Then, remove any leaves of the resulting graph that were connected components of
+F−S before and let the resulting graph beT . Denote the contracted vertices still inT by
+u1,...,um and letSi =NT (ui) for alli∈{1,...,m}. Finally, letS ={S1,...,Sm}.
+We claim that(S,T ) is anS′-connecting system. First, note thatSi⊆S′as eachui
+represents a connected component ofF−S, hence it can only have neighbors inS′. Since we
+removed all component-representing vertices that were leaves, we havedT (ui)> 1. Finally,
+any edge inT [S] was untouched and therefore part ofF and ofG. Hence, (S,T ) is an
+S′-connecting system.
+We will show that the algorithm will find a Steiner tree of cost at mostcost(F) for
+this specificS′-connecting system. LetB be the complete bipartite graph for this specific
+iteration of the algorithm. We will give a matchingM of finite weight such thatω(M)≤
+cost(F)−cost(T [S′])−∑
+k∈K cost(SP[S′,k ]). Note that this is indeed sufficient, as the cost
+of the Steiner tree found by the algorithm is then at mostcost(F) by Claim 2.6.
+For eachui∈V (T ), letUi be the corresponding connected component ofF that was
+contracted. Note thatUi can only be part of one componentCp. Letp(i) denote the partition
+that Ui is part of. Then we defineM as:
+M ={(Si, (p(i), 0)) :i∈{1,...,m},kp∈V (Ui)}∪{(Si, (p(i),i )) :i∈{1,...,m},kp̸∈V (Ui)}.
+Note that allSi are matched exactly once in this way, soM is a maximum matching.
+We are left to analyze thatω(M)≤cost(F)−cost(T [S′])−∑
+k∈K cost(SP[S′,k ]).
+Note thatF contains at least the following edge sets:
+T [S′] =F[S′], i.e., all the edges between vertices ofS′,
+Ui∪δF (Ui) for all ui, i.e., all non-leaf connected components that were contracted,
+together the edges between that connected component and the vertices ofS′,
+a path fromk to some vertex ofS′for allk∈K\S s.t. k̸∈V (Ui) for allui.
+Therefore, we have
+cost(F )≥cost(T [S′]) +
+m∑
+i=1
+cost(Ui∪δF (Ui)) +
+∑
+k∈K\(⋃m
+i=1(V (Ui))
+cost(SP[S′,k ]).
+Note that for alli such thatUi∩K =∅, each subgraphUi∪δF (Ui) a is a Steiner tree for
+Si in Gp(i). Therefore, we havecost(Ui∪δF (Ui)≥cost(MST[Gp(i),Si]). Similarly, we find
+that for alli such thatUi∩K̸=∅, we havecost(Ui∪δF (Ui)≥cost(MST[Gp(i),Si∪{kp(i)}]).
+Therefore, we can conclude that:
+cost(F )≥cost(T [S′]) +
+∑
+i∈[m]:Ui∩K=∅
+cost(MST[Gp(i),Si])
++
+∑
+i∈[m]:Ui∩K̸=∅
+cost(MST[Gp(i),Si∪{kp(i)}]) +
+∑
+k∈K\(⋃m
+i=1(V (Ui))
+cost(SP[S′,k ])
+≥cost(T [S′]) +
+∑
+i∈[m]:Ui∩K=∅
+ω((Si, (p(i),i )))
++
+∑
+i∈[m]:Ui∩K̸=∅
+ω((Si, (p(i), 0))) +
+∑
+k∈K
+cost(SP[S′,k ])
+= cost(T [S′]) +
+∑
+k∈K
+cost(SP[S′,k ]) +ω(M) ◀
+
+===== PAGE 11 =====
+
+B.M.P. Jansen and C.M.F. Swennenhuis 11
+This concludes the proof of Theorem 1.1. ◀
+3 Tree K-free-decompositions
+In this section we formally defineK-free treewidth as the minimum width of a treeK-free-
+decomposition. We also show how to compute a 5-approximation in FPT time.
+The definition ofK-free treewidthclosely resembles the notion of treeH-decomposition
+that inspired it [12, 19]. The difference lies in the parts of the decomposition that do not
+contribute to the cost. Throughout this section,K can be any set of vertices. However, we
+will useK as the set ofSteiner Tree terminals in the rest of this paper.
+▶ Definition 3.1(TreeK-free-decomposition). For a graphG and a setK⊆V (G), atree
+K-free-decomposition of graphG is a triple(T,χ,L) whereL⊆V (G), T is a rooted tree,
+and χ:V (T)→2V (G), such that:
+(K.A) for eachv∈V (G), the nodes in{x: v∈χ(x)}form a non-empty connected subtree
+of T,
+(K.B) for each edgeuv∈E(G), there is a nodex∈V (T) with{u,v}⊆χ(x),
+(K.C) for eachv∈L, there is a uniquex∈V (T) with v∈χ(x), andx is a leaf ofT,
+(K.D) for each nodex∈V (T), we haveχ(x)∩L∩K =∅.
+The width of a treeK-free-decomposition(T,χ,L) is defined asmax{0, maxx∈V (T)|χ(x)\
+L|−1}. TheK-free-treewidth of a graphG, denoted twK(G,K ), is the minimum width of a
+treeK-free-decomposition ofG.
+The first two items in this definition ensure that the pair(T,χ) forms a valid (standard)
+tree decomposition. The vertex setL, which must be disjoint from the terminal setK,
+corresponds to the vertices in terminal-free subgraphs that are not decomposed further.
+Each vertex fromL occurs in exactly one bag, which is a leaf ofT. The vertices fromL
+do not contribute to the cost of the decomposition, which corresponds to the fact that the
+sets χ(t)∩L of leaf nodest can represent arbitrarily large terminal-free subgraphs. To
+obtain the definition ofH-treewidth for a fixed graph classH, it suffices to omitK from the
+definition and replace condition(K.D) by the requirement that for each nodex∈V (T), the
+graph G[χ(x)∩L] belongs toH.
+In order to find a treeK-free-decomposition of a graphGof width at most5·twK(G,K )+5,
+we will use the algorithm by Jansen, de Kroon, and Włodraczyk [19] for finding an 5-
+approximation of a tree△-free-decomposition for a graph. Recall the following definition of
+treeH-free decompositions applied to the hereditary graph class of triangle-free graphs.
+▶Definition 3.2(Tree△-free decomposition, Definition 5 of [19]). A tree△-free-decomposition
+of graphG is a triple(T,χ,L) whereL⊆V (G), T is a rooted tree, andχ:V (T)→2V (G),
+such that:
+(△.A) for eachv∈V (G), the nodes in{x: v∈χ(x)}form a non-empty connected subtree
+of T,
+(△.B) for each edgeuv∈E(G), there is a nodex∈V (T) with{u,v}⊆χ(x),
+(△.C) for eachv∈L, there is a uniquex∈V (T) with v∈χ(x), andx is a leaf ofT,
+(△.D) for each nodex∈V (T), the graphG[χ(x)∩L] contains no triangles.
+The width of a tree△-free-decomposition (T,χ,L) is defined asmax(0, maxx∈V (T)|χ(x)\
+L|−1). The△-free-treewidth of a graphG, denoted tw△-free(G), is the minimum width of a
+tree△-free-decomposition ofG.
+
+===== PAGE 12 =====
+
+12 Steiner Tree Parameterized by Multiway Cut and Even Less
+Since the class of△-free graphs is defined by a finite family of forbidden subgraphs
+(namely, that of a triangle), the problem of△-free-deletion can be solved in3s·poly(n) time,
+where s is the size of the solution [6] by a standard bounded-depth branching algorithm.
+This directly implies the following result.
+▶ Proposition 3.3(Jansen, de Kroon, Włodarczyk, [19]). There is an algorithm that, given a
+graphG and integerk, either computes a tree△-free-decomposition of width at most5k + 5
+consisting ofO(n) nodes, or correctly concludes thattw△-free(G)>k . The algorithm runs in
+time 2O(k)·poly(n) and polynomial space.
+Using these ingredients, we present an FPT 5-approximation forK-free treewidth.
+▶ Theorem 3.4. There is an algorithm that takes an input graphG, vertex setK⊆V (G),
+integerk, and either computes a treeK-free-decomposition of width at most5k + 5consisting
+ofO(n) nodes, or correctly concludes thattwK(G,K ) > k. The algorithm runs in time
+2O(k)·poly(n) and polynomial space.
+Proof. We will first construct a graphˆG fromG and use Proposition 3.3 onˆG. We will then
+use the resulting tree△-free-decomposition of ˆG to construct a treeK-free-decomposition
+for G of width at most5k + 5.
+To get ˆG, we will subdivide every edge ofG and replace every vertex ofK with a triangle.
+Formally, we defineˆG as follows. Let
+V ( ˆG) =V (G)∪{e: e∈E(G)}∪{k′,k′′: k∈K}, and
+E( ˆG) ={{u,e}: u∈V (G),e∈E(G),u∈e}∪{{k,k′},{k,k′′},{k′,k′′}: k∈K}}.
+An important property ofˆG that follows from this construction, is that the only triangles
+of ˆG are of the form{k,k′,k′′}for k∈K. We first show that the△-free-treewidth of ˆG is
+at most theK-free-treewidth ofG.
+▷ Claim 3.5. For any graphG we havetw△-free( ˆG)≤max{twK(G,K ), 1}.
+Proof. Take (T,χ,L) as a treeK-free-decomposition forG of minimum width. We will create
+a tree△-free-decomposition (ˆT, ˆχ,ˆL) for ˆG with the same or smaller width. Take(T,χ,L)
+as a basis for(ˆT, ˆχ,ˆL), but we extend it in the following way:
+For anyk∈K addk′,k′′to ˆL. Take anyx∈V (T) such thatk∈χ(x). Ifx is a leaf, add
+k′and k′′to ˆχ(x). If x is not a leaf, add a new nodexk to V (ˆT) as a child ofx with
+ˆχ(xk) ={k,k′,k′′}.
+For any{u,v}=e∈V ( ˆG) add e to ˆL. Take anyx∈V (T) such thate⊆χ(x). Ifx is a
+leaf, adde to ˆχ(x). If x is not a leaf, add a new nodexe to V (ˆT) as a child ofx with
+ˆχ(xe) ={u,v,e}.
+First note that for all original nodesx∈V (T) we have|χ(x)\L| ≤ |ˆχ(x)\ ˆL|, as
+whenever vertices were added toˆχ(x), they were also added toˆL. Moreover, for all new nodes
+x∈V (ˆT)\V (T), we have|ˆχ(x)\L|≤2. Hence the width of(ˆT, ˆχ,ˆL) is upper bounded by
+the maximum of1 and the width of(T,χ,L), i.e., twK(G,K ).
+We will prove that(ˆT, ˆχ,ˆL) has all the properties as in Definition 3.2. Note that(△.A),
+(△.B), and (△.C) clearly hold by our construction. For(△.D), we first note thatˆG only
+contains triangles of the form{k,k′,k′′}, as we subdividedG at every edge to getˆG. Note
+that for anyk∈K we havek̸∈L: otherwisek would have been part of a leafx (by (K.C))
+and thenχ(x) would contain a vertex ofK∩L, which would contradict(K.D). Therefore,
+as k̸∈ˆL for allk∈K, we have thatG[ˆL] contains no triangles. ◁
+
+===== PAGE 13 =====
+
+B.M.P. Jansen and C.M.F. Swennenhuis 13
+Hence, if we apply Proposition 3.3 toˆG, we will either get the output that5k + 5<
+tw△-free( ˆG)≤twK(G,K ), or we get a tree△-free-decomposition (ˆT, ˆχ,ˆL) of width at most
+5k + 5 for ˆG. We will show how to use(ˆT, ˆχ,ˆL) as a basis for a treeK-free-decomposition
+for G.
+▷ Claim 3.6. Given tree△-free-decomposition (ˆT, ˆχ,ˆL) for ˆG, we can find in polynomial
+time a treeK-free decomposition forG of the same or smaller width.
+Proof. First we show that we can assume thatk̸∈ˆL for anyk∈K. Indeed, ifk∈ˆL, then
+there is a unique leafx∈V (T) such thatk∈ˆχ(x). Sincek′and k′′are adjacent tok in ˆG,
+we find{k,k′,k′′}⊆χ(x). Moreover, ask′only hask and k′′as neighbors, we may assume
+that x is the only bag containingk′(similarly,k′′is only contained inχ(x)). Note that not
+all of{k,k′,k′′}can be part ofˆL as it is a triangle, assume thatk′̸∈ˆL. Then change ˆL such
+that k′∈ˆL and k̸∈ˆL. This creates a tree△-free-decomposition for ˆG of the same width as
+(ˆT, ˆχ,ˆL). Hence, we may assume thatˆL∩K =∅.
+We create a treeK-free decomposition (T,χ,L) for G based on (ˆT, ˆχ,ˆL). For every
+e∈E(G)\, we choose an arbitrary endpointu and letα(e) =u. Thisu will replacee in the
+new decomposition. For this to work, We have to adjustL a bit to take into account the
+case whereα(e)∈ˆL, bute̸∈ˆL. Namely, then suddenlyα(e) occurs in non-leaf vertices so it
+should not be part ifL. We create the following treeK-free-decomposition forG:
+T = ˆT,
+L = (ˆL∩V (G))\{α(e): e∈E(G)\ ˆL},
+For allx∈V (T) we take
+χ(x) = (ˆχ(x)∩V (G))∪{α(e): e∈E(G)∩ˆχ(x)}.
+We show that|χ(x)\L|≤|ˆχ(x)\ ˆL|for allx∈V (T). Takex∈V (T). We will show
+that for anyv∈χ(x)\L, either there exists an edgee∈ˆχ(x)\ ˆL with v = α(e), or we
+havev∈ˆχ(x)\ ˆL. Since forv∈χ(x)\L, the sets{e :v =α(e)}∪{v}for differentv are
+disjoint, this will then prove|χ(x)\L|≤|ˆχ(x)\ ˆL|. So take anyv∈χ(x)\L. Note that
+when v =α(e) for somee∈ˆχ(x)\ ˆL, we directly find what we wanted to show. Else (i.e., if
+v̸=α(e) for alle∈ˆχ(x)\ ˆL), by definition ofχ(x), we havev∈V (G)∩ˆχ(x). By definition
+of L, we then find thatv̸∈ˆL. In that case, we directly findv∈ˆχ(x)\ ˆL, i.e., what we were
+set out to prove.
+We will now prove that this decomposition has all the required properties. For(K.A)
+consider anyv∈V (G). Note thatχ−1(v) is the union of connected subtrees, namely that of
+ˆχ−1(v) and that ofˆχ−1(e) for eache∈E(G) with α(e) =u. All of these subtrees overlap
+with ˆχ−1(u), hence (K.A) holds.
+For (K.B), consider any edgee ={u,v}∈E(G) and assumeu =α(e). Then (△.B) and
+(△.D) for (ˆT, ˆχ,ˆL) tell us that there is ax∈V (T) such that{e,v}⊆ˆχ(x). By definition of
+χ(x), this means that{α(e),v}={u,v}⊆χ(x).
+For (K.C), take anyv∈L and assume for the sake of contradiction that the property
+does not hold. This means that there is a non-leafx∈V (T) such thatv∈χ(x). Since
+v∈L, we also havev∈ˆL. Hencev̸∈ˆχ(x) as x is not a leaf vertex. This would imply that
+v =α(e) for somee∈E(G)∩ˆχ(x). Sincex is a non-leaf vertex we finde∈E(G)\ ˆL. But
+then α(e) =v should not be part ofL, i.e., we find a contradiction.
+For (K.D), we simply note that we were able to assume thatk̸∈ˆL for allk∈K at the
+beginning of this proof. ◁
+This concludes the proof of Theorem 3.4. ◀
+
+===== PAGE 14 =====
+
+14 Steiner Tree Parameterized by Multiway Cut and Even Less
+3.1 Nice tree K-free-decompositions
+Many algorithms using standard tree decompositions usenice tree decompositions (e.g., [8]).
+We will use a very similar notion of anice treeK-free-decomposition, where every non-leaf
+node of a rooted tree decomposition(T,χ) is one of five types:
+join node: a nodex with exactly two child nodesc1, c2, withχ(x) =χ(c1) =χ(c2).
+vertex introduce node: a nodex that introduces a vertexv∈V (G) has exactly one
+child nodec, such thatχ(x) =χ(c)∪{v}with v̸∈χ(c).
+vertex forget node: a nodex that forgets a vertexv∈V (G) has exactly one child
+node c, such thatχ(x) =χ(c)\{v}with v∈χ(c).
+edge introduce node: a nodex that introduces an edge{u,v}has exactly one child
+node c, such thatχ(x) =χ(c) and{u,v}⊆χ(x).
+leaf introduce node: a nodex that has exactly one child nodec that is a leaf, such
+that χ(x) =χ(c)\L.
+We say that in a leaf nodec, all edges ofG[χ(c)\L] are introduced. In a leaf introduce
+node x with child nodec, all remaining edges (i.e., all edges ofG[χ(x)] except those in
+G[χ(c)\L] are introduced. We require that every edge is introduced exactly once in the
+whole decomposition. We use the notationGx to denote the subgraph ofG with V (Gx) the
+union of all bags of descendants ofx in T and E(Gx) the edges that are introduced by node
+x or a descendant ofx.
+Note that we can transform any treeK-free-decomposition into a nice tree K-free-
+decomposition, in almost exactly the same as transforming a standard tree decomposition into
+a nice tree decomposition (cf. [8, Lemma 7.4], [21]). First we apply the usual transformations
+on the interior of T, i.e.we ensure that T is binary and introduce / forget at most one
+vertex per bag. Note that we only introduce edges that are not part ofG[χ(x)] for a leaf
+x∈V (T). Then, we will do the following transformation for each leafc∈V (T): Remove
+the edge betweenc and its parentp and add a nodex as a child ofp and a parent ofc. Set
+χ(x) =χ(c)\L. Nowx is a leaf introduce node, introducing the leafc. This ensures all the
+properties of a nice tree decomposition without increasing the width of the decomposition.
+4 Single-exponential time algorithm parameterized by K-free
+treewidth
+In order to obtain a single-exponential algorithm even though the number of partitions of a
+size-k set is super-exponential ink, we use the rank-based approach by Bodlaender, Cygan,
+Kratsch, and Nederlof [4]. The main idea behind this approach is to derive single-exponential
+rank bounds for matrices that encode which pairs of ‘partial solutions’ combine into a full
+solution. These bounds imply that any set of partial solutions can be trimmed down to a
+representative subset of single-exponential size while providing the following guarantee: if
+the original set contained a partial solution that can be extended to an optimal full solution,
+then the representative set still contains such a partial solution.
+We start making these ideas concrete forSteiner Tree . Given a node x of a tree
+K-free decomposition (T,χ,L) of the input graphG obtained via Theorem 3.4, we will work
+bottom-up in the decomposition tree. For each nodex∈V (T) we compute a set of partial
+solutions in the associated graphGx defined in Section 3.1, using the previously computed
+data for the children ofx. During this process, we decide which partial solutions inGx to
+keep based on their behaviour on the boundary, i.e., onχ(x). Roughly speaking, a partial
+solution corresponds to a subgraphF of Gx containing all vertices ofK∩V (Gx). The
+subgraph F does not have to be connected, but if it is disconnected then each connected
+
+===== PAGE 15 =====
+
+B.M.P. Jansen and C.M.F. Swennenhuis 15
+component contains a vertex ofχ(x). The behavior ofF can be summarized by a partition
+of the vertices ofχ(x)∩V (F) based on their spread over connected components ofF: two
+verticesu,v∈χ(x)∩V (F) are in the same set of the partition if and only if they are in a
+common connected component ofF. To work with representative sets of partial solutions,
+we therefore need some terminology to work with partitions. We view a partition of a setU
+as a set of disjoint subsets ofU whose union isU.
+▶ Definition 4.1. For a finite setU we use Π(U) to denote the set of all partitions ofU.
+ForP,Q∈Π(U) we letP⊑Q if and only if for allA∈Q there exists a setA′∈P such
+that A⊆A′. If this holds, we say thatQ is arefinement of P.
+ForP,Q ∈Π(U) we denote byP⊔Q the join of partitionsP and Q in the partition
+lattice, which can be obtained as follows. LetGP (resp.GQ) be a graph on vertex setU whose
+connected components partitionU according toP (resp.Q). ThenP⊔Q corresponds to the
+partition ofU formed by the connected components of the unionGP∪GQ. This implies that
+for everyA∈P∪Q there existsA′∈P⊔Q such thatA⊆A′.
+Using this notation, we can introduce the concept of a setR of partial solutionsrepre-
+senting anotherA. To facilitate the discussion of our algorithm, we will work with partial
+solutions of two types. The most intuitive form consists of subgraphsF of Gx as described
+above. A more succinct representation of the essential information can be obtained by
+encoding each such subgraphF as a pair (P,w ), whereP is the partition it induces on
+the boundary vertices andw is the integer giving the total cost of the edges inF. From
+this perspective, the objects stored in a set of partial solutions consist of pairs(P,w ). The
+following definition captures the idea of two partial solutions together forming a full solution:
+they merge together to provide a subgraph consisting of a single connected component
+whenever the partition representing the combined connectivity information consists of a
+single set containing the entire boundary.
+▶ Definition 4.2(Definition 3.4 from [4]). For a universeU and two setsA,R⊆{(P,w ) :
+P∈Π(U)∧w∈N}, we say thatR representsA if for allQ∈Π(U) we have
+min{w: (P,w )∈A∧P⊔Q ={U}}= min{w: (P,w )∈R∧P⊔Q ={U}}.
+Bodlaender et al. [4] showed that a representative setR can be computed by finding a
+basis of a suitable matrix of rank2|U|−1. We can therefore bound the size ofR by 2|U|−1.
+▶ Proposition 4.3(Theorem 3.7 from [4]). There is an algorithm that given a universeU
+and a setA⊆{(P,w ) :P∈Π(U)∧w∈N}in time 2O(|U|)poly(|A|) finds a setR⊆Aof
+size at most2|U|−1, that representsA.
+We slightly adjust this proposition to also work for storing subgraphs (i.e., partial
+solutions) as representative sets, instead of partitions. This facilitates the presentation of the
+remainder of the algorithm. For this purpose, we define how to map subgraphs to partitions.
+▶ Definition 4.4. For a graphG, a setX⊆V (G), andF⊆G a subgraph ofG, letπF (X)
+be the partition ofX such that:
+any u∈X\V (F), we have{u}∈πF (X),
+for anyu,v∈X∩V (F), verticesu and v are in the same set ofπF (X) if and only ifu
+and v belong to a common connected component ofF.
+See Figure 2 for an example of a subgraphF and the partitionπF (X). Observe that ifC
+is a connected component ofF and H =F\C, thenπF (X) =πH(X)⊔πC(X); we will use
+this fact later. Next, we adjust the definition of representing to work for subgraphs. We
+use{F⊆G}to denote the set of all subgraphs of a graphG.
+
+===== PAGE 16 =====
+
+16 Steiner Tree Parameterized by Multiway Cut and Even Less
+X
+x1 x2 x3 x4 x5 x6 x7 x8
+Figure 2 In this example we haveX ={x1,...,x 8}. The lines are a visual representation
+of a subgraphF of G, the graphG itself is not drawn. For this subgraphF we haveπF (X) =
+{{x1},{x2,x 3,x 4,x 5},{x6,x 7},{x8}}.
+▶ Definition 4.5. Given an edge-weighted graphG, a vertex setZ⊆V (G), and two sets of
+subgraphsB,R⊆{F⊆G}, we say thatR representsB on Z if for allQ∈Π(Z) we have
+min{cost(F ): F∈B∧πF (Z)⊔Q ={Z}}= min{cost(F): F∈R∧πF (Z)⊔Q ={Z}}.(1)
+The given definitions support the following straight-forward extension of Proposition 4.3,
+which facilitates computing representative subsets of partial solutions stored as subgraphs.
+The computation works with respect toany choice of vertex setZ as boundary. The fact
+that Z is not necessarily a separator inG is crucial for its later use.
+▶ Corollary 4.6. Consider an edge-weighted graphG and a subset of the verticesZ⊆V (G).
+For a given set of subgraphsB⊆{F⊆G}, we can find in2O(|Z|)poly(|B|) time a setR⊆B
+of size at most2|Z|−1 that representsB on Z.
+Proof. LetB′={(πF (Z), cost(F)) :F∈B}. Now we can apply Proposition 4.3 toB′to find
+a setR′⊆B′of size at most2|Z|−1 in time 2O(|Z|)poly(|B|), that representsB on universe
+Z.
+Create the setR by adding for each(P,w )∈R′exactly one subgraphF fromB with
+πF (Z) =P and cost(F ) =w (these must exist by definition ofB′and the fact thatR′⊆B′).
+Note, that|R|≤2|Z|−1 andR⊆B. Hence, we are left to show thatR representsB, i.e., for
+all Q∈Π(Z) that (1) holds.
+Fix someQ∈Π(Z). Note that the left-hand side is at most the right-hand side asR⊆B.
+For the other direction, considerF∈Bthat minimizes the left side of the equation. We
+know (πF (Z), cost(F))∈B′and becauseR′representsB′on universeZ, we find that there
+exists (P,w )∈R′such thatw = cost(F) and P⊔Q ={Z}. The way we createdR implies
+that there exists aF′∈Rsuch thatπF ′(Z)⊔Q ={Z}and cost(F′) = cost(F). Hence, this
+shows the equality. ◀
+We now present the main ingredient for applying the rank-based approach forK-free
+treewidth. It will be used to compute the table entries of the leaf-introduce vertices of the
+tree K-free decomposition.
+▶ Lemma 4.7. Given as input an edge-weightedn-vertex graphG and two disjoint subsets
+of verticesY⊆V (G) and Z⊆V (G) with Z̸=∅, we can compute in2O(|Z|)·poly(n) time a
+setR(Z)⊆F(Z) ={F⊆G[Z∪Y ]}such that:
+|R(Z)|≤2|Z|−1, and
+R(Z) representsF(Z) on Z.
+Proof. We want to find a representative set for all possible subgraphs inG[Y∪Z]. For this
+purpose, we buildF(Z) by increasing the size ofZ, while maintaining the bounded size of
+
+===== PAGE 17 =====
+
+B.M.P. Jansen and C.M.F. Swennenhuis 17
+F(Z). Order the elements ofZ arbitrarily, i.e., letZ ={z1,...,zk}. LetZi ={z1,...,zi}be
+the firsti elements ofZ and defineF(Zi) ={F⊆G[Zi∪Y ]}. We will iteratively compute
+setsR(Zi)⊆F(Zi) with the following properties:
+|R(Zi)|≤2|Z|−1, and
+R(Zi) representsF(Zi) on Z.
+We setR(∅) ={∅}. To computeR(Zi) fromR(Zi−1) we execute the following steps.
+1. InitializeB(Zi) =R(Zi−1).
+2. For allF∈R(Zi−1), for allT⊆Zi such thatzi∈T, compute a minimum-cost Steiner
+tree FT for terminalsT in G[Zi∪Y ] in 2O(|Z|)poly(n) time using the Dreyfus-Wagner
+algorithm [11]. AddF∪FT toB(Zi).
+3. Compute a representative setR(Zi)⊆B(Zi) with|R(Zi)|≤2|Z|−1 using Corollary 4.6.
+The resulting setR(Zk) =R(Z) is given as the output. The main work happens in
+Step 2. For each of the|R(Zi−1)|≤2|Z|−1 choices forF, there are at most2|Z|choices
+for T. Hence we invoke the Dreyfus-Wagner algorithm2O(|Z|) times for a terminal set of
+size|T|≤|Z|. The resulting setB(Zi) has size 2O(|Z|), so that Corollary 4.6 also runs in
+time 2O(|Z|)poly(n) for each of thek + 1∈O(n) choices ofi. The run-time bound follows.
+We prove correctness by induction overi. For the base casei = 0, we argue thatR(∅)
+satisfies the two conditions. The setF(Z0) = F(∅) only contains subgraphsF of G[Y ]
+and for any of these we haveπF (Z) ={{z1},{z2},...,{zk}}since Y∩Z =∅. Hence, the
+only Q∈Π(Z) satisfying πF (Z)⊔Q ={Z}is Q ={{Z}}. Since for F =∅we have
+πF (Z)⊔Q ={Z}, we find thatR(∅) ={∅}is a representative set forF(∅) on Z.
+For the casei > 0, first note that any time we add a subgraphF∪FT toB(Zi) in
+Step 2, we haveF ∈R(Zi−1)⊆F(Zi−1)⊆F(Zi), and FT ⊆G[Zi∪Y ]. Hence their
+union is a subgraph ofG[Zi∪Y ]. Therefore,Ri(Z)⊆Bi(Z)⊆Fi(Z). Moreover, we have
+|R(Zi)|≤2|Z|−1 because we constructed it using Corollary 4.6. All that remains to show is
+thatR(Zi) representsF(Zi) on Z, i.e., for allQ∈Π(Z) we have
+min{cost(F): F∈F(Zi)∧πF (Z)⊔Q ={Z}}= min{cost(F): F∈R(Zi)∧πF (Z)⊔Q ={Z}}.
+AsR(Zi)⊆F(Zi) we directly see that the left-hand side is at most the right-hand side.
+For the other direction, fixQ∈Π(Z) and chooseF∈F(Zi) that minimizes the left-hand
+side. LetC be the connected component ofF containingzi (possibly C =∅). LetH =F\C.
+Note thatH∈F(Zi−1) as nowH⊆G[Zi−1∪Y ]. TakeQ′=πC(Z)⊔Q. We find that
+πH(Z)⊔Q′=πH(Z)⊔πC(Z)⊔Q =πF (Z)⊔Q ={Z}.
+Using induction, we find that there existsH′∈R(Zi−1) such thatπH ′(Z)⊔Q′={Z}
+and cost(H′) = cost(H) = cost(F)−cost(C). The algorithm at one point consideredH′and
+T =V (C)∩Z in Step 2, and addedH′∪FT toB(Zi). Note that
+πH ′∪FT (Z)⊔Q =πH ′∪FT (Z)⊔Q⊔πC(Z) as FT connects V (C)∩Z
+=πH ′∪FT (Z)⊔Q′ by definition ofQ′
+={Z}. as πH ′(Z)⊔Q′={Z}
+Using Proposition 4.3, we find that there exists a subgraphF′∈ R(Zi) such that
+F′⊔Q ={Z}. To bound its cost, note thatcost(FT )≤cost(C) as FT is a minimum-cost
+Steiner tree inG[Zi∪Y ] for terminal setT and C is a candidate solution. Then we derive
+cost(F′) = cost(H′∪FT )≤cost(H′) + cost(FT ) = cost(F)−cost(C) + cost(FT )
+≤cost(F)−cost(C) + cost(C) = cost(F ).
+
+===== PAGE 18 =====
+
+18 Steiner Tree Parameterized by Multiway Cut and Even Less
+Hence, F′shows that the left-hand side of the equation is greater than or equal to the
+right-hand side. This concludes the proof of Lemma 4.7. ◀
+We can use Lemma 4.7 to solveSteiner Tree in 2twK (G,K)poly(n) time. Below, we give
+a self-contained presentation of the existing [4] rank-based dynamic-programming algorithm
+for Steiner Tree parameterized by treewidth—thereby correcting some small issues from
+the literature—and show how Lemma 4.7 allows it to be extended forK-free treewidth.
+▶ Theorem 1.2. There is an algorithm that takes as input a graphG with weight func-
+tion cost: E(G)→N, and a setK⊆V (G) of terminals, that computes a minimum-weight
+Steiner tree in2O(twK (G,K))poly(n) time and space.
+Proof. The first step is to use Theorem 3.4 to find a nice treeK-free-treewidth decomposition
+(T,χ,L) of width≤5twK(G,K ) + 5.
+For the actual algorithm on the decomposition, we use the algorithm from Bodlaender,
+Cygan, Kratsch, and Nederlof [4] to solve weighted Steiner tree on graphs of bounded
+treewidth as a building block. Let us recall what this algorithm computes. Recall that for
+any nodex∈V (T), the graphGx is defined as the subgraph ofG with as vertices any vertex
+that was introduced in (a descendant of)x and as edges any edge that was introduced in
+(a descendant of)x. The algorithm from Bodlaender, Cygan, Kratsch, and Nederlof [4]
+then computes, for every nodex∈V (T) and Z⊆χ(x), a setA′
+x(Z) that representsAx(Z)
+(according to Definition 4.4) where2
+Ax(Z) =
+{(
+P, min
+F∈Ex(P,Z )
+cost(F)
+)
+: P∈Π(Z)∧Ex(P,Z )̸=∅
+}
+,
+and
+Ex(P,Z ) =
+{
+F⊆Gx : V (F)∩χ(x) =Z,πF (Z) =P,
+#cc(F) =|P|,V (Gx)∩K⊆V (F)
+}
+.
+Intuitively,Ex(P,Z ) is the set of all subgraphsF of Gx whose connected components
+partition the vertices ofZ exactly as prescribed byP, which contain all terminals ofGx, for
+which every connected component intersectsχ(x), and for whichZ coincides with the set
+of vertices from bagχ(x) used byF. The setAx(Z) then contains the information about
+such subgraphs that is needed to do dynamic programming forSteiner Tree: for each
+partitionP ofZ that can be realized by at least one subgraph ofGx, it records the minimum
+cost of such a subgraph.
+We will use the original algorithm from Bodlaender, Cygan, Kratsch, and Nederlof [4] for
+all nodes of the decomposition that are not a leaf, nor a leaf-introduce node. For completeness,
+we will repeat how to compute the table entries for these nodes. The correctness of the
+formulas follows from the fact that these operations preserve representation, meaning that
+ifA′representsA, thenf(A′) representsf(A). For the proof that the operations used in
+the recursive formulas preserve representation we refer the reader to the original paper [4].
+For the leaf-introduce nodes we will use a new base case that can directly be computed with
+Lemma 4.7. Note that to ensure that for all internal nodesx∈T and Z⊆χ(x) we have
+2 There are two major differences between the definition of table entries in Section 3.3 of the paper
+by Bodlaender, Cygan, Kratsch, and Nederlof [4] and the one given here. The first is the inclusion
+that all terminals inGx should be inV (F ), which was simply missing before. The second is that
+V (F )∩χ(x)⊆Z was changed to equality, to correctly ensure that each connected component ofF has
+at least one endpoint inZ.
+
+===== PAGE 19 =====
+
+B.M.P. Jansen and C.M.F. Swennenhuis 19
+|A′
+x(Z)|≤2O(twK (G,K)), we will compute a representative set of it right after computing
+A′
+x(Z) using Proposition 4.3 and use it to replaceA′
+x(Z).
+Introduce vertex nodex with childc introducing v When a vertexv is introduced, then
+either it is going to be part of a partial solution (i.e.,v∈Z) or not (i.e.,v̸∈Z). Ifv∈Z,
+then we will add it as a singleton into each partition ofA′
+c(Z\{v}). This can be interpreted
+as adding the vertexv (without any incident edges) to any partial solution found in the
+child bag, using the same boundary vertices, except forv. If v̸∈Z and v /∈K, then it
+should not be used, so we can just copy the value ofA′
+c(Z). Ifv /∈Z but v∈K, then we
+haveEx(P,Z ) =∅by definition and may therefore setA′
+x(Z) =∅.
+A′
+x(Z) =
+
+
+
+{(P∪{v},w ) : (P,w )∈A′
+c(Z\{v})}if v∈Z
+A′
+c(Z) if v̸∈Z,v̸∈K
+∅ if v̸∈Z,v∈K
+Forget vertex nodex with childc forgettingv Whenv is forgotten inx, then we combine
+the possibilities of whetherv was used in a partial solution (corresponding toA′
+c(Z∪{v}))
+or not (corresponding toA′
+c(Z)). However, we must ensure thatv was not a singleton in a
+partition if it was used, so that all connected components of partial solutions are connected
+to the boundary.
+In the following recursive formula we use notation from [4] to denoteP↓Z as the partition
+that is the result of takingP and removing all elements not inZ from the sets of the partition,
+i.e., wherev is removed from the partition that it is in.
+A′
+x(Z) =A′
+c(Z)∪{(P↓Z,w ) : (P,w )∈A′
+c(Z∪{v})∧{v}̸∈P}
+Introduce edge nodex with childc introducing{u,v}When an edge{u,v}is introduced,
+then either it is going to be part of a partial solution or not. However, it can only be part
+of a partial solution if both its endpoints are used by the partial solution, i.e., whenu∈Z
+and v∈Z. Partial solutions that do not use{u,v}correspond to the table entryA′
+c(Z).
+If{u,v}is used, we take all(P,w ) inA′
+c(Z) and add the edge. This means that the sets
+of P containingu and v should be merged since they are now connected, meaning we get
+partition P⊔π{{u,v}}(Z). Moreover, the weight of such a partition increases bycost({u,v}).
+A′
+x(Z) =
+{
+A′
+c(Z)∪{(P⊔π{{u,v}}(Z),w + cost({u,v})) : (P,w )∈A′
+c(Z)}if{u,v}⊆Z,
+A′
+c(Z) otherwise.
+Join nodex with child nodesc1 and c2 The recursively formula in this case corresponds
+to combining all possible partial solutions, meaning that their connectivities and weights are
+combined into a new partition-weight combination.
+A′
+x(Z) ={(P1⊔P2,w 1 +w2) : (P1,w 1)∈A′
+c1(Z)∧(P2,w 2)∈A′
+c2(Z)}
+Base case: Leaf introduce nodex with child nodec Let x be a leaf introduce node ofT
+with childc∈V (T) that is a leaf ofT. We will show how to compute the table entry ofA′
+x(Z)
+for allZ⊆χ(x) in 2O(|χ(x)|)·poly(n) time. By definition of a nice treeK-free-decomposition,
+node c is the only child ofx and χ(c)\χ(x)⊆L. We denoteY =χ(c)\χ(x) and remark
+that Y⊆L does not contain any terminals. Moreover, we haveGx =G[χ(c)].
+
+===== PAGE 20 =====
+
+20 Steiner Tree Parameterized by Multiway Cut and Even Less
+For anyZ⊆χ(x) such thatK∩χ(x)⊆Z defineFx(Z) ={F⊆G[Z∪Y ]}and note
+that we can compute a setRx(Z)⊆Fx(Z) that representsFx(Z) on Z (according to
+Definition 4.5) of size at most2|Z|−1 in 2O(|Z|)·poly(n) time, using Lemma 4.7. We will
+show that we can setA′
+x(Z) to be:
+A′
+x(Z) =
+{(
+P, min
+F∈Rx(Z):πF (Z)=P
+cost(F )
+)
+:P∈Π(Z)∧{F∈Rx(Z) :πF (Z) =P}̸=∅
+}
+.
+Intuitively, the setA′
+x(Z) of weighted partitions representing partial solutions ofGx whose
+intersection with the current bagχ(x) matchesZ is built as follows: for each partitionP
+of Z that is realized by the connectivity pattern of at least one subgraph stored inRx(Z),
+we add that partition together with the minimum cost of any subgraph realizing it toA′
+x(Z).
+To show correctness, we first rewrite the definition ofAx(Z) for leaf introduce nodes and
+show thatA′
+x(Z) representsAx(Z) (according to Definition 4.4). For this purpose, we first
+rewrite the definition ofEx(P,Z ) for a leaf introduce nodex. Recall the definition:
+Ex(P,Z ) =
+{
+F⊆Gx : V (F )∩χ(x) =Z,πF (Z) =P,
+#cc(F) =|P|,V (Gx)∩K⊆V (F)
+}
+.
+First note that by definition of treeK-free-decomposition, there are no terminals in
+Y = χ(c)\χ(x). Hence, for anyF ⊆Gx such thatV (F)∩χ(x) = Z, we have that the
+requirementsV (Gx)∩K⊆V (F ) and K∩χ(x)⊆Z are equivalent, i.e., we can replace the
+first requirement with the second in the definition. Now let
+E′
+x(P,Z ) =
+{
+{F⊆G[Z∪Y ]: πF (Z) =P}if K∩χ(x)⊆Z,
+∅ otherwise.
+We will show thatmin{cost(F) :F∈Ex(P,Z )}= min{cost(F) :F∈E′
+x(P,Z )}. First note
+thatEx(P,Z )⊆E′
+x(P,Z ) as in principle we removed the requirements#cc(F ) =|P|and
+V (F )∩χ(x) =Z from the definition ofEx(P,Z ) to obtainE′
+x(P,Z ).
+Now take anyF∈E′
+x(P,Z )\Ex(P,Z ). We will prove that there is aF′∈Ex(P,Z ) with
+equal or smaller cost. Recall thatπF (Z) =P does not necessarily imply thatV (F)∩χ(x) =Z,
+as the definition ofπF (Z) adds singleton sets for vertices inZ\V (F). However, we may
+assumeV (F)∩χ(x) =Z, as otherwise we can add such a missing vertex fromZ\(V (F)∩χ(x))
+to V (F) as an isolated vertex to get to a subgraph that is also inE′
+x(P,Z ) with the same
+cost asF. Since Y∩χ(x) =∅by definition andF ⊆G[Z∪Y ], the subgraphF cannot
+contain any vertex ofχ(x)\Z, so that we indeed obtainV (F)∩χ(x) = Z. Hence, we
+are only left with the case of#cc(F )>|P|, i.e., there is a connected component ofF not
+intersectingZ. Since this connected component cannot contain any terminals (asY does not
+contain any terminals), we find that removing the connected component fromF results in a
+subgraph that is of smaller (or equal) cost and part ofE′
+x(P,Z ) . Hence, we may assume that
+for theF∈E′
+x(P,Z ) of minimum cost, we have#cc(F) =|P|, i.e.,F∈Ex(P,Z ). Hence,
+we can conclude thatmin{cost(F) : F ∈Ex(P,Z )}= min{cost(F) : F ∈E′
+x(P,Z )}. As
+a consequence, we can replaceEx(P,Z ) withE′
+x(P,Z ) in the definition ofAx(Z) without
+changing its contents.
+Recall thatFx(Z) ={F⊆G[Z∪Y ]}, so thatE′
+x(P,Z ) ={F∈Fx(Z) : πF (Z) = P}
+wheneverK∩χ(x)⊆Z. Hence, for anyZ such thatK∩χ(x)⊆Z we actually have:
+Ax(Z) =
+{(
+P, min
+F∈Fx(Z):πF (Z)=P
+cost(F )
+)
+:P∈Π(Z)∧{F∈Fx(Z) :πF (Z) =P}̸=∅
+}
+.
+
+===== PAGE 21 =====
+
+B.M.P. Jansen and C.M.F. Swennenhuis 21
+Now that we’ve rewrittenAx(Z), it is time to prove thatA′
+x(Z) representsAx(Z), i.e.,
+we show that for allQ∈Π(Z):
+min{w: (P,w )∈Ax(Z)∧P⊔Q ={Z}}= min{w: (P,w )∈A′
+x(Z)∧P⊔Q ={Z}}.
+Note thatA′
+x(Z)⊆Ax(Z) by the new definition ofAx(Z), asRx(Z)⊆Fx(Z). Hence we
+have that the left-hand side is smaller or equal to the right-hand side of the equality.
+For the other direction, take any(P,w )∈Ax(Z) that attains the minimum value. Hence,
+there exists aF∈Fx(Z) such thatπF (Z)⊔Q ={Z}and cost(F) = w. BecauseRx(Z)
+representsFx(Z) onZ (according to Definition 4.5), we know that there exists aF′∈Rx(Z)
+such thatπF ′(Z)⊔Q ={Z}and cost(F′) =w. Therefore, there exists(πF ′(Z),w )∈A′
+x(Z)
+with πF ′(Z)⊔Q ={Z}, i.e., we find that
+min{w: (P,w )∈Ax(Z)∧P⊔Q ={Z}}= min{w: (P,w )∈A′
+x(Z)∧P⊔Q ={Z}}.
+To summarize, the algorithm will compute the values ofA′
+x(Z) using the treeK-free
+decomposition and the recursive formulas given above. Each time after a value ofA′
+x(Z) is
+computed, the algorithm will apply Proposition 4.3 to find a representative set and use it
+to replaceA′(Z). This last step ensures thatA′(Z)≤2twK (G,K) throughout the algorithm.
+The algorithm will then return the valueminZ⊆χ(r){A′
+r(Z)}where r denotes the root of the
+tree decomposition.
+For the running time analysis, note that computing the values for leaf-introduce nodes
+takes 2O(twK (G,K))·poly(n) time, using Lemma 4.7 and the definition ofA′
+x(Z) for such nodes
+directly. Moreover, computing the values for internal vertices takes2O(twK (G,K))·poly(n) time
+using the recursive formulas for other internal nodes, as we ensure that|A′
+x(Z)|≤2twK (G,K)
+for allx and Z⊆χ(x) throughout the algorithm. Therefore, the total algorithm runs in
+time bounded by2O(twK (G,K))·poly(n). ◀
+5 Conclusion
+In this paper, we show that it is possible to design FPT algorithms forSteiner Tree when
+the considered parameter is structurally smaller than the number of terminals. For this
+purpose, we have extended the definitions ofH-free treewidth andH-elimination distance to
+terminal-free variants of these parameters.
+Our polynomial-space algorithm forSteiner Tree parameterized by multiway cut is
+slightly superexponential, due to the number of differentS-connecting systems. Is it possible
+to design an algorithm forSteiner Tree parameterized by|S|that uses both polynomial
+space and single-exponential FPT time?
+Another direction for future research is to apply such terminal-aware parameterizations
+to other problems that rely on terminals. An obvious example isMultiway Cut itself.
+Another problem to consider isShortestK-Cycle, where one is given an undirected graph
+and a set of terminalsK and asked to find a simple cycle that goes through all terminals.
+Björklund, Husfeldt, and Taslaman [3] give a2|K|poly(n) time algorithm for this problem. Is
+it fixed-parameter tractable parameterized by multiway cut, or evenK-free treewidth? The
+same question can be asked for theSubset Traveling Salesperson Problem (Subset
+TSP), which asks for a minimum-weight tour visiting a given subsetK of terminal vertices.
+Many techniques developed forSteiner Tree parameterized by treewidth also apply to
+Hamiltonian Cycle and other variants of TSP [4, 9]; we expect that our techniques for
+terminal-aware parameterizations can be extended forSubset TSP.
+
+===== PAGE 22 =====
+
+22 Steiner Tree Parameterized by Multiway Cut and Even Less
+References
+1 Akanksha Agrawal, Lawqueen Kanesh, Daniel Lokshtanov, Fahad Panolan, M. S. Ramanujan,
+Saket Saurabh, and Meirav Zehavi. Deleting, eliminating and decomposing to hereditary
+classes are all FPT-equivalent. InProceedings of SODA 2022, pages 1976–2004, 2022.doi:
+10.1137/1.9781611977073.79.
+2 Akanksha Agrawal and M. S. Ramanujan. Distance from triviality 2.0: Hybrid parameteriza-
+tions. In Proc. 33rd IWOCA, volume 13270 ofLecture Notes in Computer Science , pages 3–20.
+Springer, 2022. doi:10.1007/978-3-031-06678-8_1.
+3 Andreas Björklund, Thore Husfeldt, and Nina Taslaman. Shortest cycle through specified
+elements. InProc. 23rd SODA, pages 1747–1753. SIAM, 2012.doi:10.1137/1.9781611973099.
+139.
+4 Hans L. Bodlaender, Marek Cygan, Stefan Kratsch, and Jesper Nederlof. Deterministic
+single exponential time algorithms for connectivity problems parameterized by treewidth.
+Information and Computation , 243:86–111, 2015.doi:10.1016/j.ic.2014.12.008.
+5 Jannis Bulian and Anuj Dawar. Graph isomorphism parameterized by elimination distance to
+bounded degree. Algorithmica, 75(2):363–382, 2016.doi:10.1007/S00453-015-0045-3.
+6 Leizhen Cai. Fixed-parameter tractability of graph modification problems for hereditary
+properties. Information Processing Letters, 58(4):171–176, 1996.doi:10.1016/0020-0190(96)
+00050-6.
+7 Jianer Chen, Yang Liu, and Songjian Lu. An improved parameterized algorithm for the
+minimum node multiway cut problem. Algorithmica, 55(1):1–13, 2009. doi:10.1007/
+S00453-007-9130-6.
+8 Marek Cygan, Fedor V. Fomin, Lukasz Kowalik, Daniel Lokshtanov, Dániel Marx, Marcin
+Pilipczuk, Michal Pilipczuk, and Saket Saurabh.Parameterized Algorithms. Springer, 2015.
+doi:10.1007/978-3-319-21275-3.
+9 Marek Cygan, Jesper Nederlof, Marcin Pilipczuk, Michał Pilipczuk, Johan M.M. Van Rooij,
+and Jakub Onufry Wojtaszczyk. Solving connectivity problems parameterized by treewidth
+in single exponential time. ACM Transactions on Algorithms (TALG) , 18(2):1–31, 2022.
+doi:10.1145/3506707.
+10 11th DIMACS Implementation Challenge, 2014. Accessed 21 Nov 2023. URL: https://
+dimacs11.zib.de/.
+11 Stuart E. Dreyfus and Robert A. Wagner. The Steiner problem in graphs.Networks, 1(3):195–
+207, 1971. doi:10.1002/net.3230010302.
+12 Eduard Eiben, Robert Ganian, Thekla Hamm, and O joung Kwon. Measuring what matters:
+A hybrid approach to dynamic programming with treewidth.Journal of Computer and System
+Sciences, 121:57–75, 2021.doi:10.1016/j.jcss.2021.04.005.
+13 Fedor V Fomin, Petteri Kaski, Daniel Lokshtanov, Fahad Panolan, and Saket Saurabh.
+Parameterized single-exponential time polynomial space algorithm for Steiner tree.SIAM
+Journal on Discrete Mathematics , 33(1):327–345, 2019.doi:10.1137/17M1140030.
+14 Bernhard Fuchs, Walter Kern, D Molle, Stefan Richter, Peter Rossmanith, and Xinhui Wang.
+Dynamic programming for minimum Steiner trees.Theory of Computing Systems , 41:493–500,
+2007. doi:10.1007/S00224-007-1324-4.
+15 Jiong Guo, Falk Hüffner, and Rolf Niedermeier. A structural view on parameterizing problems:
+Distance from triviality. InProc. 1st IWPEC, pages 162–173. Springer, 2004.doi:10.1007/
+978-3-540-28639-4_15.
+16 Trey Ideker, Owen Ozier, Benno Schwikowski, and Andrew F Siegel. Discovering regulatory
+and signalling circuits in molecular interaction networks.Bioinformatics, 18:S233–S240, 2002.
+doi:10.1093/bioinformatics/18.suppl_1.S233.
+17 Russell Impagliazzo and Ramamohan Paturi. On the complexity of k-sat.J. Comput. Syst.
+Sci., 62(2):367–375, 2001.doi:10.1006/JCSS.2000.1727.
+
+===== PAGE 23 =====
+
+B.M.P. Jansen and C.M.F. Swennenhuis 23
+18 Bart M. P. Jansen, Jari J. H. de Kroon, and Michał Włodarczyk. Vertex deletion parameterized
+by elimination distance and even less. InProc. 53rd STOC, pages 1757–1769. ACM, 2021.
+doi:10.1145/3406325.3451068.
+19 Bart M. P. Jansen, Jari J. H. de Kroon, and Michal Wlodarczyk. 5-approximation forH-
+treewidth essentially as fast asH-deletion parameterized by solution size. InProc. 31st ESA,
+volume 274 ofLIPIcs, pages 66:1–66:16. Schloss Dagstuhl - Leibniz-Zentrum für Informatik,
+2023. doi:10.4230/LIPIcs.ESA.2023.66.
+20 Richard M. Karp. Reducibility among combinatorial problems. InProceedings of a symposium
+on the Complexity of Computer Computations , The IBM Research Symposia Series, pages
+85–103. Plenum Press, New York, 1972.doi:10.1007/978-1-4684-2001-2_9.
+21 Ton Kloks. Treewidth: computations and approximations , volume 842. Springer Science &
+Business Media, 1994. doi:10.1007/BFb0045375.
+22 Thomas Lengauer. Combinatorial algorithms for integrated circuit layout . XApplicable
+Theory in Computer Science. Springer Science & Business Media, 2012. doi:10.1007/
+978-3-322-92106-2.
+23 Ivana Ljubić. Solving Steiner trees: Recent advances, challenges, and perspectives.Networks,
+77(2):177–204, 2021.doi:10.1002/net.22005.
+24 Daniel Lokshtanov and Jesper Nederlof. Saving space by algebraization. InProc. 42nd STOC,
+pages 321–330. ACM, 2010.doi:10.1145/1806689.1806735.
+25 Jesper Nederlof. Fast polynomial-space algorithms using inclusion-exclusion.Algorithmica,
+65(4):868–884, 2013.doi:10.1007/S00453-012-9630-X.
+26 Jaroslav Nešetřil and Patrice Ossona de Mendez. Chapter 6: Bounded height trees and
+tree-depth. In Sparsity: Graphs, Structures, and Algorithms , volume 28 ofAlgorithms and
+Combinatorics, pages 115–144. Springer, 2012.doi:10.1007/978-3-642-27875-4.
+27 PACE 2018, 2018. Accessed 21 Nov 2023. URL:https://pacechallenge.org/2018/.
+28 Mauricio G.C. Resende and Panos M. Pardalos.Handbook of optimization in telecommunica-
+tions. Springer Science & Business Media, 2008.doi:10.1007/978-0-387-30165-5.
+29 Olga Russakovsky and Andrew Y. Ng. A Steiner tree approach to efficient object detection.
+In Proc. 23rd CVPR, pages 1070–1077. IEEE Computer Society, 2010.doi:10.1109/CVPR.
+2010.5540097.
+30 Tom van Roozendaal. Fixed-parameter tractable algorithms for refined pa-
+rameterizations of graph problems. Master’s thesis, Eindhoven University
+of Technology, 2023. URL: https://research.tue.nl/en/studentTheses/
+fixed-parameter-tractable-algorithms-for-refined-parameterization .

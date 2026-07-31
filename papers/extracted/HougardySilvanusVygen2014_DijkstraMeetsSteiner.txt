@@ -1,0 +1,2725 @@
+﻿SOURCE: HougardySilvanusVygen2014_DijkstraMeetsSteiner.pdf
+PAGES: 59
+EXTRACTOR: pypdf 6.10.0 (Unicode text), pdfplumber fallback
+
+
+===== PAGE 1 =====
+
+Dijkstra meets Steiner: a fast exact goal-oriented
+Steiner tree algorithm
+Stefan Hougardy, Jannik Silvanus, and Jens Vygen
+Research Institute for Discrete Mathematics, University of Bonn
+{hougardy, silvanus, vygen }@or.uni-bonn.de
+Abstract. We present a new exact algorithm for the Steiner tree problem in
+edge-weighted graphs. Our algorithm improves the classical dynamic program-
+ming approach by Dreyfus and Wagner. We achieve a signiﬁcantly better prac-
+tical performance via pruning and future costs, a generalization of a well-known
+concept to speed up shortest path computations. Our algorithm matches the best
+known worst-case run time and has a fast, often superior, practical performance:
+on some large instances originating from VLSI design, previous best run times are
+improved upon by orders of magnitudes. We are also able to solve larger instances
+of the d-dimensional rectilinear Steiner tree problem ford∈{ 3, 4, 5}, whose Hanan
+grids contain up to several millions of edges.
+Keywords: Graph algorithms; Steiner tree problem; Dynamic programming; Ex-
+act algorithm
+1 Introduction
+We consider the well-known Steiner tree problem (in graphs): Given an undirected graph
+G, costs c : E(G)→ R≥0 and a terminal set R⊆ V (G), ﬁnd a tree T in G such that
+R⊆V (T ) and c(E(T )) is minimum. The decision version of the Steiner tree problem is
+one of the classical NP-complete problems [22]; it is even NP-complete in the special case
+that G is bipartite with c≡ 1. Furthermore, it is NP-hard to approximate the Steiner
+tree problem within a factor of 96
+95 [6]. The currently best known approximation algorithm
+by Byrka et al. [5] uses polyhedral methods to achieve a 1.39-approximation. The Steiner
+tree problem has many applications, in particular in VLSI design [20], where electrical
+connections are realized by Steiner trees.
+From now on, we will refer to |V (G)| by n,|E(G)| by m and|R| by k. Dreyfus
+and Wagner [9] applied dynamic programming to the Steiner tree problem to obtain an
+exact algorithm with a run time ofO(n(n logn +m) + 3kn + 2kn2) if implemented using
+Fibonacci heaps [14]. In 1987, Erickson, Monma and Veinott [11] improved the run time
+toO(3kn + 2k(n logn +m)) using a very similar approach. In 2006, Fuchs et al. [15]
+proposed an algorithm with a run time of O((2 +δ)kn(ln( 1
+δ )/δ)
+ζ
+) for every suﬃciently
+small δ >0 and ζ > 1
+2, improving the exponential dependence on k from 3k to (2 +δ)k.
+Vygen [33] developed an algorithm with a worst-case run time of O(nk2k+log2(k) log2(n)),
+which is the fastest known algorithm if f(n) < k < g(n) for some f(n) = polylog( n)
+andg(n) = n
+2− polylog(n). However, fork< 4 logn, the run time obtained by Erickson,
+Monma and Veinott [11] is still the best known. See [33] for a more detailed analysis of
+the run times mentioned above.
+arXiv:1406.0492v3  [cs.DS]  8 Sep 2015
+
+===== PAGE 2 =====
+
+2
+For graphs with treewidtht, one can solve the Steiner tree problem in timeO(n2O(t))
+[4]. An implementation of this algorithm was evaluated in [12]. Polzin and Vahdati
+Daneshmand [26] proposed an algorithm with a worst-case run time ofO(n2p logp+3p+logp)
+wherep is a parameter closely related to the pathwidth of G. They use this algorithm as
+a subroutine in their successful reduction-based Steiner tree solver [24, 32].
+Except for the last mentioned algorithm, these results have played a very limited role
+in practice. Instead, empirically successful algorithms rely on preprocessing and reduction
+techniques, heuristics and branching: First, reductions [3, 10, 25, 31] are applied to reduce
+the size of the graph and the number of terminals, guaranteeing that optimum solutions
+of the reduced instance correspond to optimum solutions of the original instance. These
+reductions are not limited to simple local edge elimination tests, but may also rely on
+linear programming formulations and optimum solutions of partial instances. Primal and
+dual [2, 35] heuristics yield good upper and lower bounds, in many cases even resulting
+in a provably optimum solution. If these methods do not already solve the instance,
+enumerative algorithms are used. To this end, various authors [2, 7, 23] perform branch
+and cut. However, the solver by Polzin and Vahdati Daneshmand [24, 32], which achieved
+the best results so far, uses a branch and bound approach, where high eﬀort is put into
+single branching nodes.
+We propose a dynamic programming based algorithm with a worst-case run time of
+O(3kn + 2k(n logn +m)), matching the best known bound for small k, and which is
+fast in practice. Good practical performance is achieved by eﬀectively pruning partial
+solutions and using future cost estimates. The latter are motivated by the similarity
+of our algorithm with Dijkstra’s algorithm [8] and the well-known speed-up technique
+for Dijkstra’s algorithm (ﬁrst described by Hart, Nilsson and Raphael [17]) which uses
+reduced edge costs. More precisely, given an instance ( G,c,s,t ) of the shortest path
+problem, where we assume G to be a directed graph, we use a feasible potential π, which
+is a function π :V (G)→ R≥0 with
+π(t) = 0 (1)
+and
+π(v)≤π(w) +c((v,w )) (2)
+for all (v,w )∈E(G). Deﬁne reduced costs cπ by
+cπ(e) :=c(e) +π(w)−π(v)≥ 0 (3)
+for every e = (v,w )∈E(G). Then, run Dijkstra’s algorithm on the instance ( G,cπ,s,t ).
+The numbers π(v) are lower bounds on the distance from v to t (we also say that π(v)
+estimates the future cost atv). Moreover, the cost of every s-t-path changes by the same
+amount when going from c to cπ, namely−π(s), so any shortest s-t-path in (G,cπ) is a
+shortest s-t-path in (G,c ). If the future costs are good lower bounds, only vertices close
+to a shortest path will be labeled by Dijkstra’s algorithm before t is labeled permanently
+(i.e., the distance tot is known) and the algorithm can be stopped. This can lead to huge
+speedups.
+The rest of this paper is organized as follows: In Section 2, we generalize this future
+cost idea from paths to Steiner trees and describe our algorithm. Examples of future
+cost estimates are given in Section 3. Section 4 introduces a pruning technique to further
+improve practical performance. Section 5 contains implementation details and computa-
+tional results.
+
+===== PAGE 3 =====
+
+3
+2 The Algorithm
+Now, let (G,c,R ) be an instance of the Steiner tree problem, where G is an undirected
+graph,c :E(G)→ R≥0 is a cost function on the edges and R is the set of terminals to be
+connected. As usual, for a setX⊆V (G), we denote by smt(X), short for Steiner minimal
+tree, the cost of an optimum Steiner tree for the terminal set X. Our algorithm uses an
+arbitrary root terminal r0∈R. We will call the terminals in R\{r0} source terminals.
+The algorithms by Dreyfus and Wagner [9] and Erickson et al. [11] as well as our algorithm
+use dynamic programming to compute smt({v}∪ I) for (v,I )∈ V (G)× 2R\{r0}. Then,
+at termination, smt({r0}∪ (R\{r0})) is the cost of an optimum Steiner tree.
+The former two algorithms work as follows: For each i from 1 to |R\{r0}|, they
+consider all I⊆R\{r0} with|I| =i one after another and then compute smt({v}∪ I)
+for allv∈V (G). This way, it is guaranteed that when computing smt({v}∪I), the values
+smt({w}∪ I′) for all w∈ V (G) and I′⊂ I are already known. However, this leads to
+an exponential best case run time and memory consumption of Ω(2kn). In contrast, our
+new algorithm considers all subsets of source terminals simultaneously, using a labeling
+technique similar to Dijkstra’s algorithm. This way, we do not necessarily have to compute
+smt({v}∪ I) for all pairs (v,I ).
+Our new algorithm labels from the source terminals towards the root r0. More pre-
+cisely, the algorithm labels elements of V (G)× 2R\{r0}. Each label (v,I ) represents an
+optimum Steiner tree for {v}∪ I found so far. As in Dijkstra’s algorithm, each itera-
+tion selects one label ( v,I ) and declares it to be permanent. Each time a label ( v,I )
+becomes permanent, all neighbors w of v are checked and updated if the Steiner tree
+represented by (v,I ) plus the edge {v,w} leads to a better solution for ( w,I ) than pre-
+viously known. This operation is well-known from Dijkstra’s algorithm. In addition, for
+all sets J ⊆ (R\{r0})\I it is checked whether the Steiner trees for ( v,I ) and (v,J )
+combined to a tree for (v,I ∪J) lead to a better solution than previously known.
+To allow a simpler presentation, we restrict ourselves to instances without edges of
+zero cost, as these can be contracted in a trivial preprocessing step.
+Now, we introduce the notion of valid lower bounds, which are used by the algorithm
+to estimate the future cost of a label ( v,I ).
+Deﬁnition 1. Let (G,c,R ) be an instance of the Steiner tree problem and r0∈ R. A
+functionL :V (G)× 2R→ R≥0 is called a valid lower bound if
+L(r0,{r0}) = 0
+and
+L(v,I )≤L (w,I′) + smt((I\I′)∪{v,w})
+for all v,w ∈V (G) and{r0}⊆ I′⊆I⊆R.
+Note that the valuesL(v,I ) forr0 /∈I do not aﬀect whetherL is a valid lower bound.
+Also note that by choosing I′ ={r0} and w = r0, we have L(v,I )≤ smt(I∪{v}), so
+a valid lower bound by deﬁnition indeed is a lower bound on the cost of an optimum
+Steiner tree. Moreover, if e ={v,w}∈ E(G) is an edge, by choosing I′ =I, we have
+L(v,I )≤L (w,I ) + smt({v,w})≤L (w,I ) +c(e).
+
+===== PAGE 4 =====
+
+4
+Dijkstra-Steiner Algorithm
+Input : A connected undirected graph G, costs c : E(G)→ R>0, a terminal set
+R⊆ V (G), a root terminal r0∈ R, and (an oracle to compute) a valid lower
+boundL : V (G)× 2R→ R≥0.
+Output: The edge set of an optimum Steiner tree for R in G.
+1 l(v, I) := ∞ for all ( v, I)∈ V (G)× 2R\{r0};
+2 l(s,{s}) := 0 for all s∈ R\{ r0};
+3 l(v,∅) := 0 for all v∈ V (G);
+4 b(v, I) := ∅ for all ( v, I)∈ V (G)× 2R\{r0};
+5 N :={(s,{s})| s∈ R\{ r0}};
+6 P := V (G)×{∅} ;
+7 while (r0, R\{ r0}) /∈ P do
+8 Choose (v, I)∈ N minimizing l(v, I) +L(v, R\ I);
+9 N := N\{ (v, I)};
+10 P := P∪{ (v, I)};
+11 for all edges e ={v, w} incident to v do
+12 if l(v, I) + c(e) < l(w, I) and (w, I) /∈ P then
+13 l(w, I) := l(v, I) + c(e);
+14 b(w, I) :={(v, I)};
+15 N := N∪{ (w, I)};
+16 end
+17 end
+18 for all∅̸ = J⊆ (R\{ r0})\ I with (v, J)∈ P do
+19 if l(v, I) + l(v, J) < l(v, I∪ J) and (v, I∪ J) /∈ P then
+20 l(v, I∪ J) := l(v, I) + l(v, J);
+21 b(v, I∪ J) :={(v, I), (v, J)};
+22 N := N∪{ (v, I∪ J)};
+23 end
+24 end
+25 end
+26 return backtrack(r0, R\{ r0});
+Procedure backtrack(v, I)
+27 if b(v, I) ={(w, I)} then
+28 return{{v, w}}∪ backtrack(w, I);
+29 else
+30 return ⋃
+(w,I ′)∈b(v,I ) backtrack(w, I′);
+31 end
+Fig. 1. The Dijkstra-Steiner Algorithm
+This shows that valid lower bounds generalize feasible potentials as deﬁned in (1) and
+(2). In fact, our algorithm applied to the case |R| = 2 is identical to Dijkstra’s algorithm
+using future costs in the very same way.
+Our new algorithm is described in Figure 1. For each label (v,I )∈V (G)×2R\{r0}, the
+algorithm stores the costl(v,I )∈ R≥0∪{∞} of the cheapest Steiner tree for{v}∪I found
+so far as well as backtracking datab(v,I )⊆V (G)×2R\{r0} which is used to construct the
+Steiner tree represented by this label. Ifb(v,I ) is not empty, it will always either be of the
+formb(v,I ) ={(w,I )} wherew is a neighbor ofv or of the formb(v,I ) ={(v,I 1), (v,I 2)}
+
+===== PAGE 5 =====
+
+5
+whereI1 andI2 form a partition of I (into nonempty disjoint sets). In the ﬁrst case, i.e.,
+b(v,I ) ={(w,I )}, the Steiner tree represented by the label ( v,I ) contains exactly one
+edge incident to v, which is{v,w}. In the second case, i.e., b(v,I ) ={(v,I 1), (v,I 2)}, the
+Steiner tree represented by (v,I ) can be split into two Steiner trees for the terminal sets
+I1∪{v} andI2∪{v}, whereI1 andI2 form a partition ofI. To be precise, it may happen
+that the subgraph of G corresponding to some label ( v,I ) contains cycles. However,
+since we ruled out edges of zero cost, this can only be the case as long as the label is not
+permanent, because – as we will show – permanent labels correspond to optimal Steiner
+trees.
+We incorporate the valid lower bound L into the algorithm as follows. First note
+that instead of running Dijkstra’s algorithm on reduced edge costs cπ as deﬁned in
+(3), one can equivalently apply the following modiﬁcation. For a vertex v∈ V (G), we
+denote by l(v) the cost of a label v in Dijkstra’s algorithm, i.e., the cost of a shortest
+path connecting s with v found so far. Then, in each iteration, instead of choosing a
+non-permanent vertexv minimizingl(v) to become permanent, choose a non-permanent
+vertex minimizing l(v) +π(v). We generalize this approach by always choosing a non-
+permanent label minimizing l(v,I ) +L(v,R\I).
+By P⊆V (G)× 2R\{r0} we denote the set of permanently labeled elements. We also
+maintain a setN of non-permanent labels which are candidates to be selected. The setN
+contains exactly the labels (v,I )∈ (V (G)×2R\{r0})\P withl(v,I )<∞. Note thatL≡ 0
+is always a valid lower bound, which may serve as an example to help understanding the
+algorithm. Other examples of valid lower bounds will be discussed in Section 3.
+Theorem 2. The Dijkstra-Steiner algorithm works correctly: Given an instance(G,c,R )
+of the Steiner tree problem, r0∈R, and a valid lower bound L, it always returns the edge
+set of an optimum Steiner tree for R in G.
+Proof. We will prove that the following invariants always hold when line 8 is executed:
+(a) For each (v,I )∈N∪P :
+(a1) l(v,I ) =
+{
+c({v,w}) +l(w,I ) if b(v,I ) ={(w,I )},∑
+(v,J )∈b(v,I )l(v,J ) otherwise ,
+(a2) I∪{v} ={v}∪ ⋃
+(w,J )∈b(v,I )J,
+(a3) b(v,I )⊆P , and backtrack(v,I ) returns the edge setF of a connected subgraph
+of G containing{v}∪ I with c(F )≤l(v,I ).
+(b) For each (v,I )∈P :
+l(v,I ) = smt({v}∪ I).
+(c) For each (v,I )∈ (V (G)× 2R\{r0})\P :
+(c1) l(v,I )≥ smt({v}∪ I),
+(c2) If I ={v}, then l(v,I ) = 0, otherwise
+l(v,I )≤ min{v,w}∈E(G),(w,I )∈P (l(w,I ) +c({v,w})) and
+l(v,I )≤ min∅̸=I ′⊂I and (v,I ′),(v,I\I ′)∈P (l(v,I′) +l(v,I \I′)).
+(c3) If l(v,I ) = smt({v}∪ I), then (v,I )∈N.
+(d) N is not empty and N∩P =∅.
+Assuming (a) – (d), the correctness of the algorithm directly follows: Once we have
+(r0,R\{r0})∈ P , (b) implies l(r0,R\{r0}) = smt({r0}∪ (R\{r0})) = smt(R). Fur-
+thermore, (a3) implies that the algorithm returns the edge setF of a connected subgraph
+ofG containingR withc(F )≤l(r0,R\{r0}) = smt(R). Since there are no edges of zero
+
+===== PAGE 6 =====
+
+6
+cost,F indeed is the edge set of a tree. Invariant (d) guarantees that in each iteration, a
+label (v,I )∈N can be chosen and that the algorithm terminates, since |P| is increased
+in each iteration.
+Clearly, after line 6 these invariants hold. We have to prove that lines 8 to 24 preserve
+(a) – (d). Below, we ﬁrst verify that (a) and (c) are preserved. Then, the main part of
+the proof shows that (b) is preserved. Finally, we will see that the latter argument also
+shows that (d) is preserved.
+Let (v,I ) be the label chosen in line 8 in some iteration. Clearly, lines 8 to 24 preserve (a2),
+(a3), (c2) and (c3). If a label l(w,I ) or l(v,I ∪J) is decreased, it cannot be permanent,
+so (a1) is maintained.
+We now consider (c1). Since (c) held before the current iteration, we have l(v,I )≥
+smt({v}∪ I). This directly implies
+l(v,I ) +c({v,w})≥ smt({v}∪ I) +c({v,w})
+≥ smt({v,w}∪ I)
+≥ smt({w}∪ I),
+so line 13 does not destroy (c1). Also, if ∅̸ =J⊆ (R\{r0})\I is a set chosen in line 18
+leading to the change of l(v,I ∪J), we have
+l(v,I ∪J) =l(v,I ) +l(v,J )
+≥ smt({v}∪ I) + smt({v}∪ J)
+≥ smt({v}∪ I∪J),
+so (c1) indeed is preserved.
+In order to prove that (b) is preserved, we now show that l(v,I )≤ smt({v}∪ I), which
+together with (c1) yields the desired result. Since l(v,{v}) = 0 = smt( {v}), we can
+assume I̸={v}. Let T be an optimum Steiner tree for {v}∪ I in G. Then, all leaves of
+T are contained in{v}∪I. For a vertexw∈V (T ), let Tw be the subtree of T containing
+all vertices x for which the unique x-v-path in T containsw.
+We will now show that there is a vertexw∈V (T ), a nonempty terminal setI′⊆I∩V (Tw)
+and a subtree T′ of Tw such that
+(I) (w,I′)∈N,
+(II) l(w,I′) =c(T′) = smt({w}∪ I′),
+(III) T′ is a subtree of Tw containingI′∪{w},
+(IV) T−T′ is a tree containing (I\I′)∪{v,w}.
+Here, by T−T′, we refer to the graph ((V (T )\V (T′))∪{w},E (T )\E(T′)). Assuming
+we have a triple ( w,I′,T′) satisfying (I) – (IV), l(v,I )≤ smt({v}∪ I) can easily be
+proved: SinceL is a valid lower bound, we have
+L(w,R\I′)≤L (v,R\I) + smt((I\I′)∪{v,w})
+≤L (v,R\I) +c(T−T′)
+=L(v,R\I) +c(T )−c(T′).
+(4)
+Adding (II) and (4) yields
+l(w,I′) +L(w,R\I′)≤c(T ) +L(v,R\I).
+
+===== PAGE 7 =====
+
+7
+By (I) and the choice of (v,I ) in line 8 we have
+l(v,I ) +L(v,R\I)≤l(w,I′) +L(w,R\I′),
+so
+l(v,I )≤c(T ).
+It remains to be shown that there is such a triple ( w,I′,T′). We call w∈ V (T ) proper
+if (w,I ∩V (Tw))∈ P before the execution of line 24. If we have a leaf w∈ V (T )\{v}
+which is not proper, we set I′ ={w} and T′ = ({w},∅), satisfying (I) – (IV). Note that
+here (I) follows from (c3). Otherwise, sincev is not proper, there is a vertexw inT which
+is not proper but all neighbors wi of w in Tw are proper. We deﬁne
+J =
+{
+{I∩V (Twi)| wi is neighbor of w in Tw}∪{{ w}} if w∈I,
+{I∩V (Twi)| wi is neighbor of w in Tw} if w /∈I.
+Note thatJ is a partition of I∩V (Tw). LetJ′ be an inclusion-wise minimal subset
+ofJ such that
+(
+w,⋃
+J∈J ′J
+)
+/∈ P . Since w is not proper and ( w,∅)∈ P ,J′ exists and
+J′ is not empty. For J∈J ′, let TJ be the unique minimum connected subgraph of T
+such that ({w}∪ J)⊆ V (TJ). By optimality of T , TJ is an optimum Steiner tree for
+({w}∪ J), as the only vertex in TJ which is incident to edges in E(T )\E(TJ) is w. We
+deﬁne
+(i) I′ =⋃
+J∈J ′J,
+(ii) V (T′) =⋃
+J∈J ′V (TJ) and
+(iii) E(T′) =⋃
+J∈J ′E(TJ).
+See Figure 2 for an illustration of this setting.
+w1
+w2
+w3
+w
+v
+T′
+Fig. 2. A possible conﬁguration with J′ ={I∩ V (Tw1), I∩ V (Tw2)}. Vertices in I are drawn
+as squares, proper vertices are drawn in blue.
+
+===== PAGE 8 =====
+
+8
+The conditions (III) and (IV) are satisﬁed by construction. We now show (II), which
+due do (c3) also implies (I). First, we deal with the case |J′| = 1. If J′ ={{w}}, by
+(c2) clearly l(w,I′) = 0 =c(T′). IfJ′ ={I∩V (Twi)} for some neighbor wi of w in Tw,
+by (c2), (b), and the fact that wi is proper, we have
+l(w,I′)≤l(wi,I′) +c({wi,w})
+= smt({wi}∪ I′) +c({wi,w})
+=c(Twi) +c({wi,w})
+=c(T′).
+Otherwise, i.e.,|J′| > 1, choose an element J∈J ′ and see again by (c2), (b) and the
+minimality ofJ′ that
+l(w,I′)≤l(w,I′\J) +l(w,J )
+= smt({w}∪ (I′\J)) + smt({w}∪ J)
+=c(T′−TJ) +c(TJ)
+=c(T′).
+As T is an optimum Steiner tree for {v}∪ I, by (IV) we get c(T′) = smt({w}∪ I′),
+together with (c1) showing (II). By (c3), (w,I′)∈N, so (I) holds as well, completing the
+proof that (b) is preserved by lines 8 to 24.
+To see that (d) is maintained, note that applying the previous argument to (r0,R\{r0})
+instead of (v,I ) always yields a label ( w,I′)∈ N, so N is not empty. Also, whenever a
+label (v,I ) is inserted to P , it is removed from N. By (b), from then on l(v,I ) cannot
+be changed, so (v,I ) is never inserted again into N. ⊓ ⊔
+Note that in line 8, one can actually choose any label (v,I )∈N withl(v,I )+L(v,R\
+I)≤l(w,J ) +L(w,R\J) for all (w,J )∈ (V (G)×2I)∩N. This is a generalization of the
+choice as speciﬁed in the algorithm. However, in our implementation, we always choose
+a label minimizing l(v,I ) +L(v,R\I).
+Theorem 3. The Dijkstra-Steiner algorithm can be implemented to run in O(3kn +
+2k(n logn +m) + 2knfL) time, where n =|V (G)|, m =|E(G)|, k =|R|, and fL is an
+upper bound on the time required to evaluate L.
+Proof. Since|P| increases in each iteration, we have at most n2k−1 iterations. We use
+a Fibonacci heap [14] to store all labels ( v,I )∈ N, which allows updates in constant
+amortized time. Since the heap contains at most 2k−1n elements, each execution of line 8
+takesO(log(2k−1n)) =O(k + log(n)) amortized time. Line 12 is executed at most 2 km
+times and each execution takes O(1) amortized time. Furthermore, there are exactly
+3k−1 pairs I,J ⊆R\{r0} with I∩J =∅, since every element in R\{r0} can either be
+contained in I, J or (R\{r0})\ (I∪J), independently of the others. Thus, line 18 – 24
+takeO(3k−1n) time. By caching values of L, we can achieve that we query L at most
+once for each label, resulting in an additional run time of O(2knfL). The run time of
+the backtracking clearly is dominated by the previous tasks, since backtrack is called at
+mostO(kn) times and requires eﬀort linear in the size of its output. We get a total run
+time of
+O(2kn(logn +k) + 2km + 3kn + 2knfL) =O(3kn + 2k(n logn +m) + 2knfL),
+since 2kk =O(3k). ⊓ ⊔
+
+===== PAGE 9 =====
+
+9
+In Section 3, we will see that there are non-trivial valid lower boundsL which can be used
+in the algorithm while still achieving a worst-case run time of O(3kn + 2k(n logn +m)),
+matching the bound of [11].
+3 Lower Bounds
+Roughly speaking, the larger the valid lower boundL is, the faster our algorithm will be.
+Before we describe examples of valid lower bounds, we note:
+Proposition 4. LetL andL′ be valid lower bounds. Then, max(L,L′) also is a valid
+lower bound.
+Proof. Let v,w ∈V (G) and I′⊆I⊆R. Then
+L(v,I )≤L (w,I′) + smt((I\I′)∪{v,w})
+≤ max(L(w,I′),L′(w,I′)) + smt((I\I′)∪{v,w})
+and
+L′(v,I )≤L′(w,I′) + smt((I\I′)∪{v,w})
+≤ max(L(w,I′),L′(w,I′)) + smt((I\I′)∪{v,w}),
+so
+max(L(v,I ),L′(v,I ))≤ max(L(w,I′),L′(w,I′)) + smt((I\I′)∪{v,w}).
+⊓ ⊔
+Proposition 4 allows the combination of arbitrary valid lower bounds.
+Now, we present three types of valid lower bounds. A simple valid lower bound can
+be obtained by considering terminal sets of bounded cardinality:
+Deﬁnition 5. Let (G,c,R ) be an instance of the Steiner tree problem, r0∈ R and let
+j≥ 1 be an integer. Then, Lj is deﬁned as
+Lj(v,I ) = max
+{r0}⊆J⊆I∪{v},|J|≤j+1
+smt(J)
+for v∈V (G) and{r0}⊆ I⊆R. For v∈V (G) and I⊆R with r0 /∈I, setLj(v,I ) = 0.
+Lemma 6. Let (G,c,R ) be an instance of the Steiner tree problem, r0∈R and let j≥ 1
+be an integer. Then, Lj is a valid lower bound. Furthermore, we can implement Lj such
+that after a preprocessing time of O(3k + (2k)j−1n +kj−1(n logn +m)), we can evaluate
+Lj(v,I ) for every v∈ V (G) and{r0}⊆ I⊆ R in time O(|I|j−1), where n =|V (G)|,
+m =|E(G)| and k =|R|.
+Proof. Letv,w ∈V (G) and{r0}⊆ I′⊆I⊆R. To prove thatLj is a valid lower bound,
+we have to show
+max
+{r0}⊆J⊆I∪{v}
+|J|≤j+1
+smt(J)≤ max
+{r0}⊆J ′⊆I ′∪{w}
+|J ′|≤j+1
+smt(J′) + smt(( I\I′)∪{v,w}).
+
+===== PAGE 10 =====
+
+10
+Consider the mapf :I∪{v}→ I′∪{w} withf(x) =w forx /∈I′ andf(x) =x otherwise.
+Let J be a set with {r0}⊆ J⊆I∪{v} and|J|≤ j + 1. Set J′ ={f(x) :x∈J}. Then,
+clearly{r0}⊆ J′⊆I′∪{w} and|J′|≤| J|≤ j + 1. Moreover,
+smt(J)≤ smt(J′) + smt((I\I′)∪{v,w}).
+To achieve the given run time, we ﬁrst compute smt({v}∪I) for all v∈V (G) andI⊆R
+with|I\{r0}|≤ j− 1 in timeO((2k)j−1n +kj−1(n logn +m)) using a modiﬁed variant
+of the Dijkstra-Steiner algorithm. More precisely, we do not use a lower bound, do not
+use a root terminal and consider terminal sets of increasing cardinality, very similar to
+[11]. There areO(kj−1) sets I with I⊆R,|I\{r0}|≤ j− 1. Since we consider terminal
+sets of increasing cardinality one after another, we always have at most n labels in the
+Fibonacci heap. As a set of cardinality j has 2j subsets, there areO((2k)j−1n) updates
+of supersets.
+Then, to evaluateLj(v,I ), we exploit
+Lj(v,I ) = max
+{r0}⊆J⊆I∪{v},|J|≤j+1
+smt(J)
+= max
+(
+max
+J⊆I,|J|≤j−1
+smt(J∪{v,r 0}), max
+{r0}⊆J⊆I,|J|≤j+1
+smt(J)
+)
+,
+where the ﬁrst expression can be computed in O(|I|j−1) time using the precomputed
+values smt({v,r 0}∪ J) and the second expression does not depend on v and can be
+computed in advance for every I⊆R inO(3k) time. ⊓ ⊔
+Thus, for small j, e.g., j≤ 3,Lj can be eﬃciently computed. In experiments without
+pruning, this lower bound is useful on low-dimensional instances like planar rectilinear
+grid graphs. However, pruning has a much larger impact and eliminates this eﬀect.
+We now present a more eﬀective lower bound. We will use the notion of1-trees, which
+have long been studied [19] as a lower bound for the traveling salesman problem. Given
+a complete graph H with metric edge costs and a special vertex v∈V (H), a 1-tree for v
+andH is a spanning tree on H−v together with two additional edges connecting v with
+the tree. A tour in H is a connected 2-regular subgraph of H. Since every tour consists
+of a path, which is a spanning tree, and a vertex connected to the endpoints of the path,
+every tour is a 1-tree. Thus, a 1-tree of minimum cost is a lower bound on the cost of a
+tour of minimum cost. Since such a tour of minimum cost is at most twice as expensive
+as a minimum Steiner tree, we can use 1-trees to get a lower bound for the Steiner tree
+problem.
+Forv,w ∈V (G), we denote by d(v,w ) the cost of a shortest path connecting v and
+w in G. Furthermore, for a set of vertices X⊆V , we denote by GX the distance graph
+of X, which is the subgraph of the metric closure of G induced by X. Note that since
+the edge costs in GX are the costs of shortest paths with respect to positive edge costs
+in G, the edge costs in GX are always metric. Moreover, for X⊆ V (G), we denote by
+mst(X) the cost of a minimum spanning tree in GX.
+Deﬁnition 7. Let (G,c,R ) be an instance of the Steiner tree problem and r0∈R. Then,
+the 1-tree boundL1-tree is deﬁned as
+L1-tree(v,I ) = min
+i,j∈I:i̸=j∨|I|=1
+d(v,i ) +d(v,j )
+2 + mst(I)
+2
+forv∈V (G) and{r0}⊆ I⊆R. Forv∈V (G) andI⊆R\{r0}, we setL1-tree(v,I ) = 0.
+
+===== PAGE 11 =====
+
+11
+Lemma 8. Let (G,c,R ) be an instance of the Steiner tree problem and r0∈ R. Then,
+L1-tree is a valid lower bound.
+Proof. Let v,w ∈V (G) and{r0}⊆ I′⊆I⊆R. We will show
+2L1-tree(v,I )≤ 2L1-tree(w,I′) + 2 smt((I\I′)∪{v,w}),
+which translates to
+min
+i,j∈I:i̸=j∨|I|=1
+(d(v,i ) +d(v,j )) + mst(I)
+≤ min
+i,j∈I ′:i̸=j∨|I ′|=1
+(d(w,i ) +d(w,j )) + mst(I′) + 2 smt((I\I′)∪{v,w}).
+Consider a minimum spanning treeT1 inGI ′ and a Steiner treeT2 for (I\I′)∪{v,w}.
+Furthermore, letj1,j 2∈I′ withj1̸=j2∨|I′| = 1. This setting is illustrated in Figure 3.
+First, we construct a tour C in G(I\I ′)∪{v,w} of cost at most 2 c(T2) using the standard
+double tree argument: If we double each edge in T2, the graph gets Eulerian and we can
+ﬁnd a Eulerian cycle. If we visit the vertices in the order the Eulerian cycle visits them
+and skip already visited vertices, we obtain a tour of at most the same cost exploiting
+that the edge costs in the distance graph are metric.
+We can decompose the tour into two paths P1 and P2 in GI∪{v,w} with endpoints v
+and w such that (I\I′)∪{v,w} =V (P1)∪V (P2) and c(P1) +c(P2) = c(C). Now, for
+i∈{ 1, 2}, we deﬁne P′
+i = (V (Pi)∪{ji},E (Pi)∪{{w,ji}}), which is the path obtained
+by appending the edge {w,ji} to Pi.
+IfI1 := (I\I′)∩V (P1) is empty, letj′
+1 be j1, else, let j′
+1 be the ﬁrst terminal in I1 when
+traversingP1 from v to w.
+Similarly, if I2 := (I\I′)\V (P1)⊆ V (P2) is empty, set j′
+2 = j2, else let j′
+2 be the ﬁrst
+terminal in I2 when traversing P2 from v to w.
+Since I1 and I2 are disjoint and do not contain j1,j 2∈I′, we have
+j′
+1 =j′
+2 =⇒ (j1 =j′
+1 =j′
+2 =j2∧I\I′ =∅),
+which together with
+j1 =j2 =⇒ |I′| = 1
+implies that
+j′
+1 =j′
+2 =⇒ |I| = 1.
+Then, let Qi be the path in GI obtained from the subpath of P′
+i from j′
+i to ji by
+skipping w. This is illustrated in Figure 4. We have
+d(v,j′
+1) +d(v,j′
+2) +d(Q1) +d(Q2)≤d(w,j 1) +d(w,j 2) + 2c(T2).
+Also, we have (I\I′)∪{j1,j 2}⊆ V (Q1)∪V (Q2) and clearly, we can ﬁnd a spanning
+tree in GI with cost at most d(Q1) +d(Q2) +d(T1) by attaching Q1 and Q2 to T1.
+Therefore,
+min
+i,j∈I:i̸=j∨|I|=1
+(d(v,i ) +d(v,j )) + mst(I)
+≤d(v,j′
+1) +d(v,j′
+2) +d(Q1) +d(Q2) +d(T1)
+≤d(w,j 1) +d(w,j 2) +d(T1) + 2c(T2).
+⊓ ⊔
+
+===== PAGE 12 =====
+
+12
+v
+w
+j1
+j2
+2T2 T1
+Fig. 3. The minimum spanning tree T1, the double Steiner tree 2 T2 and the edges{w, j1} and
+{w, j2}. Edges in 2T2 contributing to P1 are colored red and edges contributing to P2 are colored
+blue. Vertices in I are drawn as squares.
+v
+j1
+j2
+j′
+1
+j′
+2
+Q1
+Q2
+Fig. 4. j′
+1, j′
+2, Q1 and Q2 in the same setting as in Figure 3.
+Note that we could also use half the cost of a minimum spanning tree for I∪{v} to
+obtain a valid lower bound. However, the 1-tree lower bound is always larger and hence
+leads to better run times.
+Lemma 9. Let (G,c,R ) be an instance of the Steiner tree problem and r0∈R. Then, we
+can implementL1-tree such that after a preprocessing time of O(k(n logn +m) + 2kk2),
+we can evaluate L1-tree for every v∈ V (G) and{r0}⊆ I ⊆ R in time O(|I|), where
+n =|V (G)|, m =|E(G)| and k =|R|.
+Proof. First, for every terminals∈R, we computed(v,s ) for allv∈V (G) inO(n logn+
+m) time using Dijkstra’s algorithm implemented with a Fibonacci heap [14]. For every
+I⊆R, we compute mst(I) inO(|I|2) time using Prim’s algorithm [28]. This results in a
+
+===== PAGE 13 =====
+
+13
+total preprocessing time of O(k(n logn +m) + 2kk2). Clearly,
+min
+i,j∈I:i̸=j∨|I|=1
+(d(v,i ) +d(v,j ))
+can be evaluated inO(|I|) time if d(v,i ) is known for all v∈V (G) and i∈I. ⊓ ⊔
+Of course, in practice we do not compute minimum spanning trees for all sets of
+terminals in advance, but compute them dynamically when needed.
+Theorem 10. Let j∈ N be a constant. Let (G,c,R ) be an instance of the Steiner tree
+problem and r0∈ R. Then, we can compute smt(R) in time O(3kn + 2k(n logn +m))
+using the Dijkstra-Steiner algorithm with L = max(Lj,L1-tree). ⊓ ⊔
+The 1-tree lower bound exploits the fact that 1-trees can be used to compute lower
+bounds on the minimum cost of a tour, which in turn is at most twice as expensive
+as a minimum cost Steiner tree. Using more preprocessing and evaluation time, we can
+eliminate the loss of approximating tours by 1-trees by using optimum tours to get lower
+bounds. While it may sound unreasonable to use optimum solutions for an NP-hard
+problem to speed up another algorithm, it turns out we can compute optimum tours
+for the union of sets of terminals and at most one vertex quite fast if there are only
+few terminals. This is due to the fact that the cost of an optimum tour in GI∪{v} only
+depends on the distances from terminals to v and shortest Hamiltonian paths with given
+endpoints in GI, which can be computed in advance. For a set of vertices X⊆V (G), we
+denote by tsp(X) the minimum cost of a Hamiltonian circuit in GX.
+Deﬁnition 11. Let (G,c,R ) be an instance of the Steiner tree problem and r0 ∈ R.
+Then, the TSP boundLTSP is deﬁned as
+LTSP (v,I ) = tsp(I∪{v})
+2
+for v∈V (G) and I⊆R.
+Lemma 12. Let (G,c,R ) be an instance of the Steiner tree problem and r0∈R. Then,
+LTSP is a valid lower bound. Moreover, after a preprocessing time of O(k(n logn +m) +
+2kk3), we can evaluate LTSP (v,I ) in timeO(|I|2) for all v∈V (G) and I⊆R.
+Proof. Let v,w ∈V (G) and{r0}⊆ I′⊆I⊆R. We will show
+2LTSP (v,I )≤ 2LTSP (w,I′) + 2 smt((I\I′)∪{v,w}),
+which is equivalent to
+tsp(I∪{v})≤ tsp(I′∪{w}) + 2 smt((I\I′)∪{v,w}).
+First, we choose an optimal tour C1 in GI ′∪{w}. Then, we construct a tour C2 in
+G(I\I ′)∪{v,w} of cost at most 2 smt(( I\I′)∪{v,w}) by doubling the edges of an op-
+timum Steiner tree, ﬁnding a Eulerian walk and taking shortcuts. We have I∪{v} =
+V (C1)∪V (C2) andw∈V (C1)∩V (C2), so we can construct a tour inGI∪{v} by inserting
+C2 intoC1 after w and taking shortcuts, which results in a tour of cost of at most
+tsp(I′∪{w}) + 2 smt((I\I′)∪{v,w}).
+
+===== PAGE 14 =====
+
+14
+We achieve the given run time using a dynamic programming approach very similar to
+the TSP algorithm by Held and Karp [18]. The idea is to compute shortest Hamiltonian
+paths in the distance graph of the terminals for all possible pairs of endpoints. Then, one
+can evaluateLTSP (v,I ) inO(|I|2) time by enumerating all possible pairs of neighbors
+of v in the tour. ⊓ ⊔
+4 Pruning
+In this section, we present techniques to speed up the algorithm further by discarding
+labels (v,I ) for which we can prove that they cannot contribute to an optimum solution.
+This aﬀects the number of iterations, since these labels then are not chosen in line 8 of
+the algorithm. Also, it speeds up the execution of line 18, since we only have to consider
+existing labels in the merge step. First, we show how to identify labels that cannot
+contribute to an optimum solution. Then we show that we can indeed safely discard
+them in our algorithm.
+Deﬁnition 13. Let (G,c,R ) be an instance of the Steiner tree problem, (v,I )∈V (G)×
+2R and T be a Steiner tree for R. A tree T1 is said to be a (v,I )-subtree of T if there
+exists a tree T2 such that
+(i) V (T1)∪V (T2) =V (T ),
+(ii) V (T1)∩V (T2) ={v},
+(iii) T1 is a subtree of T containing{v}∪ I and
+(iv) T2 is a subtree of T containing{v}∪ (R\I).
+For a tree T and a (v,I )-subtree T1 ofT , we will also refer to the corresponding subtree
+T2 byT−T1.
+Lemma 14. Let (G,c,R ) be an instance of the Steiner tree problem and r0∈R. LetL
+be a valid lower bound and U≥ smt(R). Furthermore, let v∈ V (G), I⊆ R\{r0} and
+T1 be a tree in G containing{v}∪ I with
+c(T1) +L(v,R\I)>U.
+Then, there is no optimum Steiner tree for R containingT1 as a (v,I )-subtree.
+Proof. Let T be a Steiner tree for R such that T1 is a (v,I )-subtree of T . Then,
+c(T ) =c(T1) +c(T−T1)
+≥c(T1) + smt({v}∪ (R\I))
+=c(T1) + smt({v,r 0}∪ ((R\I)\{r0})) +L(r0,{r0})
+≥c(T1) +L(v,R\I)
+>U
+≥ smt(R).
+⊓ ⊔
+Lemma 14 is a trivial exploitation of the lower bound L. Its eﬀect on the run time of
+the algorithm is rather limited, since we only discard labels that would never have been
+labeled permanently anyway. In contrast, the following lemma allows signiﬁcant run time
+improvements of our algorithm, in particular on geometric instances. An application is
+illustrated in Figure 5.
+
+===== PAGE 15 =====
+
+15
+Lemma 15. Let (G,c,R ) be an instance of the Steiner tree problem, v∈V (G), I⊂R
+and∅̸ =S⊆R\I. Furthermore, let T1 be a Steiner tree for{v}∪I and H be a subgraph
+of G with
+(i) (I∪S)⊆V (H),
+(ii) each connected component of H contains a terminal in S and
+(iii) c(H)<c (T1).
+Then, there is no optimum Steiner tree for R in G containingT1 as a (v,I )-subtree.
+Proof. Let T be a Steiner tree for R in G containingT1 as a (v,I )-subtree. Then, there
+exists a tree T2 containing{v}∪ (R\I) with c(T ) = c(T1) + c(T2). We construct a
+subgraphT′ ofG containingR byT′ =T2 +H. As H contains a path from every vertex
+inH to some vertex inS,T2 is connected and S⊆R\I⊆V (T2),T′ is connected. Thus,
+smt(R)≤c(T′)
+≤c(T2) +c(H)
+=c(T )−c(T1) +c(H)
+<c (T ).
+⊓ ⊔
+I
+I
+S
+I
+I
+I
+S
+H
+Fig. 5. By Lemma 15, no label for the set I with cost strictly larger than c(H) can be part of
+an optimum solution. Terminals are drawn as squares, elements of I and S are labeled with the
+respective set.
+In Section 5, we will explain how suitable graphsH can be found. Lemmata 14 and 15
+allow us to identify labels that cannot contribute to an optimum solution. Theorem 17
+shows that we can discard these labels without aﬀecting the correctness of the algorithm.
+First, we prove an auxiliary lemma used in the proof of Theorem 17:
+Lemma 16. Let (G,c,R ) be an instance of the Steiner tree problem and r0∈ R. Let
+O⊆V (G)× 2R\{r0} be the set of pairs (v,I ) with the property that there is an optimum
+Steiner tree for R containing a (v,I )-subtree. Furthermore, let (v,I )∈ O and T1 be a
+tree containing{v}∪ I with c(T1) = smt({v}∪ I). Then, there is an optimum Steiner
+treeT for R containingT1 as a (v,I )-subtree.
+
+===== PAGE 16 =====
+
+16
+Proof. Since (v,I )∈ O, there is an optimum Steiner tree T′ for R and a tree T′
+1 which
+is a (v,I )-subtree of T . Set T = (T′−T′
+1) +T1. Then, since T′−T′
+1 is a tree containing
+{v}∪ (R\I) andT1 is a tree containing{v}∪I,T is a connected subgraph ofG containing
+{v}∪ R. Furthermore, we have
+smt(R)≤c(T )≤c(T′−T′
+1) +c(T1)
+=c(T′−T′
+1) + smt({v}∪ I)
+=c(T′)−c(T′
+1) + smt({v}∪ I)
+≤c(T′)
+= smt(R).
+Since we do not have edges of zero cost, this shows T is an optimum Steiner tree and T1
+is a (v,I )-subtree of T . ⊓ ⊔
+We now formalize a general method of pruning:
+Procedure prune(v,I )
+1 if we can prove that there is no optimum Steiner tree T for R such that
+backtrack(v,I ) is the edge set of a (v,I )-subtree of T then
+2 N :=N\{ (v,I )};
+3 end
+Note that when considering a not permanently labeled element (v,I )∈N, we cannot
+guarantee that backtrack(v,I ) is the edge set of a tree, since it may contain cycles.
+However, if it is not a tree, we can prune ( v,I ) obviously.
+Theorem 17. The Dijkstra-Steiner algorithm still works correctly if we modify it to
+execute prune(w,I ) after line 15 and prune(v,I ∪J) after line 22.
+Proof. Let O⊆V (G)× 2R\{r0} be the set of pairs (v,I ) with the property that there is
+an optimum Steiner tree for R containing a (v,I )-subtree. It suﬃces that the modiﬁed
+algorithm is correct on O, which we will now prove.
+To this end, we modify invariants (a) – (d) as deﬁned in the proof of Theorem 2 by
+restricting (a) – (c) to labels (v,I )∈O and not changing (d). We call these new invariants
+(a’) – (d’).
+Since (r0,R\{r0})∈ O, the algorithm is correct assuming that these invariants hold.
+They clearly hold after the initialization.
+Moreover, (a’), (c1’) and (c2’) are clearly preserved. To see that (c3’) is preserved, recall
+that prune only removes labels (v,I ) from N if there is no optimum Steiner tree T forR
+such that backtrack(v,I ) is the edge set of a ( v,I )-subtree of T . However, if (v,I )∈O
+and l(v,I ) = smt({v}∪ I), by (a3’) and Lemma 16 the label ( v,I ) cannot be pruned, so
+(c3’) is preserved as well.
+The argument showing that (b) is preserved remains unchanged: (c’) can be applied to
+(w,I′), because if (v,I )∈O, then (w,I′) is in O as well. This directly implies that the
+same argument as in the proof of Theorem 2 can be used to prove that (d’) is preserved,
+since (r0,R\{r0})∈O. ⊓ ⊔
+Of course, in practice we just avoid the creation of such labels instead of removing
+them immediately after creation. Moreover, whenever a label ( v,I ) is selected in line 8,
+
+===== PAGE 17 =====
+
+17
+we also try to prune it. This is not redundant, since after l(v,I ) was updated the last
+time, bounds used to prune may have improved. Moreover, we could have pruned ( v,I )
+immediately after the last update of l(v,I ) with an equivalent impact on the execution
+of the algorithm, so the algorithm still works correctly.
+5 Implementation and Results
+We implemented the algorithm using the C++ programming language. In our implemen-
+tation, we use a binary heap instead of a Fibonacci heap. We represent terminal sets by
+bitsets using the canonical bijection 2R→{ 0,..., 2|R|−1}. For each vertexv∈V (G), we
+maintain an array containing the labels ( v,I ) with l(v,I )<∞ and a hash table storing
+for each label its index in the array, if it exists. This enables us to access labels very
+quickly and traverse over the existing labels in linear time, which is important for an
+eﬃcient implementation of the merge step:
+To implement line 18, we have two options. Either we explicitly enumerate all sets
+J ⊆ (R\{r0})\I and check whether the label ( v,J ) exists, or we traverse over all
+existing labels at v and omit the labels ( v,J ) with J∩I ̸=∅. We always choose the
+option resulting in fewer sets to be considered.
+We implement the pruning rule of Lemma 14 using a shortest-paths Steiner tree
+heuristic similar to Prim’s algorithm [28], maintaining and extending one component at
+a time. This takesO(k(n logn +m)) time. Then, we use the cost of that Steiner tree as
+an upper bound and apply Lemma 14 each time we create a new label.
+To implement Lemma 15, we maintain an upper bound U(I) on the cost of labels for
+each set I⊆ R\{r0} of terminals, which is initially set to inﬁnity. For each occurring
+setI⊆R\{r0}, we compute the distance d(I,R\I) = minx∈I,y∈R\Id(x,y ). Then, each
+time we extract a label (v,I ) from the heap, we update U(I) by
+U(I) := min (U(I), l(v,I ) + min(d(I,R\I),d (v,R\I))).
+Also, we keep track of the set S(I) that was used to generate the currently best upper
+bound for the set I. In the routine described above, we always have |S| = 1. However,
+when merging two sets I1 andI2, we can use the sum of their upper bounds as an upper
+bound for the set I1∪I2 if S(I1)∩I2 =∅ or S(I2)∩I1 =∅, resulting in S(I1∪I2) =
+(S(I1)∪S(I2))\ (I1∪I2).
+Furthermore, we use the 1-tree bound as a lower bound. Of course, we do not compute
+minimum spanning trees for all subsets of terminals in advance. Instead, each time we
+consider a set I for the ﬁrst time, we compute mst( R\I).
+Lacking a good selection strategy for general instances, we always choose the last
+terminal of the instance w.r.t. the order in the instance ﬁle as root terminal. Note that
+our implementation is limited to instances with less than 64 terminals.
+We now present computational results of our algorithm on instances of the 11th
+DIMACS implementation challenge [1].
+Our results were achieved single-threaded on a computer with 3 .33 GHz Intel Xeon
+W5590 CPUs, which produced a score of 391 for the DIMACS benchmark. We compare
+our results with those obtained by the state-of-the-art algorithm by Polzin and Vahdati
+Daneshmand [27], which were obtained using one thread on a computer with a 2 .66 GHz
+Intel i7 920 CPU. This computer produced a score of 307 in the DIMACS benchmark. The
+
+===== PAGE 18 =====
+
+18
+Instance |V| | E| | R| Opt Time [s] Time PV [s]
+(a) VLSI-derived grid graphs with holes
+diw0779 11821 22516 50 4440 1 .60 1 .26
+diw0819 10553 20066 32 3399 0 .29 0 .52
+diw0820 11749 22384 37 4167 1 .50 1 .06
+lin23 3716 6750 52 17560 11 .08 0 .54
+lin24 7998 14734 16 15076 0 .10 1 .73
+lin30 19091 35644 31 27684 0 .68 14 .74
+lin32 19112 35665 53 39832 150 .20 816 .51
+lin34 38282 71521 34 45018 12 .93 1848 .24
+lin35 38294 71533 45 50559 26 .90 1911 .09
+lin36 38307 71546 58 55608 47 .59 39931.77
+(b) Rectilinear obstacle-avoiding instances preprocessed by ObSteiner
+ind5 114 228 33 1341 0 .02 0 .01
+rc03 109 202 50 54160 0 .15 0 .00
+rt02 788 1938 50 45852 0 .70 1 .99
+(c) Group Steiner tree instances
+wrp3-14 128 247 14 1400250 3 .78 0 .01
+wrp3-15 138 257 15 1500422 51 .16 0 .01
+wrp3-16 204 374 16 1600208 11 .62 0 .03
+wrp3-17 177 354 17 1700442 422 .08 0 .02
+wrp3-19 189 353 19 1900439 1765 .72 0 .03
+(d) Random graphs with so-called incidence costs
+i160-141 160 2544 12 2549 3 .40 0 .01
+i320-111 320 1845 17 4273 1706 .67 0 .03
+i640-022 640 204480 9 1756 4 .03 0 .52
+i640-031 640 1280 9 3278 0 .07 0 .00
+i640-043 640 40896 9 1931 0 .89 0 .13
+(e) Artiﬁcial instances from the hard PUC testset
+cc3-4p 64 288 8 2338 0 .01 1 .99
+cc3-4u 64 288 8 23 0 .01 1 .37
+cc3-5p 125 750 13 3661 3 .45 87 .98
+cc3-5u 125 750 13 36 4 .64 115 .83
+cc6-2p 64 192 12 3271 0 .17 0 .40
+cc6-2u 64 192 12 32 0 .28 0 .90
+T able 1. Results on various instance types.
+
+===== PAGE 19 =====
+
+19
+algorithm by Polzin and Vahdati Daneshmand successively performs various optimality-
+preserving reductions combined with a branch and bound approach.
+In Table 1, we show results on multiple instance classes (a) – (e). For each instance, we
+give its name, the number of vertices, edges and terminals. Then, we state the cost of an
+optimum solution as reported by our algorithm and the run time in seconds. Moreover,
+for each instance, we give the run time reported by Polzin and Vahdati Daneshmand.
+For the lin testset, Polzin and Vahdati Daneshmand improved run times by modifying
+their algorithm to use stronger reductions. With default settings, their algorithm did not
+solve lin36 within a time limit of 24 hours.
+On instances (a) and (b), both arising from rectilinear VLSI problems, our algorithm
+is much faster than the worst-case bound tells. This is primarily caused by the high
+impact of our pruning method. In particular, on instances with large underlying graphs,
+our algorithm performs very well, beating the reduction-based solver.
+In contrast, on group Steiner tree instances (c), our pruning implementation has no
+eﬀect. Although these instances are based on VLSI-derived grid graphs with holes as well,
+they have been modiﬁed to model the groups as terminals: For each group of the group
+Steiner tree instance, a new terminal is added to the graph and connected to the elements
+of the group by edges of very high cost. By choosing the cost of these new edges suﬃciently
+large, one can guarantee that an optimum Steiner tree in the new instance corresponds
+to an optimum group Steiner tree in the original instance and vice versa, since each
+terminal will be a leaf of the Steiner tree. To prune a label ( v,I )∈V (G)× 2R\{r0}, our
+implementation needs to connect the terminal set I to at least one additional terminal
+s∈ R\I with cost strictly less than the cost of the label ( v,I ). However, on these
+instances, connecting to an additional terminal is always much more expensive than any
+path in the original graph.
+On incidence cost instances (d), where edges incident to terminals are assigned larger
+costs, a similar eﬀect can be observed. On other random graph instances, the 1-tree lower
+bound is very eﬀective.
+Although neither pruning nor future cost estimates do have a noticeable eﬀect on
+instances from the hard PUC testset (e), our algorithm performs very well on instances
+with few terminals. This is caused by the strong worst-case run time guarantee, which,
+albeit exponential in the number of terminals, is quasilinear in the size of the graph.
+Detailed further computational results can be found in Appendix A.
+We also applied our algorithm to the d-dimensional rectilinear Steiner tree problem
+for d∈{ 3, 4, 5}. For d = 2, instances with thousands of terminals can be solved by the
+GeoSteiner algorithm [34], which works by generating a candidate set of full Steiner trees
+for subsets of terminals and then concatenating a subset of these candidates to form an
+optimum Steiner tree. A full Steiner tree is a Steiner tree where each terminal has degree
+1. The concatenation phase works by either solving a Steiner tree problem in graphs or a
+minimum spanning tree problem in hypergraphs. Exploiting a result by Hwang [21], the
+GeoSteiner algorithm only has to consider full Steiner trees following a special structure,
+which allows a signiﬁcant reduction of the number of generated candidates. In contrast,
+for higher dimensions, eliminating possible full Steiner trees is much harder, as Hwang’s
+result does not apply and complicated full Steiner trees have to be considered [36]. An
+implementation of the GeoSteiner algorithm for higher dimension is only able to solve
+instances with up to around 15 terminals in dimension 3 and up to around 10 terminals
+in dimensions 4, 5 and 6 [36]. The situation is similar in the Euclidean case, where huge
+
+===== PAGE 20 =====
+
+20
+instances can be solved for d = 2 using the GeoSteiner algorithm, but only instances
+with up to around 17 terminals for d≥ 3, using very diﬀerent algorithms [13].
+It is well-known that to compute an optimum rectilinear Steiner tree in dimension
+2, it suﬃces to compute an optimum Steiner tree in the so-called Hanan grid [16]. The
+Hanan grid is the graph obtained by drawing axis-parallel lines through each terminal,
+taking intersections of these lines as vertex set and segments between intersections as
+edges. This result was later generalized to arbitrary dimension by Snyder [30], leading to
+a grid graph with O(kd) vertices andO(dkd) edges for a d-dimensional instance with k
+terminals.
+Using this reduction, we ran our algorithm on instances from the CARIOCA [1] test-
+set, which contains randomly generated instances for d∈{ 3, 4, 5} with between 11 and
+20 terminals. To test our algorithm on larger instances, we generated new random in-
+stances (using the preﬁx “bonn”), as other available testsets do not contain suﬃciently
+many instances which are neither too small nor too large. For these new instances, coor-
+dinates were chosen uniformly at random from{0, 1,..., 999}. In particular for the larger
+instances, coordinates may appear multiple times, leading to grid graphs with slightly
+less than kd vertices. Coordinates of instances from the CARIOCA testset were scaled
+by 108 to obtain integral coordinates. For these instances, we chose a terminal as close
+as possible to the center of gravity of all terminals as root terminal, improving results
+compared to a random choice.
+Instance d |V| | E| | R| Opt Time [s]
+carioca 3 11 01 3 1331 3630 11 311221222 0 .02
+carioca 3 11 02 3 1331 3630 11 466149453 0 .02
+carioca 3 20 01 3 8000 22800 20 638376617 1 .61
+carioca 3 20 02 3 8000 22800 20 477950448 0 .15
+bonn 3 40 1 3 64000 187200 40 9024 25 .44
+bonn 3 40 2 3 57798 168909 40 9633 710 .09
+bonn 3 55 3 3 154548 455004 55 12138 6201 .10
+carioca 4 11 01 4 14641 53240 11 627022001 0 .43
+carioca 4 11 02 4 14641 53240 11 636772154 0 .22
+carioca 4 20 01 4 160000 608000 20 889180827 82 .72
+carioca 4 20 02 4 160000 608000 20 822698792 101 .11
+carioca 5 11 01 5 161051 732050 11 925163690 34 .55
+carioca 5 11 02 5 161051 732050 11 844673618 13 .02
+carioca 5 15 01 5 759375 3543750 15 1011895745 1046 .36
+carioca 5 15 02 5 759375 3543750 15 1067623193 888 .81
+carioca 5 18 03 5 1889568 8922960 18 1177091608 1081 .01
+T able 2. Results on d-dimensional rectilinear instances.
+Excerpts of experimental results are given in Table 2, the full results can be found in
+Appendix B.
+In dimension 3, we are able to solve all tested instances with up to 34 terminals.
+Many of the larger instances with up to 40 terminals are solved as well, and additionally
+one instance with 55 terminals. In dimension 4, we solve all instances of the CARIOCA
+testset as well. Experiments with larger instances are not reported here, since we were
+
+===== PAGE 21 =====
+
+21
+only able to solve instances with up to 22 terminals. In dimension 5, all instances with up
+to 15 terminals are solved. The largest solved instance carioca 5 18 03 has 18 terminals
+and nearly 9 million edges. Solving it required approximately 20 GB of memory.
+6 Discussion
+Note that due to the dynamic programming nature of our algorithm, it can also be used
+to compute all optimum Steiner trees or even all Steiner trees up to a given cost. If
+we enumerate all Steiner trees up to a cost of Opt + ∆, we have to relax the pruning
+implementations by∆ and continue labeling until all labels (v,I ) with l(v,I )≤ Opt +∆
+are permanent. Also, we have to save all predecessors instead of only one optimum
+predecessor. Then, we can recursively combine Steiner trees for subsets of terminals. In
+practice, the additional eﬀort is linear in the size of the output, allowing the enumeration
+of millions of near-optimum Steiner trees in seconds. See [29] for details.
+The dynamic programming idea by Dreyfus and Wagner has been used extensively to
+obtain Steiner tree algorithms with fast theoretical worst-case behavior. However, in the
+ﬁeld of practical solving, it has rather been disregarded prior to this work. Compared to
+other exact algorithms, our algorithm depends much less on eﬀective preprocessing and
+performs well on large graphs. Our approach is very general and not limited to the lower
+bounds and pruning strategies proposed in this paper.
+
+===== PAGE 22 =====
+
+Bibliography
+[1] 11th DIMACS implementation challenge (2014). URL http://dimacs11.cs.
+princeton.edu/downloads.html
+[2] de Arag˜ ao, M., Uchoa, E., Werneck, R.: Dual heuristics on the exact solution of
+large Steiner problems. In: Proceedings of the Brazilian Symposium on Graphs,
+Algorithms and Combinatorics GRACO’01. Fortaleza (2001)
+[3] Beasley, J.: An algorithm for the Steiner problem in graphs. Networks 14, 147–159
+(1984)
+[4] Bodlaender, H.L., Cygan, M., Kratsch, S., Nederlof, J.: Deterministic single exponen-
+tial time algorithms for connectivity problems parameterized by treewidth. In: F.V.
+Fomin, R. Freivalds, M. Kwiatkowska, D. Peleg (eds.) Automata, Languages, and
+Programming, Lecture Notes in Computer Science, vol. 7965, pp. 196–207. Springer
+Berlin Heidelberg (2013)
+[5] Byrka, J., Grandoni, F., Rothvoß, T., Sanit` a, L.: Steiner tree approximation via
+iterative randomized rounding. J. ACM 60(1), 6:1–6:33 (2013)
+[6] Chleb´ ık, M., Chleb´ ıkov´ a, J.: The Steiner tree problem on graphs: Inapproximability
+results. Theoretical Computer Science 406(3), 207–214 (2008)
+[7] Chopra, S., Gorres, E., Rao, M.: Solving the Steiner tree problem on a graph using
+branch and cut. ORSA Journal on Computing 4, 320–335 (1992)
+[8] Dijkstra, E.W.: A note on two problems in connexion with graphs. Numerische
+Mathematik 1, 269–271 (1959)
+[9] Dreyfus, S.E., Wagner, R.A.: The Steiner problem in graphs. Networks1(3), 195–207
+(1971)
+[10] Duin, C., Volgenant, A.: An edge elimination test for the Steiner problem in graphs.
+Operations Research Letters 8, 79–83 (1989)
+[11] Erickson, R.E., Monma, C.L., Veinott Jr., A.F.: Send-and-split method for
+minimum-concave-cost network ﬂows. Math. Oper. Res. 12(4), 634–664 (1987)
+[12] Faﬁanie, S., Bodlaender, H., Nederlof, J.: Speeding up dynamic programming with
+representative sets. In: G. Gutin, S. Szeider (eds.) Parameterized and Exact Com-
+putation, Lecture Notes in Computer Science , vol. 8246, pp. 321–334. Springer In-
+ternational Publishing (2013)
+[13] Fonseca, R., Brazil, M., Winter, P., Zachariasen, M.: Faster exact algorithms for
+computing Steiner trees in higher dimensional euclidean spaces. 11th DIMACS
+Implementation Challenge on Steiner Tree Problems (2014)
+[14] Fredman, M.L., Tarjan, R.E.: Fibonacci heaps and their uses in improved network
+optimization algorithms. J. ACM 34(3), 596–615 (1987)
+[15] Fuchs, B., Kern, W., M¨ olle, D., Richter, S., Rossmanith, P., Wang, X.: Dynamic
+programming for minimum Steiner trees. Theory of Computing Systems 41(3),
+493–500 (2007)
+[16] Hanan, M.: On Steiner’s problem with rectilinear distance. SIAM Journal on Applied
+Mathematics 14(2), 255–265 (1966)
+[17] Hart, P.E., Nilsson, N.J., Raphael, B.: A formal basis for the heuristic determination
+of minimum cost paths. IEEE Transactions on Systems Science and Cybernetics
+SSC-4(2), 100–107 (1968)
+
+===== PAGE 23 =====
+
+23
+[18] Held, M., Karp, R.M.: A dynamic programming approach to sequencing problems.
+Journal of the Society for Industrial and Applied Mathematics 10(1), 196–210
+(1962). DOI 10.2307/2098806
+[19] Held, M., Karp, R.M.: The traveling salesman problem and minimum spanning trees.
+Operations Research 18, 1138–1162 (1970)
+[20] Held, S., Korte, B., Rautenbach, D., Vygen, J.: Combinatorial optimization in VLSI
+design. In: Combinatorial Optimization - Methods and Applications, pp. 33–96. IOS
+Press (2011)
+[21] Hwang, F.K.: On Steiner minimal trees with rectilinear distance. SIAM journal on
+Applied Mathematics 30(1), 104–114 (1976)
+[22] Karp, R.M.: Reducibility among combinatorial problems. In: R. Miller, J. Thatcher
+(eds.) Complexity of Computer Computations, pp. 85–103. Plenum Press (1972)
+[23] Koch, T., Martin, A.: Solving Steiner tree problems in graphs to optimality. Net-
+works 32, 207–232 (1998)
+[24] Polzin, T.: Algorithms for the Steiner problem in networks. Ph.D. thesis (2004)
+[25] Polzin, T., Vahdati, S.: Extending reduction techniques for the Steiner tree problem:
+A combination of alternative- and bound-based approaches. Tech. Rep. MPI-I-2001-
+1-007, Max-Planck-Institut f¨ ur Informatik (2001)
+[26] Polzin, T., Vahdati Daneshmand, S.: Practical partitioning-based methods for the
+Steiner problem. In: C. `Alvarez, M. Serna (eds.) Experimental Algorithms, Lec-
+ture Notes in Computer Science , vol. 4007, pp. 241–252. Springer Berlin Heidelberg
+(2006)
+[27] Polzin, T., Vahdati Daneshmand, S.: The Steiner Tree Challenge: An up-
+dated Study (2014). URL http://dimacs11.cs.princeton.edu/papers/
+PolzinVahdatiDIMACS.pdf
+[28] Prim, R.C.: Shortest connection networks and some generalizations. Bell System
+Technology Journal 36, 1389–1401 (1957)
+[29] Silvanus, J.: Fast exact Steiner tree generation using dynamic programming. Mas-
+ter’s thesis, Research Institute for Discrete Mathematics, University of Bonn (2013)
+[30] Snyder, T.L.: On the exact location of Steiner points in general dimension. SIAM
+Journal on Computing 21(1), 163–180 (1992)
+[31] Uchoa, E., de Arag˜ ao, M., Ribeiro, C.: Preprocessing Steiner problems from VLSI
+layout. Tech. Rep. MCC 32/99, Catholic University of Rio de Janeiro, Rio de Janeiro
+(1999)
+[32] Vahdati Daneshmand, S.: Algorithmic approaches to the Steiner problem in net-
+works. Ph.D. thesis (2004)
+[33] Vygen, J.: Faster algorithm for optimum Steiner trees. Inf. Process. Lett. 111(21-
+22), 1075–1079 (2011)
+[34] Warme, D.M., Winter, P., Zachariasen, M.: Exact algorithms for plane Steiner tree
+problems: A computational study. Springer (2000)
+[35] Wong, R.: A dual ascent approach for Steiner tree problems on a directed graph.
+Mathematical Programming 28(3), 271–287 (1984)
+[36] Wulﬀ-Nilsen, C.: Higher dimensional rectilinear Steiner minimal trees. Master’s
+thesis, Department of Computer Science, University of Copenhagen (2006)
+
+===== PAGE 24 =====
+
+24
+A Results on Graphic DIMACS Instances
+We present detailed computational results on DIMACS testsets. Our implementation
+is limited to instances with less than 64 terminals, so we exclude instances with more
+terminals.
+The implementation of our algorithm is written in the C++ programming language
+and compiled using the GCC 4.8.2 compiler.
+The experiments were performed single-threaded on a machine with 3 .33 GHz Intel
+Xeon W5590 CPUs and 144 GB main memory which produced a score of 391.372724
+using the DIMACS benchmark code.
+For these experiments, we limited the memory consumption of the algorithm to
+100 GB and set the time limit to 7200 s. The reported run times do not include the
+time to read the instance ﬁle from disk.
+Instance |V| | E| | R| Opt Time [s]
+alue2087 1244 1971 34 1049 1 .075
+alue2105 1220 1858 34 1032 0 .204
+alue7066 6405 10454 16 2256 0 .068
+alue7229 940 1474 34 824 0 .036
+Table 3: Results on the testset ALUE. Type: VLSI-derived grid
+graphs with holes.
+Instance |V| | E| | R| Opt Time [s]
+alut0787 1160 2089 34 982 1 .769
+alut0805 966 1666 34 958 0 .258
+alut2764 387 626 34 640 0 .042
+Table 4: Results on the testset ALUT. Type: VLSI-derived grid
+graphs with holes.
+Instance |V| | E| | R| Opt Time [s]
+diw0234 5349 10086 25 1996 0 .096
+diw0250 353 608 11 350 0 .002
+diw0260 539 985 12 468 0 .003
+diw0313 468 822 14 397 0 .003
+diw0393 212 381 11 302 0 .002
+diw0445 1804 3311 33 1363 0 .061
+diw0459 3636 6789 25 1362 0 .042
+diw0460 339 579 13 345 0 .004
+diw0473 2213 4135 25 1098 0 .065
+diw0487 2414 4386 25 1424 0 .373
+diw0495 938 1655 10 616 0 .006
+diw0513 918 1684 10 604 0 .006
+diw0523 1080 2015 10 561 0 .005
+diw0540 286 465 10 374 0 .002
+
+===== PAGE 25 =====
+
+25
+Instance |V| | E| | R| Opt Time [s]
+diw0559 3738 7013 18 1570 0 .089
+diw0778 7231 13727 24 2173 0 .139
+diw0779 11821 22516 50 4440 1 .603
+diw0795 3221 5938 10 1550 0 .024
+diw0801 3023 5575 10 1587 0 .024
+diw0819 10553 20066 32 3399 0 .291
+diw0820 11749 22384 37 4167 1 .504
+Table 5: Results on the testset DIW. Type: VLSI-derived grid
+graphs with holes.
+Instance |V| | E| | R| Opt Time [s]
+dmxa0296 233 386 12 344 0 .002
+dmxa0368 2050 3676 18 1017 0 .019
+dmxa0454 1848 3286 16 914 0 .012
+dmxa0628 169 280 10 275 0 .002
+dmxa0734 663 1154 11 506 0 .006
+dmxa0848 499 861 16 594 0 .041
+dmxa0903 632 1087 10 580 0 .008
+dmxa1010 3983 7108 23 1488 0 .104
+dmxa1109 343 559 17 454 0 .007
+dmxa1200 770 1383 21 750 0 .069
+dmxa1304 298 503 10 311 0 .002
+dmxa1516 720 1269 11 508 0 .003
+dmxa1721 1005 1731 18 780 0 .012
+dmxa1801 2333 4137 17 1365 0 .049
+Table 6: Results on the testset DMXA. Type: VLSI-derived grid
+graphs with holes.
+Instance |V| | E| | R| Opt Time [s]
+gap1307 342 552 17 549 0 .057
+gap1413 541 906 10 457 0 .007
+gap1500 220 374 17 254 0 .003
+gap1810 429 702 17 482 0 .013
+gap1904 735 1256 21 763 0 .042
+gap2007 2039 3548 17 1104 0 .051
+gap2119 1724 2975 29 1244 0 .460
+gap2740 1196 2084 14 745 0 .011
+gap2800 386 653 12 386 0 .003
+gap2975 179 293 10 245 0 .001
+gap3036 346 583 13 457 0 .013
+gap3100 921 1558 11 640 0 .007
+Table 7: Results on the testset GAP. Type: VLSI-derived grid
+graphs with holes.
+
+===== PAGE 26 =====
+
+26
+Instance |V| | E| | R| Opt Time [s]
+lin01 53 80 4 503 0 .000
+lin02 55 82 6 557 0 .000
+lin03 57 84 8 926 0 .001
+lin04 157 266 6 1239 0 .001
+lin05 160 269 9 1703 0 .002
+lin06 165 274 14 1348 0 .004
+lin07 307 526 6 1885 0 .002
+lin08 311 530 10 2248 0 .002
+lin09 313 532 12 2752 0 .004
+lin10 321 540 20 4132 0 .017
+lin11 816 1460 10 4280 0 .013
+lin12 818 1462 12 5250 0 .017
+lin13 822 1466 16 4609 0 .017
+lin14 828 1472 22 5824 0 .023
+lin15 840 1484 34 7145 0 .088
+lin16 1981 3633 12 6618 0 .032
+lin17 1989 3641 20 8405 0 .051
+lin18 1994 3646 25 9714 0 .475
+lin19 2010 3662 41 13268 10 .966
+lin20 3675 6709 11 6673 0 .029
+lin21 3683 6717 20 9143 0 .062
+lin22 3692 6726 28 10519 0 .129
+lin23 3716 6750 52 17560 11 .080
+lin24 7998 14734 16 15076 0 .104
+lin25 8007 14743 24 17803 0 .291
+lin26 8013 14749 30 21757 0 .319
+lin27 8017 14753 36 20678 1 .577
+lin29 19083 35636 24 23765 1 .746
+lin30 19091 35644 31 27684 0 .681
+lin31 19100 35653 40 31696 34 .061
+lin32 19112 35665 53 39832 150 .201
+lin34 38282 71521 34 45018 12 .930
+lin35 38294 71533 45 50559 26 .904
+lin36 38307 71546 58 55608 47 .590
+Table 8: Results on the testset LIN. Type: VLSI-derived grid graphs
+with holes.
+Instance |V| | E| | R| Opt Time [s]
+msm0580 338 541 11 467 0 .006
+msm0654 1290 2270 10 823 0 .007
+msm0709 1442 2403 16 884 0 .010
+msm0920 752 1264 26 806 0 .041
+msm1008 402 695 11 494 0 .008
+msm1234 933 1632 13 550 0 .007
+msm1477 1199 2078 31 1068 0 .259
+
+===== PAGE 27 =====
+
+27
+Instance |V| | E| | R| Opt Time [s]
+msm1707 278 478 11 564 0 .001
+msm1844 90 135 10 188 0 .001
+msm1931 875 1522 10 604 0 .003
+msm2000 898 1562 10 594 0 .004
+msm2152 2132 3702 37 1590 0 .269
+msm2326 418 723 14 399 0 .003
+msm2492 4045 7094 12 1459 0 .035
+msm2525 3031 5239 12 1290 0 .016
+msm2601 2961 5100 16 1440 0 .042
+msm2705 1359 2458 13 714 0 .017
+msm2802 1709 2963 18 926 0 .028
+msm3277 1704 2991 12 869 0 .021
+msm3676 957 1554 10 607 0 .006
+msm3727 4640 8255 21 1376 0 .079
+msm3829 4221 7255 12 1571 0 .042
+msm4038 237 390 11 353 0 .003
+msm4114 402 690 16 393 0 .004
+msm4190 391 666 16 381 0 .005
+msm4224 191 302 11 311 0 .002
+msm4312 5181 8893 10 2016 0 .042
+msm4414 317 476 11 408 0 .003
+msm4515 777 1358 13 630 0 .013
+Table 9: Results on the testset MSM. Type: VLSI-derived grid
+graphs with holes.
+Instance |V| | E| | R| Opt Time [s]
+taq0023 572 963 11 621 0 .007
+taq0365 4186 7074 22 1914 0 .079
+taq0431 1128 1905 13 897 0 .017
+taq0631 609 932 10 581 0 .008
+taq0739 837 1438 16 848 0 .019
+taq0741 712 1217 16 847 0 .024
+taq0751 1051 1791 16 939 0 .032
+taq0891 331 560 10 319 0 .003
+taq0910 310 514 17 370 0 .010
+taq0920 122 194 17 210 0 .003
+taq0978 777 1239 10 566 0 .005
+Table 10: Results on the testset TAQ. Type: VLSI-derived grid
+graphs with holes.
+
+===== PAGE 28 =====
+
+28
+Instance |V| | E| | R| Opt Time [s]
+1r111 1250 4704 6 28000 0 .006
+1r112 1250 4704 6 28000 0 .005
+1r113 1250 4704 6 26000 0 .005
+1r121 1250 4704 6 36000 0 .004
+1r122 1250 4704 6 45000 0 .006
+1r123 1250 4704 6 40000 0 .004
+1r131 1250 4704 6 43000 0 .005
+1r132 1250 4704 6 37000 0 .005
+1r133 1250 4704 6 36000 0 .004
+1r211 1250 4704 31 77000 0 .344
+1r212 1250 4704 30 81000 0 .066
+1r213 1250 4704 29 70000 0 .720
+1r221 1250 4704 31 79000 0 .147
+1r222 1250 4704 31 68000 0 .059
+1r223 1250 4704 31 77000 0 .097
+1r231 1250 4704 30 80000 0 .146
+1r232 1250 4704 29 86000 0 .307
+1r233 1250 4704 31 71000 1 .551
+1r311 1250 4704 56 – timeout
+1r312 1250 4704 60 113000 1276 .770
+1r313 1250 4704 58 106000 496 .549
+1r321 1250 4704 59 – timeout
+1r322 1250 4704 60 113000 1612 .443
+1r323 1250 4704 60 – timeout
+1r331 1250 4704 58 103000 1 .107
+1r332 1250 4704 58 109000 50 .351
+1r333 1250 4704 58 113000 1708 .425
+Table 11: Results on the testset 1R. Type: 2D grid graphs.
+Instance |V| | E| | R| Opt Time [s]
+2r111 2000 11600 9 28000 0 .015
+2r112 2000 11600 9 32000 0 .013
+2r113 2000 11600 9 28000 0 .011
+2r121 2000 11600 9 28000 0 .011
+2r122 2000 11600 9 29000 0 .011
+2r123 2000 11600 9 25000 0 .009
+2r131 2000 11600 9 27000 0 .012
+2r132 2000 11600 9 33000 0 .016
+2r133 2000 11600 9 29000 0 .011
+2r211 2000 11600 50 – memout
+2r212 2000 11600 49 80000 2819 .259
+2r213 2000 11600 48 76000 3152 .193
+2r221 2000 11600 50 – timeout
+2r222 2000 11600 50 – timeout
+2r223 2000 11600 49 – timeout
+
+===== PAGE 29 =====
+
+29
+Instance |V| | E| | R| Opt Time [s]
+2r231 2000 11600 50 – timeout
+2r232 2000 11600 49 – timeout
+2r233 2000 11600 47 – timeout
+Table 12: Results on the testset 2R. Type: 3D grid graphs.
+Instance |V| | E| | R| Opt Time [s]
+es10fst01 18 20 10 22920745 0 .000
+es10fst02 14 13 10 19134104 0 .000
+es10fst03 17 20 10 26003678 0 .000
+es10fst04 18 20 10 20461116 0 .000
+es10fst05 12 11 10 18818916 0 .000
+es10fst06 17 20 10 26540768 0 .000
+es10fst07 14 13 10 26025072 0 .000
+es10fst08 21 28 10 25056214 0 .000
+es10fst09 21 29 10 22062355 0 .000
+es10fst10 18 21 10 23936095 0 .000
+es10fst11 14 13 10 22239535 0 .000
+es10fst12 13 12 10 19626318 0 .000
+es10fst13 18 21 10 19483914 0 .000
+es10fst14 24 32 10 21856128 0 .000
+es10fst15 16 18 10 18641924 0 .000
+Table 13: Results on the testset ES10FST. Type: Rectilinear in-
+stances after FST-preprocessing by GeoSteiner.
+Instance |V| | E| | R| Opt Time [s]
+es20fst01 29 28 20 33703886 0 .004
+es20fst02 29 28 20 32639486 0 .001
+es20fst03 27 26 20 27847417 0 .001
+es20fst04 57 83 20 27624394 0 .003
+es20fst05 54 77 20 34033163 0 .002
+es20fst06 29 28 20 36014241 0 .001
+es20fst07 45 59 20 34934874 0 .002
+es20fst08 52 74 20 38016346 0 .014
+es20fst09 36 42 20 36739939 0 .003
+es20fst10 49 67 20 34024740 0 .002
+es20fst11 33 36 20 27123908 0 .001
+es20fst12 33 36 20 30451397 0 .005
+es20fst13 35 40 20 34438673 0 .003
+es20fst14 36 44 20 34062374 0 .009
+es20fst15 37 43 20 32303746 0 .003
+Table 14: Results on the testset ES20FST. Type: Rectilinear in-
+stances after FST-preprocessing by GeoSteiner.
+
+===== PAGE 30 =====
+
+30
+Instance |V| | E| | R| Opt Time [s]
+es30fst01 79 115 30 40692993 0 .037
+es30fst02 71 97 30 40900061 0 .029
+es30fst03 83 120 30 43120444 0 .019
+es30fst04 80 115 30 42150958 0 .010
+es30fst05 58 71 30 41739748 0 .007
+es30fst06 83 119 30 39955139 0 .053
+es30fst07 53 64 30 43761391 0 .007
+es30fst08 69 93 30 41691217 0 .008
+es30fst09 43 44 30 37133658 0 .010
+es30fst10 48 52 30 42686610 0 .009
+es30fst11 79 112 30 41647993 0 .007
+es30fst12 46 48 30 38416720 0 .013
+es30fst13 65 84 30 37406646 0 .005
+es30fst14 53 58 30 42897025 0 .021
+es30fst15 118 188 30 43035576 0 .070
+Table 15: Results on the testset ES30FST. Type: Rectilinear in-
+stances after FST-preprocessing by GeoSteiner.
+Instance |V| | E| | R| Opt Time [s]
+es40fst01 93 127 40 44841522 0 .036
+es40fst02 82 105 40 46811310 0 .016
+es40fst03 87 116 40 49974157 0 .093
+es40fst04 55 55 40 45289864 0 .013
+es40fst05 121 180 40 51940413 0 .133
+es40fst06 92 123 40 49753385 0 .046
+es40fst07 77 95 40 45639009 0 .109
+es40fst08 98 137 40 48745996 0 .016
+es40fst09 107 153 40 51761789 0 .040
+es40fst10 107 152 40 57136852 0 .117
+es40fst11 97 135 40 46734214 0 .027
+es40fst12 67 75 40 43843378 0 .029
+es40fst13 78 95 40 51884545 0 .030
+es40fst14 98 134 40 49166952 0 .030
+es40fst15 93 129 40 50828067 0 .050
+Table 16: Results on the testset ES40FST. Type: Rectilinear in-
+stances after FST-preprocessing by GeoSteiner.
+Instance |V| | E| | R| Opt Time [s]
+es50fst01 118 160 50 54948660 0 .053
+es50fst02 125 177 50 55484245 0 .474
+es50fst03 128 182 50 54691035 0 .075
+es50fst04 106 138 50 51535766 0 .348
+
+===== PAGE 31 =====
+
+31
+Instance |V| | E| | R| Opt Time [s]
+es50fst05 104 135 50 55186015 0 .280
+es50fst06 126 182 50 55804287 0 .539
+es50fst07 143 211 50 49961178 0 .049
+es50fst08 83 96 50 53754708 0 .089
+es50fst09 139 202 50 53456773 0 .538
+es50fst10 139 207 50 54037963 3 .006
+es50fst11 100 131 50 52532923 0 .019
+es50fst12 110 149 50 53409291 0 .172
+es50fst13 92 116 50 53891019 0 .032
+es50fst14 120 167 50 53551419 0 .082
+es50fst15 112 147 50 52180862 0 .105
+Table 17: Results on the testset ES50FST. Type: Rectilinear in-
+stances after FST-preprocessing by GeoSteiner.
+Instance |V| | E| | R| Opt Time [s]
+es60fst01 123 159 60 53761423 0 .436
+es60fst02 186 280 60 55367804 3 .033
+es60fst03 113 142 60 56566797 0 .066
+es60fst04 162 238 60 55371042 0 .118
+es60fst05 119 148 60 54704991 0 .059
+es60fst06 130 174 60 60421961 1 .064
+es60fst07 188 280 60 58978041 0 .073
+es60fst08 109 133 60 58138178 0 .366
+es60fst09 151 216 60 55877112 0 .493
+es60fst10 133 177 60 57624488 0 .039
+es60fst11 121 154 60 56141666 0 .523
+es60fst12 176 257 60 59791362 3 .289
+es60fst13 157 226 60 61213533 0 .091
+es60fst14 118 149 60 56035528 0 .058
+es60fst15 117 151 60 56622581 0 .104
+Table 18: Results on the testset ES60FST. Type: Rectilinear in-
+stances after FST-preprocessing by GeoSteiner.
+Instance |V| | E| | R| Opt Time [s]
+att48fst 139 202 48 30236 0 .453
+berlin52fst 89 104 52 6760 33 .108
+eil51fst 181 289 51 409 513 .690
+Table 19: Results on the testset TSPFST. Type: Rectilinear in-
+stances after FST-preprocessing by GeoSteiner.
+
+===== PAGE 32 =====
+
+32
+Instance |V| | E| | R| Opt Time [s]
+ind1 18 31 10 604 0 .001
+ind2 31 57 10 9500 0 .001
+ind3 16 23 10 600 0 .000
+ind4 74 146 25 1086 0 .023
+ind5 114 228 33 1341 0 .021
+rc01 21 35 10 25980 0 .000
+rc02 87 176 30 41350 0 .029
+rc03 109 202 50 54160 0 .153
+rt01 262 740 10 2146 0 .002
+rt02 788 1938 50 45852 0 .703
+Table 20: Results on the testset Copenhagen14. Type: Instances of
+the Obstacle-avoiding rectilinear Steiner tree problem after FST-
+preprocessing by ObSteiner and merging the FSTs into a single
+graph.
+Instance |V| | E| | R| Opt Time [s]
+wrp3-11 128 227 11 1100361 0 .099
+wrp3-12 84 149 12 1200237 0 .123
+wrp3-13 311 613 13 1300497 20 .014
+wrp3-14 128 247 14 1400250 3 .780
+wrp3-15 138 257 15 1500422 51 .156
+wrp3-16 204 374 16 1600208 11 .622
+wrp3-17 177 354 17 1700442 422 .079
+wrp3-19 189 353 19 1900439 1765 .723
+wrp3-20 245 454 20 – timeout
+wrp3-21 237 444 21 – timeout
+wrp3-22 233 431 22 – timeout
+wrp3-23 132 230 23 – timeout
+wrp3-24 262 487 24 – timeout
+wrp3-25 246 468 25 – memout
+wrp3-26 402 780 26 – memout
+wrp3-27 370 721 27 – timeout
+wrp3-28 307 559 28 – memout
+wrp3-29 245 436 29 – memout
+wrp3-30 467 896 30 – memout
+wrp3-31 323 592 31 – timeout
+wrp3-33 437 838 33 – memout
+wrp3-34 1244 2474 34 – memout
+wrp3-36 435 818 36 – memout
+wrp3-37 1011 2010 37 – memout
+wrp3-38 603 1207 38 – timeout
+wrp3-39 703 1616 39 – memout
+wrp3-41 178 307 41 – memout
+
+===== PAGE 33 =====
+
+33
+Instance |V| | E| | R| Opt Time [s]
+wrp3-42 705 1373 42 – memout
+wrp3-43 173 298 43 – memout
+wrp3-45 1414 2813 45 – memout
+wrp3-48 925 1738 48 – memout
+wrp3-49 886 1800 49 – memout
+wrp3-50 1119 2251 50 – memout
+wrp3-52 701 1352 52 – memout
+wrp3-53 775 1471 53 – memout
+wrp3-55 1645 3186 55 – memout
+wrp3-56 853 1590 56 – memout
+wrp3-60 838 1763 60 – memout
+wrp3-62 670 1316 62 – memout
+Table 21: Results on the testset WRP3. Type: Group Steiner tree
+instances arising from VLSI design modeled as Steiner tree in-
+stances by connecting each terminal to the vertices if its group
+by edges of very high cost.
+Instance |V| | E| | R| Opt Time [s]
+wrp4-11 123 233 11 1100179 0 .241
+wrp4-13 110 188 13 1300798 0 .019
+wrp4-14 145 283 14 1400290 2 .798
+wrp4-15 193 369 15 1500405 8 .193
+wrp4-16 311 579 16 1601190 149 .542
+wrp4-17 223 404 17 1700525 69 .524
+wrp4-18 211 380 18 1801464 1212 .777
+wrp4-19 119 206 19 1901446 0 .925
+wrp4-21 529 1032 21 – timeout
+wrp4-22 294 568 22 – timeout
+wrp4-23 257 515 23 – memout
+wrp4-24 493 963 24 – memout
+wrp4-25 422 808 25 – memout
+wrp4-26 396 781 26 – memout
+wrp4-27 243 497 27 – memout
+wrp4-28 272 545 28 – memout
+wrp4-29 247 505 29 – memout
+wrp4-30 361 724 30 – memout
+wrp4-31 390 786 31 – memout
+wrp4-32 311 632 32 – memout
+wrp4-33 304 571 33 – timeout
+wrp4-34 314 650 34 – memout
+wrp4-35 471 954 35 – memout
+wrp4-36 363 750 36 – memout
+wrp4-37 522 1054 37 – memout
+
+===== PAGE 34 =====
+
+34
+Instance |V| | E| | R| Opt Time [s]
+wrp4-38 294 618 38 – memout
+wrp4-39 802 1553 39 – memout
+wrp4-40 538 1088 40 – memout
+wrp4-41 465 955 41 – memout
+wrp4-42 552 1131 42 – memout
+wrp4-43 596 1148 43 – timeout
+wrp4-44 398 788 44 – memout
+wrp4-45 388 815 45 – memout
+wrp4-46 632 1287 46 – memout
+wrp4-47 555 1098 47 – memout
+wrp4-48 451 825 48 – timeout
+wrp4-49 557 1080 49 – memout
+wrp4-50 564 1112 50 – memout
+wrp4-51 668 1306 51 – memout
+wrp4-52 547 1115 52 – memout
+wrp4-53 615 1232 53 – memout
+wrp4-54 688 1388 54 – memout
+wrp4-55 610 1201 55 – memout
+wrp4-56 839 1617 56 – memout
+wrp4-58 757 1493 58 – memout
+wrp4-59 904 1806 59 – memout
+wrp4-60 693 1370 60 – memout
+wrp4-61 775 1538 61 – timeout
+wrp4-62 1283 2493 62 – memout
+wrp4-63 1121 2227 63 – memout
+Table 22: Results on the testset WRP4. Type: Group Steiner tree
+instances arising from VLSI design modeled as Steiner tree in-
+stances by connecting each terminal to the vertices if its group
+by edges of very high cost.
+Instance |V| | E| | R| Opt Time [s]
+I052a 160 237 23 13309487 0 .013
+I054a 540 817 25 15841596 0 .021
+I056a 290 439 34 14171206 0 .086
+Table 23: Results on the testset vienna-i-advanced. Type: Real-
+world telecommunication networks after an “advanced” preprocess-
+ing routine. We report the cost of an optimum solution in the orig-
+inal instance, computed as the sum of an optimum solution in the
+reduced instance and the ﬁxed cost induced by the reductions.
+
+===== PAGE 35 =====
+
+35
+Instance |V| | E| | R| Opt Time [s]
+I052 2363 3761 40 – timeout
+I054 3803 6213 38 – timeout
+I056 1991 3176 51 – timeout
+Table 24: Results on the testset vienna-i-simple. Type: Real-world
+telecommunication networks after a “simple” preprocessing rou-
+tine.
+Instance |V| | E| | R| Opt Time [s]
+berlin52 52 1326 16 1044 0 .013
+brasil58 58 1653 25 13655 0 .005
+Table 25: Results on the testset X. Type: Complete graphs with
+Euclidean costs.
+Instance |V| | E| | R| Opt Time [s]
+p455 100 4950 5 1138 0 .001
+p456 100 4950 5 1228 0 .001
+p457 100 4950 10 1609 0 .001
+p458 100 4950 10 1868 0 .002
+p459 100 4950 20 2345 0 .003
+p460 100 4950 20 2959 0 .005
+p461 100 4950 50 4474 0 .030
+p463 200 19900 10 1510 0 .005
+p464 200 19900 20 2545 0 .012
+p465 200 19900 40 3853 0 .066
+Table 26: Results on the testset P4E. Type: Complete graphs with
+Euclidean costs.
+Instance |V| | E| | R| Opt Time [s]
+p401 100 4950 5 155 0 .001
+p402 100 4950 5 116 0 .001
+p403 100 4950 5 179 0 .001
+p404 100 4950 10 270 0 .001
+p405 100 4950 10 270 0 .002
+p406 100 4950 10 290 0 .003
+p407 100 4950 20 590 0 .257
+p408 100 4950 20 542 0 .154
+p409 100 4950 50 963 4350 .849
+p410 100 4950 50 1010 245 .304
+Table 27: Results on the testset P4Z. Type: Complete graphs with
+random costs.
+
+===== PAGE 36 =====
+
+36
+Instance |V| | E| | R| Opt Time [s]
+p619 100 180 5 7485 0 .001
+p620 100 180 5 8746 0 .001
+p621 100 180 5 8688 0 .001
+p622 100 180 10 15972 0 .001
+p623 100 180 10 19496 0 .002
+p624 100 180 20 20246 0 .003
+p625 100 180 20 23078 0 .003
+p626 100 180 20 22346 0 .011
+p627 100 180 50 40647 0 .023
+p628 100 180 50 40008 0 .052
+p629 100 180 50 43287 0 .043
+p630 200 370 10 26125 0 .001
+p631 200 370 20 39067 0 .010
+p632 200 370 40 56217 0 .038
+Table 28: Results on the testset P6E. Type: Sparse graphs with
+Euclidean costs.
+Instance |V| | E| | R| Opt Time [s]
+p602 100 180 5 8083 0 .001
+p603 100 180 5 5022 0 .001
+p604 100 180 10 11397 0 .001
+p605 100 180 10 10355 0 .001
+p606 100 180 11 13048 0 .001
+p607 100 180 21 15358 0 .003
+p608 100 180 21 14439 0 .002
+p609 100 180 20 18263 0 .004
+p610 100 180 50 30161 0 .034
+p611 100 180 50 26903 0 .090
+p612 100 180 50 30258 0 .107
+p613 200 370 10 18429 0 .001
+p614 200 370 20 27276 0 .017
+p615 200 370 40 42474 0 .049
+Table 29: Results on the testset P6Z. Type: Sparse graphs with
+random costs.
+Instance |V| | E| | R| Opt Time [s]
+b01 50 63 9 82 0 .001
+b02 50 63 13 83 0 .003
+b03 50 63 25 138 0 .136
+b04 50 100 9 59 0 .001
+b05 50 100 13 61 0 .008
+b06 50 100 25 122 0 .256
+b07 75 94 13 111 0 .005
+
+===== PAGE 37 =====
+
+37
+Instance |V| | E| | R| Opt Time [s]
+b08 75 94 19 104 0 .004
+b09 75 94 38 220 1858 .382
+b10 75 150 13 86 0 .006
+b11 75 150 19 88 0 .019
+b12 75 150 38 174 98 .165
+b13 100 125 17 165 0 .111
+b14 100 125 25 235 1 .704
+b15 100 125 50 318 176 .192
+b16 100 200 17 127 0 .008
+b17 100 200 25 131 266 .814
+b18 100 200 50 218 3228 .991
+Table 30: Results on the testset B. Type: Random sparse graphs
+with random costs.
+Instance |V| | E| | R| Opt Time [s]
+c01 500 625 5 85 0 .002
+c02 500 625 10 144 0 .005
+c06 500 1000 5 55 0 .003
+c07 500 1000 10 102 0 .024
+c11 500 2500 5 32 0 .004
+c12 500 2500 10 46 0 .012
+c16 500 12500 5 11 0 .005
+c17 500 12500 10 18 0 .011
+Table 31: Results on the testset C. Type: Random sparse graphs
+with random costs.
+Instance |V| | E| | R| Opt Time [s]
+d01 1000 1250 5 106 0 .004
+d02 1000 1250 10 220 0 .052
+d06 1000 2000 5 67 0 .004
+d07 1000 2000 10 103 0 .010
+d11 1000 5000 5 29 0 .007
+d12 1000 5000 10 42 0 .016
+d16 1000 25000 5 13 0 .011
+d17 1000 25000 10 23 0 .072
+Table 32: Results on the testset D. Type: Random sparse graphs
+with random costs.
+
+===== PAGE 38 =====
+
+38
+Instance |V| | E| | R| Opt Time [s]
+e01 2500 3125 5 111 0 .007
+e02 2500 3125 10 214 0 .045
+e06 2500 5000 5 73 0 .008
+e07 2500 5000 10 145 0 .230
+e11 2500 12500 5 34 0 .009
+e12 2500 12500 10 67 0 .161
+e16 2500 62500 5 15 0 .016
+e17 2500 62500 10 25 0 .124
+Table 33: Results on the testset E. Type: Random sparse graphs
+with random costs.
+Instance |V| | E| | R| Opt Time [s]
+i080-001 80 120 6 1787 0 .001
+i080-002 80 120 6 1607 0 .000
+i080-003 80 120 6 1713 0 .000
+i080-004 80 120 6 1866 0 .000
+i080-005 80 120 6 1790 0 .001
+i080-011 80 350 6 1479 0 .001
+i080-012 80 350 6 1484 0 .001
+i080-013 80 350 6 1381 0 .001
+i080-014 80 350 6 1397 0 .001
+i080-015 80 350 6 1495 0 .001
+i080-021 80 3160 6 1175 0 .004
+i080-022 80 3160 6 1178 0 .004
+i080-023 80 3160 6 1174 0 .004
+i080-024 80 3160 6 1161 0 .004
+i080-025 80 3160 6 1162 0 .004
+i080-031 80 160 6 1570 0 .001
+i080-032 80 160 6 2088 0 .001
+i080-033 80 160 6 1794 0 .001
+i080-034 80 160 6 1688 0 .001
+i080-035 80 160 6 1862 0 .001
+i080-041 80 632 6 1276 0 .001
+i080-042 80 632 6 1287 0 .001
+i080-043 80 632 6 1295 0 .001
+i080-044 80 632 6 1366 0 .001
+i080-045 80 632 6 1310 0 .001
+i080-101 80 120 8 2608 0 .001
+i080-102 80 120 8 2403 0 .001
+i080-103 80 120 8 2603 0 .002
+i080-104 80 120 8 2486 0 .002
+i080-105 80 120 8 2203 0 .001
+i080-111 80 350 8 2051 0 .008
+i080-112 80 350 8 1885 0 .006
+
+===== PAGE 39 =====
+
+39
+Instance |V| | E| | R| Opt Time [s]
+i080-113 80 350 8 1884 0 .004
+i080-114 80 350 8 1895 0 .005
+i080-115 80 350 8 1868 0 .004
+i080-121 80 3160 8 1561 0 .023
+i080-122 80 3160 8 1561 0 .023
+i080-123 80 3160 8 1569 0 .023
+i080-124 80 3160 8 1555 0 .022
+i080-125 80 3160 8 1572 0 .024
+i080-131 80 160 8 2284 0 .001
+i080-132 80 160 8 2180 0 .003
+i080-133 80 160 8 2261 0 .002
+i080-134 80 160 8 2070 0 .002
+i080-135 80 160 8 2102 0 .001
+i080-141 80 632 8 1788 0 .009
+i080-142 80 632 8 1708 0 .009
+i080-143 80 632 8 1767 0 .016
+i080-144 80 632 8 1772 0 .015
+i080-145 80 632 8 1762 0 .013
+i080-201 80 120 16 4760 0 .128
+i080-202 80 120 16 4650 0 .111
+i080-203 80 120 16 4599 0 .891
+i080-204 80 120 16 4492 8 .025
+i080-205 80 120 16 4564 0 .615
+i080-211 80 350 16 3631 108 .657
+i080-212 80 350 16 3677 104 .799
+i080-213 80 350 16 3678 106 .887
+i080-214 80 350 16 3734 107 .154
+i080-215 80 350 16 3681 107 .424
+i080-221 80 3160 16 3158 111 .565
+i080-222 80 3160 16 3141 113 .026
+i080-223 80 3160 16 3156 112 .402
+i080-224 80 3160 16 3159 114 .264
+i080-225 80 3160 16 3150 114 .489
+i080-231 80 160 16 4354 32 .829
+i080-232 80 160 16 4199 26 .645
+i080-233 80 160 16 4118 16 .691
+i080-234 80 160 16 4274 0 .898
+i080-235 80 160 16 4487 2 .326
+i080-241 80 632 16 3538 146 .827
+i080-242 80 632 16 3458 141 .589
+i080-243 80 632 16 3474 139 .922
+i080-244 80 632 16 3466 143 .147
+i080-245 80 632 16 3467 142 .418
+i080-301 80 120 20 5519 38 .991
+i080-302 80 120 20 5944 10 .556
+i080-303 80 120 20 5777 19 .155
+
+===== PAGE 40 =====
+
+40
+Instance |V| | E| | R| Opt Time [s]
+i080-304 80 120 20 5586 6 .392
+i080-305 80 120 20 5932 201 .235
+i080-311 80 350 20 – timeout
+i080-312 80 350 20 – timeout
+i080-313 80 350 20 – timeout
+i080-314 80 350 20 – timeout
+i080-315 80 350 20 – timeout
+i080-321 80 3160 20 – timeout
+i080-322 80 3160 20 – timeout
+i080-323 80 3160 20 – timeout
+i080-324 80 3160 20 – timeout
+i080-325 80 3160 20 – timeout
+i080-331 80 160 20 5226 814 .502
+i080-332 80 160 20 5362 902 .230
+i080-333 80 160 20 5381 541 .448
+i080-334 80 160 20 5264 920 .974
+i080-335 80 160 20 4953 1004 .156
+i080-341 80 632 20 – timeout
+i080-342 80 632 20 – timeout
+i080-343 80 632 20 – timeout
+i080-344 80 632 20 – timeout
+i080-345 80 632 20 – timeout
+Table 34: Results on the testset I080. Type: Random graphs with
+so-called incidence costs, designed to defy preprocessing.
+Instance |V| | E| | R| Opt Time [s]
+i160-001 160 240 7 2490 0 .004
+i160-002 160 240 7 2158 0 .001
+i160-003 160 240 7 2297 0 .002
+i160-004 160 240 7 2370 0 .002
+i160-005 160 240 7 2495 0 .002
+i160-011 160 812 7 1677 0 .007
+i160-012 160 812 7 1750 0 .008
+i160-013 160 812 7 1661 0 .005
+i160-014 160 812 7 1778 0 .008
+i160-015 160 812 7 1768 0 .009
+i160-021 160 12720 7 1352 0 .055
+i160-022 160 12720 7 1365 0 .057
+i160-023 160 12720 7 1351 0 .056
+i160-024 160 12720 7 1371 0 .058
+i160-025 160 12720 7 1366 0 .054
+i160-031 160 320 7 2170 0 .003
+i160-032 160 320 7 2330 0 .003
+i160-033 160 320 7 2101 0 .005
+
+===== PAGE 41 =====
+
+41
+Instance |V| | E| | R| Opt Time [s]
+i160-034 160 320 7 2083 0 .003
+i160-035 160 320 7 2103 0 .004
+i160-041 160 2544 7 1494 0 .013
+i160-042 160 2544 7 1486 0 .013
+i160-043 160 2544 7 1549 0 .016
+i160-044 160 2544 7 1478 0 .011
+i160-045 160 2544 7 1554 0 .015
+i160-101 160 240 12 3859 0 .082
+i160-102 160 240 12 3747 0 .205
+i160-103 160 240 12 3837 0 .093
+i160-104 160 240 12 4063 0 .014
+i160-105 160 240 12 3563 0 .034
+i160-111 160 812 12 2869 1 .430
+i160-112 160 812 12 2924 2 .304
+i160-113 160 812 12 2866 1 .575
+i160-114 160 812 12 2989 1 .949
+i160-115 160 812 12 2937 1 .436
+i160-121 160 12720 12 2363 5 .395
+i160-122 160 12720 12 2348 5 .355
+i160-123 160 12720 12 2355 5 .418
+i160-124 160 12720 12 2352 5 .330
+i160-125 160 12720 12 2351 5 .459
+i160-131 160 320 12 3356 0 .306
+i160-132 160 320 12 3450 0 .205
+i160-133 160 320 12 3585 0 .345
+i160-134 160 320 12 3470 0 .095
+i160-135 160 320 12 3716 0 .286
+i160-141 160 2544 12 2549 3 .398
+i160-142 160 2544 12 2562 3 .434
+i160-143 160 2544 12 2557 2 .955
+i160-144 160 2544 12 2607 3 .238
+i160-145 160 2544 12 2578 3 .451
+i160-201 160 240 24 – timeout
+i160-202 160 240 24 – timeout
+i160-203 160 240 24 7243 4173 .679
+i160-204 160 240 24 – timeout
+i160-205 160 240 24 – timeout
+i160-211 160 812 24 – timeout
+i160-212 160 812 24 – timeout
+i160-213 160 812 24 – timeout
+i160-214 160 812 24 – timeout
+i160-215 160 812 24 – timeout
+i160-221 160 12720 24 – timeout
+i160-222 160 12720 24 – timeout
+i160-223 160 12720 24 – timeout
+i160-224 160 12720 24 – timeout
+
+===== PAGE 42 =====
+
+42
+Instance |V| | E| | R| Opt Time [s]
+i160-225 160 12720 24 – timeout
+i160-231 160 320 24 – timeout
+i160-232 160 320 24 – timeout
+i160-233 160 320 24 – timeout
+i160-234 160 320 24 – timeout
+i160-235 160 320 24 – timeout
+i160-241 160 2544 24 – timeout
+i160-242 160 2544 24 – timeout
+i160-243 160 2544 24 – timeout
+i160-244 160 2544 24 – timeout
+i160-245 160 2544 24 – timeout
+i160-301 160 240 40 – memout
+i160-302 160 240 40 – memout
+i160-303 160 240 40 – memout
+i160-304 160 240 40 – memout
+i160-305 160 240 40 – memout
+i160-311 160 812 40 – memout
+i160-312 160 812 40 – memout
+i160-313 160 812 40 – memout
+i160-314 160 812 40 – memout
+i160-315 160 812 40 – memout
+i160-321 160 12720 40 – memout
+i160-322 160 12720 40 – memout
+i160-323 160 12720 40 – memout
+i160-324 160 12720 40 – memout
+i160-325 160 12720 40 – memout
+i160-331 160 320 40 – memout
+i160-332 160 320 40 – memout
+i160-333 160 320 40 – memout
+i160-334 160 320 40 – memout
+i160-335 160 320 40 – memout
+i160-341 160 2544 40 – memout
+i160-342 160 2544 40 – memout
+i160-343 160 2544 40 – memout
+i160-344 160 2544 40 – memout
+i160-345 160 2544 40 – memout
+Table 35: Results on the testset I160. Type: Random graphs with
+so-called incidence costs, designed to defy preprocessing.
+Instance |V| | E| | R| Opt Time [s]
+i320-001 320 480 8 2672 0 .003
+i320-002 320 480 8 2847 0 .004
+i320-003 320 480 8 2972 0 .004
+i320-004 320 480 8 2905 0 .007
+
+===== PAGE 43 =====
+
+43
+Instance |V| | E| | R| Opt Time [s]
+i320-005 320 480 8 2991 0 .006
+i320-011 320 1845 8 2053 0 .031
+i320-012 320 1845 8 1997 0 .023
+i320-013 320 1845 8 2072 0 .039
+i320-014 320 1845 8 2061 0 .035
+i320-015 320 1845 8 2059 0 .040
+i320-021 320 51040 8 1553 0 .366
+i320-022 320 51040 8 1565 0 .414
+i320-023 320 51040 8 1549 0 .373
+i320-024 320 51040 8 1553 0 .360
+i320-025 320 51040 8 1550 0 .360
+i320-031 320 640 8 2673 0 .011
+i320-032 320 640 8 2770 0 .010
+i320-033 320 640 8 2769 0 .010
+i320-034 320 640 8 2521 0 .005
+i320-035 320 640 8 2385 0 .007
+i320-041 320 10208 8 1707 0 .061
+i320-042 320 10208 8 1682 0 .050
+i320-043 320 10208 8 1723 0 .059
+i320-044 320 10208 8 1681 0 .067
+i320-045 320 10208 8 1686 0 .056
+i320-101 320 480 17 5548 16 .131
+i320-102 320 480 17 5556 10 .289
+i320-103 320 480 17 6239 178 .463
+i320-104 320 480 17 5703 108 .739
+i320-105 320 480 17 5928 84 .748
+i320-111 320 1845 17 4273 1706 .674
+i320-112 320 1845 17 4213 1872 .720
+i320-113 320 1845 17 4205 1464 .609
+i320-114 320 1845 17 4104 1581 .733
+i320-115 320 1845 17 4238 1747 .827
+i320-121 320 51040 17 3321 2381 .939
+i320-122 320 51040 17 3314 2336 .603
+i320-123 320 51040 17 3332 2379 .991
+i320-124 320 51040 17 3323 2342 .527
+i320-125 320 51040 17 3340 2353 .655
+i320-131 320 640 17 5255 343 .942
+i320-132 320 640 17 5052 33 .234
+i320-133 320 640 17 5125 44 .197
+i320-134 320 640 17 5272 374 .938
+i320-135 320 640 17 5342 211 .986
+i320-141 320 10208 17 3606 2246 .125
+i320-142 320 10208 17 3567 2305 .369
+i320-143 320 10208 17 3561 2244 .354
+i320-144 320 10208 17 3512 2244 .792
+i320-145 320 10208 17 3601 2261 .946
+
+===== PAGE 44 =====
+
+44
+Instance |V| | E| | R| Opt Time [s]
+i320-201 320 480 34 – memout
+i320-202 320 480 34 – memout
+i320-203 320 480 34 – memout
+i320-204 320 480 34 – memout
+i320-205 320 480 34 – memout
+i320-211 320 1845 34 – memout
+i320-212 320 1845 34 – memout
+i320-213 320 1845 34 – memout
+i320-214 320 1845 34 – memout
+i320-215 320 1845 34 – memout
+i320-221 320 51040 34 – memout
+i320-222 320 51040 34 – memout
+i320-223 320 51040 34 – memout
+i320-224 320 51040 34 – memout
+i320-225 320 51040 34 – memout
+i320-231 320 640 34 – memout
+i320-232 320 640 34 – memout
+i320-233 320 640 34 – memout
+i320-234 320 640 34 – memout
+i320-235 320 640 34 – memout
+i320-241 320 10208 34 – memout
+i320-242 320 10208 34 – memout
+i320-243 320 10208 34 – memout
+i320-244 320 10208 34 – memout
+i320-245 320 10208 34 – memout
+Table 36: Results on the testset I320. Type: Random graphs with
+so-called incidence costs, designed to defy preprocessing.
+Instance |V| | E| | R| Opt Time [s]
+i640-001 640 960 9 4033 0 .042
+i640-002 640 960 9 3588 0 .030
+i640-003 640 960 9 3438 0 .024
+i640-004 640 960 9 4000 0 .070
+i640-005 640 960 9 4006 0 .055
+i640-011 640 4135 9 2392 0 .163
+i640-012 640 4135 9 2465 0 .271
+i640-013 640 4135 9 2399 0 .205
+i640-014 640 4135 9 2171 0 .038
+i640-015 640 4135 9 2347 0 .126
+i640-021 640 204480 9 1749 4 .426
+i640-022 640 204480 9 1756 4 .031
+i640-023 640 204480 9 1754 4 .499
+i640-024 640 204480 9 1751 4 .081
+i640-025 640 204480 9 1745 4 .452
+
+===== PAGE 45 =====
+
+45
+Instance |V| | E| | R| Opt Time [s]
+i640-031 640 1280 9 3278 0 .065
+i640-032 640 1280 9 3187 0 .056
+i640-033 640 1280 9 3260 0 .062
+i640-034 640 1280 9 2953 0 .015
+i640-035 640 1280 9 3292 0 .033
+i640-041 640 40896 9 1897 0 .957
+i640-042 640 40896 9 1934 0 .811
+i640-043 640 40896 9 1931 0 .889
+i640-044 640 40896 9 1938 0 .975
+i640-045 640 40896 9 1866 0 .403
+i640-101 640 960 25 – timeout
+i640-102 640 960 25 – timeout
+i640-103 640 960 25 – timeout
+i640-104 640 960 25 – timeout
+i640-105 640 960 25 – timeout
+i640-111 640 4135 25 – memout
+i640-112 640 4135 25 – memout
+i640-113 640 4135 25 – memout
+i640-114 640 4135 25 – memout
+i640-115 640 4135 25 – memout
+i640-121 640 204480 25 – memout
+i640-122 640 204480 25 – memout
+i640-123 640 204480 25 – memout
+i640-124 640 204480 25 – memout
+i640-125 640 204480 25 – memout
+i640-131 640 1280 25 – timeout
+i640-132 640 1280 25 – timeout
+i640-133 640 1280 25 – timeout
+i640-134 640 1280 25 – timeout
+i640-135 640 1280 25 – timeout
+i640-141 640 40896 25 – memout
+i640-142 640 40896 25 – memout
+i640-143 640 40896 25 – memout
+i640-144 640 40896 25 – memout
+i640-145 640 40896 25 – memout
+i640-201 640 960 50 – memout
+i640-202 640 960 50 – memout
+i640-203 640 960 50 – memout
+i640-204 640 960 50 – memout
+i640-205 640 960 50 – memout
+i640-211 640 4135 50 – memout
+i640-212 640 4135 50 – memout
+i640-213 640 4135 50 – memout
+i640-214 640 4135 50 – memout
+i640-215 640 4135 50 – memout
+i640-221 640 204480 50 – memout
+
+===== PAGE 46 =====
+
+46
+Instance |V| | E| | R| Opt Time [s]
+i640-222 640 204480 50 – memout
+i640-223 640 204480 50 – memout
+i640-224 640 204480 50 – memout
+i640-225 640 204480 50 – memout
+i640-231 640 1280 50 – memout
+i640-232 640 1280 50 – memout
+i640-233 640 1280 50 – memout
+i640-234 640 1280 50 – memout
+i640-235 640 1280 50 – memout
+i640-241 640 40896 50 – memout
+i640-242 640 40896 50 – memout
+i640-243 640 40896 50 – memout
+i640-244 640 40896 50 – memout
+i640-245 640 40896 50 – memout
+Table 37: Results on the testset I640. Type: Random graphs with
+so-called incidence costs, designed to defy preprocessing.
+Instance |V| | E| | R| Opt Time [s]
+bipe2p 550 5013 50 – memout
+bipe2u 550 5013 50 – memout
+cc3-10p 1000 13500 50 – memout
+cc3-10u 1000 13500 50 – memout
+cc3-11p 1331 19965 61 – memout
+cc3-11u 1331 19965 61 – memout
+cc3-4p 64 288 8 2338 0 .006
+cc3-4u 64 288 8 23 0 .008
+cc3-5p 125 750 13 3661 3 .450
+cc3-5u 125 750 13 36 4 .637
+cc5-3p 243 1215 27 – memout
+cc5-3u 243 1215 27 – memout
+cc6-2p 64 192 12 3271 0 .166
+cc6-2u 64 192 12 32 0 .279
+hc6p 64 192 32 – memout
+hc6u 64 192 32 – memout
+Table 38: Results on the testset PUC. Type: Artiﬁcial instances
+designed to be hard for existing solvers.
+
+===== PAGE 47 =====
+
+47
+Instance |V| | E| | R| Opt Time [s]
+cc3-10n 1000 13500 50 – memout
+cc3-11n 1331 19965 61 – memout
+cc3-4n 64 288 8 13 0 .002
+cc3-5n 125 750 13 20 0 .563
+cc5-3n 243 1215 27 – memout
+cc6-2n 64 192 12 18 0 .047
+Table 39: Results on the testset SPG-PUCN. Type: Unweighted
+instances of the PUC testset, which contains artiﬁcial instances
+designed to be hard for existing solvers.
+Instance |V| | E| | R| Opt Time [s]
+antiwheel5 10 15 5 7 0 .000
+design432 8 20 4 9 0 .000
+oddcycle3 6 9 3 4 0 .000
+oddwheel3 7 9 4 5 0 .000
+se03 13 21 4 12 0 .000
+Table 40: Results on the testset SP. Type: Artiﬁcial instances.
+Instance |V| | E| | R| Opt Time [s]
+mc2 120 7140 60 – memout
+mc3 97 4656 45 – timeout
+Table 41: Results on the testset MC. Type: Artiﬁcial instances.
+Instance |V| | E| | R| Opt Time [s]
+csd02 3 2 1 0 0 .000
+csd03 6 6 3 4 0 .000
+csd04 10 12 6 8 0 .000
+csd05 15 20 10 13 0 .007
+csd06 21 30 15 19 2 .724
+csd07 28 42 21 26 6138 .678
+csd08 36 56 28 – timeout
+csd09 45 72 36 – memout
+csd10 55 90 45 – memout
+csd11 66 110 55 – memout
+Table 42: Results on the testset csd. Type: Artiﬁcial instances aris-
+ing from generalizations of Steiner tree LP gap examples.
+
+===== PAGE 48 =====
+
+48
+Instance |V| | E| | R| Opt Time [s]
+g01-00 7 9 3 8 0 .000
+g01-01 8 10 4 9 0 .000
+g01-02 9 11 5 10 0 .000
+g01-03 10 12 6 11 0 .000
+g01-04 11 13 7 12 0 .000
+g01-05 12 14 8 13 0 .001
+g01-06 13 15 9 14 0 .004
+g01-07 14 16 10 15 0 .007
+g01-08 15 17 11 16 0 .016
+g01-09 16 18 12 17 0 .067
+g01-10 17 19 13 18 0 .172
+g01-11 18 20 14 19 0 .490
+g01-12 19 21 15 20 2 .220
+g01-13 20 22 16 21 18 .637
+g01-14 21 23 17 22 42 .576
+g01-15 22 24 18 23 39 .915
+g02-00 9 16 4 14 0 .000
+g02-01 10 17 5 15 0 .000
+g02-02 11 18 6 16 0 .000
+g02-03 12 19 7 17 0 .000
+g02-04 13 20 8 18 0 .001
+g02-05 14 21 9 19 0 .004
+g02-06 15 22 10 20 0 .013
+g02-07 16 23 11 21 0 .035
+g02-08 17 24 12 22 0 .135
+g02-09 18 25 13 23 0 .352
+g02-10 19 26 14 24 1 .354
+g02-11 20 27 15 25 6 .346
+g02-12 21 28 16 26 25 .602
+g02-13 22 29 17 27 114 .366
+g02-14 23 30 18 28 300 .818
+g02-15 24 31 19 29 1171 .010
+g03-00 11 25 5 22 0 .000
+g03-01 12 26 6 23 0 .000
+g03-02 13 27 7 24 0 .000
+g03-03 14 28 8 25 0 .001
+g03-04 15 29 9 26 0 .004
+g03-05 16 30 10 27 0 .016
+g03-06 17 31 11 28 0 .067
+g03-07 18 32 12 29 0 .145
+g03-08 19 33 13 30 0 .417
+g03-09 20 34 14 31 1 .536
+g03-10 21 35 15 32 6 .411
+g03-11 22 36 16 33 28 .536
+g03-12 23 37 17 34 106 .674
+g03-13 24 38 18 35 407 .020
+
+===== PAGE 49 =====
+
+49
+Instance |V| | E| | R| Opt Time [s]
+g03-14 25 39 19 36 1414 .010
+g03-15 26 40 20 37 4935 .897
+g04-00 13 36 6 32 0 .000
+g04-01 14 37 7 33 0 .001
+g04-02 15 38 8 34 0 .002
+g04-03 16 39 9 35 0 .007
+g04-04 17 40 10 36 0 .022
+g04-05 18 41 11 37 0 .062
+g04-06 19 42 12 38 0 .155
+g04-07 20 43 13 39 0 .424
+g04-08 21 44 14 40 1 .571
+g04-09 22 45 15 41 6 .114
+g04-10 23 46 16 42 26 .880
+g04-11 24 47 17 43 103 .263
+g04-12 25 48 18 44 379 .413
+g04-13 26 49 19 45 1380 .378
+g04-14 27 50 20 46 4854 .754
+g04-15 28 51 21 – timeout
+g05-00 15 49 7 44 0 .001
+g05-01 16 50 8 45 0 .002
+g05-02 17 51 9 46 0 .007
+g05-03 18 52 10 47 0 .023
+g05-04 19 53 11 48 0 .065
+g05-05 20 54 12 49 0 .164
+g05-06 21 55 13 50 0 .417
+g05-07 22 56 14 51 1 .502
+g05-08 23 57 15 52 5 .839
+g05-09 24 58 16 53 22 .368
+g05-10 25 59 17 54 89 .853
+g05-11 26 60 18 55 331 .230
+g05-12 27 61 19 56 1183 .867
+g05-13 28 62 20 57 4559 .627
+g05-14 29 63 21 – timeout
+g05-15 30 64 22 – timeout
+g06-00 17 64 8 58 0 .002
+g06-01 18 65 9 59 0 .006
+g06-02 19 66 10 60 0 .022
+g06-03 20 67 11 61 0 .061
+g06-04 21 68 12 62 0 .150
+g06-05 22 69 13 63 0 .403
+g06-06 23 70 14 64 1 .441
+g06-07 24 71 15 65 5 .374
+g06-08 25 72 16 66 20 .749
+g06-09 26 73 17 67 80 .435
+g06-10 27 74 18 68 307 .301
+g06-11 28 75 19 69 1129 .370
+
+===== PAGE 50 =====
+
+50
+Instance |V| | E| | R| Opt Time [s]
+g06-12 29 76 20 70 4294 .387
+g06-13 30 77 21 – timeout
+g06-14 31 78 22 – timeout
+g06-15 32 79 23 – timeout
+g07-00 19 81 9 74 0 .003
+g07-01 20 82 10 75 0 .011
+g07-02 21 83 11 76 0 .037
+g07-03 22 84 12 77 0 .112
+g07-04 23 85 13 78 0 .390
+g07-05 24 86 14 79 1 .370
+g07-06 25 87 15 80 5 .032
+g07-07 26 88 16 81 19 .383
+g07-08 27 89 17 82 76 .224
+g07-09 28 90 18 83 276 .931
+g07-10 29 91 19 84 1064 .745
+g07-11 30 92 20 85 4173 .155
+g07-12 31 93 21 – timeout
+g07-13 32 94 22 – timeout
+g07-14 33 95 23 – timeout
+g07-15 34 96 24 – timeout
+g08-00 21 100 10 92 0 .009
+g08-01 22 101 11 93 0 .032
+g08-02 23 102 12 94 0 .108
+g08-03 24 103 13 95 0 .383
+g08-04 25 104 14 96 1 .309
+g08-05 26 105 15 97 4 .942
+g08-06 27 106 16 98 18 .081
+g08-07 28 107 17 99 68 .314
+g08-08 29 108 18 100 262 .768
+g08-09 30 109 19 101 1019 .464
+g08-10 31 110 20 102 3956 .305
+g08-11 32 111 21 – timeout
+g08-12 33 112 22 – timeout
+g08-13 34 113 23 – timeout
+g08-14 35 114 24 – timeout
+g08-15 36 115 25 – timeout
+g09-00 23 121 11 112 0 .028
+g09-01 24 122 12 113 0 .150
+g09-02 25 123 13 114 0 .383
+g09-03 26 124 14 115 1 .291
+g09-04 27 125 15 116 4 .625
+g09-05 28 126 16 117 17 .479
+g09-06 29 127 17 118 66 .582
+g09-07 30 128 18 119 240 .706
+g09-08 31 129 19 120 939 .553
+g09-09 32 130 20 121 3748 .635
+
+===== PAGE 51 =====
+
+51
+Instance |V| | E| | R| Opt Time [s]
+g09-10 33 131 21 – timeout
+g09-11 34 132 22 – timeout
+g09-12 35 133 23 – timeout
+g09-13 36 134 24 – timeout
+g09-14 37 135 25 – timeout
+g09-15 38 136 26 – timeout
+g10-00 25 144 12 134 0 .126
+g10-01 26 145 13 135 0 .351
+g10-02 27 146 14 136 1 .228
+g10-03 28 147 15 137 4 .474
+g10-04 29 148 16 138 17 .188
+g10-05 30 149 17 139 63 .640
+g10-06 31 150 18 140 223 .035
+g10-07 32 151 19 141 878 .752
+g10-08 33 152 20 142 3612 .406
+g10-09 34 153 21 – timeout
+g10-10 35 154 22 – timeout
+g10-11 36 155 23 – timeout
+g10-12 37 156 24 – timeout
+g10-13 38 157 25 – timeout
+g10-14 39 158 26 – timeout
+g10-15 40 159 27 – timeout
+g11-00 27 169 13 158 0 .369
+g11-01 28 170 14 159 1 .147
+g11-02 29 171 15 160 4 .529
+g11-03 30 172 16 161 16 .525
+g11-04 31 173 17 162 61 .300
+g11-05 32 174 18 163 216 .074
+g11-06 33 175 19 164 845 .014
+g11-07 34 176 20 165 3514 .339
+g11-08 35 177 21 – timeout
+g11-09 36 178 22 – timeout
+g11-10 37 179 23 – timeout
+g11-11 38 180 24 – timeout
+g11-12 39 181 25 – timeout
+g11-13 40 182 26 – timeout
+g11-14 41 183 27 – timeout
+g11-15 42 184 28 – timeout
+g12-00 29 196 14 184 0 .626
+g12-01 30 197 15 185 4 .491
+g12-02 31 198 16 186 15 .098
+g12-03 32 199 17 187 59 .824
+g12-04 33 200 18 188 201 .250
+g12-05 34 201 19 189 790 .252
+g12-06 35 202 20 190 3361 .075
+g12-07 36 203 21 – timeout
+
+===== PAGE 52 =====
+
+52
+Instance |V| | E| | R| Opt Time [s]
+g12-08 37 204 22 – timeout
+g12-09 38 205 23 – timeout
+g12-10 39 206 24 – timeout
+g12-11 40 207 25 – timeout
+g12-12 41 208 26 – timeout
+g12-13 42 209 27 – timeout
+g12-14 43 210 28 – timeout
+g12-15 44 211 29 – timeout
+g13-00 31 225 15 212 1 .815
+g13-01 32 226 16 213 14 .468
+g13-02 33 227 17 214 56 .674
+g13-03 34 228 18 215 195 .572
+g13-04 35 229 19 216 728 .650
+g13-05 36 230 20 217 3214 .443
+g13-06 37 231 21 – timeout
+g13-07 38 232 22 – timeout
+g13-08 39 233 23 – timeout
+g13-09 40 234 24 – timeout
+g13-10 41 235 25 – timeout
+g13-11 42 236 26 – timeout
+g13-12 43 237 27 – timeout
+g13-13 44 238 28 – timeout
+g13-14 45 239 29 – timeout
+g13-15 46 240 30 – timeout
+g14-00 33 256 16 242 6 .512
+g14-01 34 257 17 243 53 .631
+g14-02 35 258 18 244 189 .942
+g14-03 36 259 19 245 696 .400
+g14-04 37 260 20 246 2918 .275
+g14-05 38 261 21 – timeout
+g14-06 39 262 22 – timeout
+g14-07 40 263 23 – timeout
+g14-08 41 264 24 – timeout
+g14-09 42 265 25 – timeout
+g14-10 43 266 26 – timeout
+g14-11 44 267 27 – timeout
+g14-12 45 268 28 – timeout
+g14-13 46 269 29 – timeout
+g14-14 47 270 30 – timeout
+g14-15 48 271 31 – timeout
+g15-00 35 289 17 274 22 .458
+g15-01 36 290 18 275 181 .218
+g15-02 37 291 19 276 653 .425
+g15-03 38 292 20 277 2738 .780
+g15-04 39 293 21 – timeout
+g15-05 40 294 22 – timeout
+
+===== PAGE 53 =====
+
+53
+Instance |V| | E| | R| Opt Time [s]
+g15-06 41 295 23 – timeout
+g15-07 42 296 24 – timeout
+g15-08 43 297 25 – timeout
+g15-09 44 298 26 – timeout
+g15-10 45 299 27 – timeout
+g15-11 46 300 28 – timeout
+g15-12 47 301 29 – timeout
+g15-13 48 302 30 – timeout
+g15-14 49 303 31 – timeout
+g15-15 50 304 32 – timeout
+Table 43: Results on the testset goemans. Type: Artiﬁcial instances
+arising from generalizations of Steiner tree LP gap examples.
+Instance |V| | E| | R| Opt Time [s]
+s1 15 35 8 10 0 .003
+s2 106 399 50 – memout
+Table 44: Results on the testset skutella. Type: Artiﬁcial instances
+arising from generalizations of Steiner tree LP gap examples.
+Instance |V| | E| | R| Opt Time [s]
+smc01 2 1 1 0 0 .000
+smc02 3 3 2 2 0 .000
+smc03 4 6 3 3 0 .000
+smc04 5 10 4 4 0 .000
+smc05 6 15 5 5 0 .000
+smc06 7 21 6 6 0 .000
+smc07 8 28 7 7 0 .000
+smc08 9 36 8 8 0 .001
+smc09 10 45 9 9 0 .001
+smc10 11 55 10 10 0 .002
+smc11 12 66 11 11 0 .003
+smc12 13 78 12 12 0 .012
+smc13 14 91 13 13 0 .046
+smc14 15 105 14 14 0 .134
+smc15 16 120 15 15 0 .313
+Table 45: Results on the testset smc. Type: Artiﬁcial instances
+arising from generalizations of Steiner tree LP gap examples.
+
+===== PAGE 54 =====
+
+54
+B Results on Rectilinear Instances
+For these experiments, the setup is identical to the one described in Appendix A. For each
+instance, ﬁrst, the Hanan grid was computed and written to an instance ﬁle describing
+an instance of the Steiner tree problem in graphs. The latter instance was then solved.
+The reported run times only include the time to solve the graphic instance, in particular,
+the time needed to read in the Hanan grid is not included.
+Instance |V| | E| | R| Opt Time [s]
+carioca 3 11 01 1331 3630 11 311221222 0 .020
+carioca 3 11 02 1331 3630 11 466149453 0 .019
+carioca 3 11 03 1331 3630 11 439391117 0 .058
+carioca 3 11 04 1331 3630 11 413409501 0 .054
+carioca 3 11 05 1331 3630 11 387407782 0 .009
+carioca 3 12 01 1728 4752 12 494141224 0 .032
+carioca 3 12 02 1728 4752 12 443366694 0 .024
+carioca 3 12 03 1728 4752 12 429706282 0 .083
+carioca 3 12 04 1728 4752 12 486545112 0 .031
+carioca 3 12 05 1728 4752 12 444438614 0 .016
+carioca 3 13 01 2197 6084 13 452770450 0 .037
+carioca 3 13 02 2197 6084 13 462700327 0 .238
+carioca 3 13 03 2197 6084 13 474263794 0 .153
+carioca 3 13 04 2197 6084 13 442802506 0 .019
+carioca 3 13 05 2197 6084 13 547158862 0 .032
+carioca 3 14 01 2744 7644 14 438382690 0 .150
+carioca 3 14 02 2744 7644 14 495879854 0 .136
+carioca 3 14 03 2744 7644 14 480652934 0 .048
+carioca 3 14 04 2744 7644 14 473370979 0 .097
+carioca 3 14 05 2744 7644 14 408691456 0 .048
+carioca 3 15 01 3375 9450 15 603071413 0 .352
+carioca 3 15 02 3375 9450 15 528575469 0 .279
+carioca 3 15 03 3375 9450 15 490905559 0 .154
+carioca 3 15 04 3375 9450 15 540300331 0 .201
+carioca 3 15 05 3375 9450 15 535330648 0 .126
+carioca 3 16 01 4096 11520 16 527653658 0 .181
+carioca 3 16 02 4096 11520 16 500606262 0 .213
+carioca 3 16 03 4096 11520 16 468414684 0 .130
+carioca 3 16 04 4096 11520 16 539655260 0 .239
+carioca 3 16 05 4096 11520 16 540126099 0 .140
+carioca 3 17 01 4913 13872 17 555032119 0 .236
+carioca 3 17 02 4913 13872 17 527737314 0 .936
+carioca 3 17 03 4913 13872 17 562083809 0 .405
+carioca 3 17 04 4913 13872 17 589257703 0 .230
+carioca 3 17 05 4913 13872 17 612582645 3 .852
+carioca 3 18 01 5832 16524 18 556545528 0 .291
+carioca 3 18 02 5832 16524 18 549027056 1 .392
+carioca 3 18 03 5832 16524 18 649390363 0 .710
+
+===== PAGE 55 =====
+
+55
+Instance |V| | E| | R| Opt Time [s]
+carioca 3 18 04 5832 16524 18 554907444 0 .800
+carioca 3 18 05 5832 16524 18 509234906 0 .408
+carioca 3 19 01 6859 19494 19 561743715 6 .788
+carioca 3 19 02 6859 19494 19 608506796 1 .957
+carioca 3 19 03 6859 19494 19 574021347 0 .398
+carioca 3 19 04 6859 19494 19 630525105 0 .342
+carioca 3 19 05 6859 19494 19 650204402 6 .354
+carioca 3 20 01 8000 22800 20 638376617 1 .613
+carioca 3 20 02 8000 22800 20 477950448 0 .148
+carioca 3 20 03 8000 22800 20 746979341 8 .890
+carioca 3 20 04 8000 22800 20 653809733 10 .096
+carioca 3 20 05 8000 22800 20 678171940 1 .649
+Table 46: Results on the testset CARIOCA. Type: Random 3-d
+rectilinear instances with coordinates scaled by 10 8.
+Instance |V| | E| | R| Opt Time [s]
+carioca 4 11 01 14641 53240 11 627022001 0 .425
+carioca 4 11 02 14641 53240 11 636772154 0 .223
+carioca 4 11 03 14641 53240 11 607879790 1 .779
+carioca 4 11 04 14641 53240 11 638743359 1 .166
+carioca 4 11 05 14641 53240 11 545419447 1 .883
+carioca 4 12 01 20736 76032 12 641297479 0 .350
+carioca 4 12 02 20736 76032 12 619890840 1 .143
+carioca 4 12 03 20736 76032 12 618169838 1 .152
+carioca 4 12 04 20736 76032 12 573580734 0 .791
+carioca 4 12 05 20736 76032 12 690707456 0 .907
+carioca 4 13 01 28561 105456 13 668457902 1 .776
+carioca 4 13 02 28561 105456 13 732093506 5 .151
+carioca 4 13 03 28561 105456 13 667816953 1 .369
+carioca 4 13 04 28561 105456 13 618023300 1 .465
+carioca 4 13 05 28561 105456 13 816676045 9 .274
+carioca 4 14 01 38416 142688 14 678015050 1 .967
+carioca 4 14 02 38416 142688 14 770189931 32 .560
+carioca 4 14 03 38416 142688 14 774041179 7 .656
+carioca 4 14 04 38416 142688 14 753394327 15 .256
+carioca 4 14 05 38416 142688 14 668149161 6 .908
+carioca 4 15 01 50625 189000 15 867047412 3 .505
+carioca 4 15 02 50625 189000 15 747749078 2 .624
+carioca 4 15 03 50625 189000 15 797161324 41 .344
+carioca 4 15 04 50625 189000 15 682701539 9 .475
+carioca 4 15 05 50625 189000 15 816563142 5 .407
+carioca 4 16 01 65536 245760 16 877600183 53 .440
+carioca 4 16 02 65536 245760 16 840957543 11 .185
+carioca 4 16 03 65536 245760 16 769487137 7 .469
+carioca 4 16 04 65536 245760 16 883810994 40 .603
+
+===== PAGE 56 =====
+
+56
+Instance |V| | E| | R| Opt Time [s]
+carioca 4 16 05 65536 245760 16 844364805 26 .792
+carioca 4 17 01 83521 314432 17 778812798 46 .322
+carioca 4 17 02 83521 314432 17 885687619 96 .926
+carioca 4 17 03 83521 314432 17 866496021 345 .275
+carioca 4 17 04 83521 314432 17 961783573 22 .303
+carioca 4 17 05 83521 314432 17 926268906 107 .808
+carioca 4 18 01 104976 396576 18 951149709 99 .353
+carioca 4 18 02 104976 396576 18 842404966 98 .723
+carioca 4 18 03 104976 396576 18 848447422 1431 .374
+carioca 4 18 04 104976 396576 18 956109307 212 .732
+carioca 4 18 05 104976 396576 18 893733310 143 .342
+carioca 4 19 01 130321 493848 19 917950857 186 .383
+carioca 4 19 02 130321 493848 19 825014078 49 .409
+carioca 4 19 03 130321 493848 19 945521812 25 .660
+carioca 4 19 04 130321 493848 19 912019383 160 .591
+carioca 4 19 05 130321 493848 19 963415391 1625 .465
+carioca 4 20 01 160000 608000 20 889180827 82 .724
+carioca 4 20 02 160000 608000 20 822698792 101 .107
+carioca 4 20 03 160000 608000 20 884633836 125 .995
+carioca 4 20 04 160000 608000 20 948878450 2618 .045
+carioca 4 20 05 160000 608000 20 984006649 82 .545
+Table 47: Results on the testset CARIOCA. Type: Random 4-d
+rectilinear instances with coordinates scaled by 10 8.
+Instance |V| | E| | R| Opt Time [s]
+carioca 5 11 01 161051 732050 11 925163690 34 .547
+carioca 5 11 02 161051 732050 11 844673618 13 .019
+carioca 5 11 03 161051 732050 11 867510918 6 .297
+carioca 5 11 04 161051 732050 11 906103201 14 .043
+carioca 5 11 05 161051 732050 11 795198510 30 .521
+carioca 5 12 01 248832 1140480 12 953491398 59 .408
+carioca 5 12 02 248832 1140480 12 985601088 102 .106
+carioca 5 12 03 248832 1140480 12 844385082 57 .499
+carioca 5 12 04 248832 1140480 12 879014839 93 .151
+carioca 5 12 05 248832 1140480 12 815604529 15 .595
+carioca 5 13 01 371293 1713660 13 881473517 132 .662
+carioca 5 13 02 371293 1713660 13 873559091 177 .287
+carioca 5 13 03 371293 1713660 13 1005775838 184 .838
+carioca 5 13 04 371293 1713660 13 922258018 237 .882
+carioca 5 13 05 371293 1713660 13 879174698 46 .431
+carioca 5 14 01 537824 2497040 14 1080307930 1038 .209
+carioca 5 14 02 537824 2497040 14 1082279116 150 .913
+carioca 5 14 03 537824 2497040 14 931463937 284 .221
+carioca 5 14 04 537824 2497040 14 1037634219 821 .468
+carioca 5 14 05 537824 2497040 14 1072793454 1224 .013
+
+===== PAGE 57 =====
+
+57
+Instance |V| | E| | R| Opt Time [s]
+carioca 5 15 01 759375 3543750 15 1011895745 1046 .361
+carioca 5 15 02 759375 3543750 15 1067623193 888 .808
+carioca 5 15 03 759375 3543750 15 1093631593 1258 .172
+carioca 5 15 04 759375 3543750 15 890715927 66 .472
+carioca 5 15 05 759375 3543750 15 1112392828 638 .515
+carioca 5 16 01 1048576 4915200 16 1140155635 3259 .377
+carioca 5 16 02 1048576 4915200 16 1114675222 2047 .700
+carioca 5 16 03 1048576 4915200 16 1097447396 464 .254
+carioca 5 16 04 1048576 4915200 16 – timeout
+carioca 5 16 05 1048576 4915200 16 1034250551 815 .794
+carioca 5 17 01 1419857 6681680 17 1084906998 803 .613
+carioca 5 17 02 1419857 6681680 17 – memout
+carioca 5 17 03 1419857 6681680 17 1030965254 845 .502
+carioca 5 17 04 1419857 6681680 17 1154984533 3195 .596
+carioca 5 17 05 1419857 6681680 17 – timeout
+carioca 5 18 01 1889568 8922960 18 – memout
+carioca 5 18 02 1889568 8922960 18 – memout
+carioca 5 18 03 1889568 8922960 18 1177091608 1081 .015
+carioca 5 18 04 1889568 8922960 18 – timeout
+carioca 5 18 05 1889568 8922960 18 – memout
+Table 48: Results on the testset CARIOCA. Type: Random 5-d
+rectilinear instances with coordinates scaled by 108. Instances with
+19 and 20 terminals omitted.
+Instance |V| | E| | R| Opt Time [s]
+bonn 3 21 1 8820 25179 21 6217 1 .542
+bonn 3 21 2 8820 25179 21 6729 1 .944
+bonn 3 21 3 8820 25179 21 5738 0 .948
+bonn 3 22 1 10648 30492 22 6681 842 .792
+bonn 3 22 2 10648 30492 22 6797 3 .242
+bonn 3 22 3 10164 29084 22 6941 4 .239
+bonn 3 23 1 12167 34914 23 6195 1 .530
+bonn 3 23 2 12167 34914 23 6094 2 .275
+bonn 3 23 3 11638 33373 23 6398 12 .394
+bonn 3 24 1 13824 39744 24 6622 4 .948
+bonn 3 24 2 13248 38064 24 7136 14 .769
+bonn 3 24 3 13248 38064 24 7014 7 .010
+bonn 3 25 1 15625 45000 25 6928 12 .241
+bonn 3 25 2 15625 45000 25 7249 9 .195
+bonn 3 25 3 15625 45000 25 7504 36 .022
+bonn 3 26 1 17576 50700 26 8184 11 .849
+bonn 3 26 2 17576 50700 26 7172 6 .536
+bonn 3 26 3 16900 48724 26 7732 7 .608
+bonn 3 27 1 18252 52676 27 7504 12 .941
+bonn 3 27 2 19683 56862 27 7032 20 .365
+
+===== PAGE 58 =====
+
+58
+Instance |V| | E| | R| Opt Time [s]
+bonn 3 27 3 18954 54729 27 7688 21 .094
+bonn 3 28 1 21168 61208 28 8106 1795 .931
+bonn 3 28 2 21168 61208 28 7774 384 .240
+bonn 3 28 3 21952 63504 28 7307 22 .964
+bonn 3 29 1 22736 65800 29 8231 248 .490
+bonn 3 29 2 23548 68179 29 8542 37 .717
+bonn 3 29 3 22736 65800 29 8053 23 .270
+bonn 3 30 1 26100 75660 30 8141 181 .245
+bonn 3 30 2 26100 75660 30 7897 25 .814
+bonn 3 30 3 26100 75660 30 8527 63 .451
+bonn 3 31 1 27869 80848 31 8664 16 .913
+bonn 3 31 2 28830 83669 31 8409 328 .879
+bonn 3 31 3 28830 83669 31 7583 45 .304
+bonn 3 32 1 31744 92224 32 9483 59 .047
+bonn 3 32 2 31744 92224 32 8828 2371 .743
+bonn 3 32 3 31744 92224 32 8261 8 .539
+bonn 3 33 1 33792 98240 33 9588 46 .329
+bonn 3 33 2 35937 104544 33 9658 465 .676
+bonn 3 33 3 31744 92224 33 8902 83 .404
+bonn 3 34 1 37026 107745 34 9045 410 .333
+bonn 3 34 2 38148 111044 34 9664 1822 .087
+bonn 3 34 3 37026 107745 34 9105 959 .836
+bonn 3 35 1 41650 121345 35 – timeout
+bonn 3 35 2 40460 117844 35 9372 513 .599
+bonn 3 35 3 40460 117844 35 9803 528 .187
+bonn 3 36 1 42768 124632 36 9353 2906 .588
+bonn 3 36 2 45360 132264 36 9118 87 .813
+bonn 3 36 3 44100 128555 36 – timeout
+bonn 3 37 1 49284 143819 37 9379 811 .912
+bonn 3 37 2 47915 139786 37 9596 1602 .806
+bonn 3 37 3 49284 143819 37 8768 113 .704
+bonn 3 38 1 53428 156028 38 – timeout
+bonn 3 38 2 52022 151885 38 9895 317 .967
+bonn 3 38 3 52022 151885 38 – timeout
+bonn 3 39 1 54834 160171 39 9757 581 .362
+bonn 3 39 2 54834 160171 39 – timeout
+bonn 3 39 3 57798 168909 39 – timeout
+bonn 3 40 1 64000 187200 40 9024 25 .440
+bonn 3 40 2 57798 168909 40 9633 710 .092
+bonn 3 40 3 59280 173278 40 10696 1183 .496
+bonn 3 45 1 89100 261315 45 – timeout
+bonn 3 45 2 89100 261315 45 – timeout
+bonn 3 45 3 85140 249613 45 – timeout
+bonn 3 50 1 110544 324721 50 – memout
+bonn 3 50 2 117600 345598 50 – timeout
+bonn 3 50 3 112800 331394 50 – memout
+
+===== PAGE 59 =====
+
+59
+Instance |V| | E| | R| Opt Time [s]
+bonn 3 55 1 160380 472284 55 – timeout
+bonn 3 55 2 151470 445881 55 – timeout
+bonn 3 55 3 154548 455004 55 12138 6201 .104
+bonn 3 60 1 198417 585044 60 – timeout
+bonn 3 60 2 201898 595369 60 – timeout
+bonn 3 60 3 198476 585220 60 – memout
+Table 49: Results on the testset bonn-3d. Type: Random 3-d rec-
+tilinear instances. Coordinates were chosen uniformly at random
+from{0, 1,..., 999}.

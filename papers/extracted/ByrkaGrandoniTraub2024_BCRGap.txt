@@ -1,0 +1,2862 @@
+﻿SOURCE: ByrkaGrandoniTraub2024_BCRGap.pdf
+PAGES: 43
+EXTRACTOR: pypdf 6.10.0 (Unicode text), pdfplumber fallback
+
+
+===== PAGE 1 =====
+
+The Bidirected Cut Relaxation for Steiner Tree
+has Integrality Gap Smaller than 2.
+Jarosław Byrka∗ Fabrizio Grandoni‡ Vera Traub§
+Abstract
+The Steiner tree problem is one of the most prominent problems in network design. Given an edge-
+weighted undirected graph and a subset of the vertices, called terminals, the task is to compute a
+minimum-weight tree containing all terminals (and possibly further vertices). The best-known approx-
+imation algorithms for Steiner tree involve enumeration of a (polynomial but) very large number of
+candidate components and are therefore slow in practice.
+A promising ingredient for the design of fast and accurate approximation algorithms for Steiner tree
+is the bidirected cut relaxation (BCR): bidirect all edges, choose an arbitrary terminal as a root, and
+enforce that each cut containing some terminal but not the root has one unit of fractional edges leaving
+it. BCR is known to be integral in the spanning tree case [Edmonds’67], i.e., when all the vertices are
+terminals. For general instances, however, it was not even known whether the integrality gap of BCR is
+better than the integrality gap of the natural undirected relaxation, which is exactly 2. We resolve this
+question by proving an upper bound of 1.9988 on the integrality gap of BCR.
+∗University of Wrocław. jaroslaw.byrka@cs.uni.wroc.pl, supported by NCN grant number 2020/39/B/ST6/01641.
+‡IDSIA, USI-SUPSI. fabrizio.grandoni@idsia.ch. Partially supported by the SNF Grant 200021 200731/1.
+§Research Institute for Discrete Mathematics and Hausdorff Center for Mathematics, University of Bonn.
+traub@dm.uni-bonn.de.
+arXiv:2407.19905v1  [cs.DS]  29 Jul 2024
+
+===== PAGE 2 =====
+
+1 Introduction
+In the classical Steiner tree problem we are given an undirected graphG = (V, E), with edge costs c : E →
+R≥0, and a subset of vertices R ⊆ V (the terminals). Our goals is to compute a tree T of minimum cost
+c(T ) := P
+e∈E(T ) c(e) which contains R (and possibly other vertices, called Steiner nodes). Steiner tree
+is one of the best-studied problems in Computer Science and Operations Research, with great practical and
+theoretical relevance.
+Existing Approximation Algorithms. The Steiner tree problem is NP-hard, indeed it is one of the earliest
+problems which were shown to belong to this class. More precisely, it is NP-hard to approximate below a
+factor 96
+95 [CC08]. Several (polynomial-time) constant-factor approximation algorithms are known for this
+problem. The simple minimum spanning tree heuristic gives a 2-approximation. Without loss of generality,
+we can replace G with its metric closure. Consider the subgraph G[R] of G induced by the terminals, and
+return a minimum-cost spanning tree of it (a so-called terminal MST ). Mehlhorn [Meh88] gives a nearly-
+linear-time ˜O(m + n) implementation of this algorithm. The same approximation factor is obtained by
+Agrawal, Klein, and Ravi [AKR95] (indeed for the more general Steiner forest problem) using the primal-
+dual method (see also [GW95]). This result also implies that the following Undirected Cut Relaxation
+(UCR) for Steiner tree has integrality gap at most 2. For a vertex set U ⊆ V , let δ(U) = {{u, v} ∈ E :
+|U ∩ {u, v}| = 1}. Then the Undirected Cut Relaxation is the following linear program:
+min
+X
+e∈E
+c(e) · xe
+s.t.
+X
+e∈δ(U )
+xe ≥ 1 for all U ⊆ V with R ∩ U ̸= ∅ and R \ U ̸= ∅
+xe ≥ 0 for all e ∈ E.
+(UCR)
+All the known better-than-2 approximation algorithms for Steiner tree involve one way or the other the
+notion of components. A component is a connected subgraph of G connecting a subset X of terminals.
+The component is full if its leaves coincide with the terminals it connects. Any minimal Steiner tree can be
+decomposed into full components, however such components might be arbitrarily large. Borchers and Du
+[BD95] proved that considering Steiner trees whose full components contain at mosth terminals is sufficient
+to obtain a 1 + 1
+⌊log2 h⌋ approximation (in particular, we may assume that restricting to components with at
+most h = 2⌈1/ε⌉ terminals increases the cost of a cheapest Steiner tree by at most a factor 1 + ε). We also
+remark that the cheapest component connecting a given subset of h = O(1) terminals can be computed in
+polynomial time. (Actually this can be done even for h = O(log n) [DW71].)
+A series of works exploits these ingredients within (variants of) a relative-greedy approach [Zel93,
+Zel96, KZ97, PS00], culminating with a 1.55 approximation [RZ05]. The basic idea is to start with a
+terminal MST, which provides an initial 2 approximation S. Then one iteratively improves S with the
+following process. Consider a component K with terminals X, and the subgraph S/X obtained from
+the contraction of X. Now drop from S/X a subset of edges of maximum cost while maintaining the
+connectivity (this can be done by computing a minimum spanning tree ofS/X). When the cost drop(X) of
+dropped edges is larger than the cost c(K) of the component, this induces a cheaper Steiner tree. Different
+algorithms differ in the greedy choice of the improving components.
+The current best ln 4 +ε < 1.39 approximation by Byrka, Grandoni, Rothvoß, and Sanit`a [BGRS13] is
+based on a different approach. The authors consider a hypergraphic relaxation HYP of the problem based
+1
+
+===== PAGE 3 =====
+
+on directed components over 2⌈1/ε⌉ terminals. This relaxation is exploited within an iterative randomized
+rounding framework: sample one component with probability proportional to its value in an optimal LP so-
+lution, contract it, and iterate. Goemans, Olver, Rothvoß, and Zenklusen [GORZ12] later proved a matching
+upper bound on the integrality gap of HYP. The same approximation factor was obtained recently by Traub
+and Zenklusen [TZ22] using a (non-oblivious) local search approach.
+All the mentioned better-than-2 approximation algorithms for Steiner tree (and in particular the current-
+best ones) need to enumerate over a (polynomial but) large set 1 of candidate components: this makes them
+mostly unpractical. This raises the following natural question: Is there a very fast (ideally, nearly-linear-
+time) algorithm for Steiner tree with approximation factor (ideally, substantially) smaller than 2?
+The Bidirected Cut Relaxation. One ingredient that might play a crucial role towards achieving the
+above goal is the Bidirected Cut Relaxation (BCR). BCR is one of the oldest and best-studied relaxations
+for Steiner tree, see for example [GM93].
+Let us bidirect all the edges of the given graph G: in more detail, replace each undirected edge e =
+{u, v} ∈ E with two oppositely directed edges (u, v), (v, u), both with cost c(e). Let − →E be this set of
+directed edges. Choose an arbitrary terminal r ∈ R as a root. For U ⊆ V , let δ+(U) = {(u, v) ∈ − →E : u ∈
+U, v /∈ U }. Then BCR is the following linear programming relaxation:
+min
+X
+e∈− →E
+c(e) · xe
+s.t.
+X
+e∈δ+(U )
+xe ≥ 1 for all U ⊆ V \ {r} with R ∩ U ̸= ∅
+xe ≥ 0 for all e ∈ − →E .
+(BCR)
+BCR is indeed a relaxation of the Steiner tree problem because we can orient every Steiner tree towards
+the root r and then consider the incidence vector of this oriented tree to obtain a feasible solution of BCR.
+Like UCR, also BCR has a linear number of variables. However, it is provably stronger than UCR in several
+interesting special cases. For example, a famous result by Edmonds [Edm67] shows that BCR is integral
+in the minimum spanning tree case, i.e., when R = V . Notice that, in contrast, UCR has integrality gap 2
+already on such instances: simply consider a cycle of length n with unit-cost edges; the optimal fractional
+solution to UCR sets all the variables to 1
+2, at total cost n
+2 , while the minimum spanning tree costs n − 1.
+We also know that BCR has integrality gap at most 4
+3 on quasi-bipartite instances [CDV11] (improving
+on an earlier 3
+2 bound from [RV99]), and at most 991
+732 on Steiner claw free instances [FKOS16, HDJAS23]
+(see Section 1.1 for more details). The current best lower bound on the integrality gap of BCR is 6
+5, recently
+shown in [Vic20], improving on the earlier lower bound of 36
+31 [BGRS13]. Notice that 6
+5 < ln(4) ≈ 1.386
+and even 6
+5 < 991
+732 ≈ 1.354. The best-known upper bound on the integrality gap of BCR prior to our work
+was 2, the same as for UCR.
+The interest in BCR goes beyond its possible implications for Steiner tree approximation. If the inte-
+grality gap of BCR would be sufficiently small, this might help to find improved approximation for prize-
+collecting Steiner tree : this is the generalization of Steiner tree where one is allowed to leave some ter-
+minals disconnected, however one has to pay a penalty for each such terminal. Another generalization of
+Steiner tree which might benefit from a better understanding of BCR is Steiner forest: given a set of pairs
+1All known better-than-2 approximation algorithms enumerate over at leastΩ(k3) components, where k denotes the number of
+terminals. The currently best known approximation algorithms enumerate over much larger sets of components.
+2
+
+===== PAGE 4 =====
+
+of terminals, find the cheapest forest such that each such pair belongs to the same connected component
+of the forest. A natural attempt to improve on the existing 2-approximation algorithms for this problem
+[AKR95, GW95, Jai01], a well-known open problem in the area, might be to consider some multi-root vari-
+ant of BCR2. However, this attempt would be hopeless if the integrality gap of BCR was 2 already for the
+Steiner tree case. For all the mentioned reasons, a natural and important open question is:
+Is the integrality gap of BCR smaller than 2?
+We answer this question affirmatively:
+Theorem 1.1. The integrality gap of BCR is at most 1.9988.
+We remark that we did not optimize the exact upper bound on the integrality gap, and rather aimed at
+making the proof as simple as possible.
+To prove Theorem 1.1, we give a procedure that yields both a Steiner tree and a dual solution for BCR.
+We show that the ratio between the cost of these is at most 1.9988, which implies the desired upper bound
+on the integrality gap of BCR. Our construction combines the idea of contracting components, as used for
+example in prior relative greedy approaches, with techniques from primal-dual algorithms.
+A key challenge here is that classical primal-dual algorithms always produce dual solutions with laminar
+support3. However, there is a family of instances of the Steiner tree problem, where the ratio between the
+cost of an optimum Steiner tree and the maximum value of a dual solution with laminar support can be
+arbitrarily close to 2 (see Appendix A). Hence, for our approach to work, we necessarily need to construct
+dual solutions whose support is not laminar.
+Intuitively, we first consider a terminal MST together with the dual solution produced by the primal-dual
+algorithm for UCR (see [AKR95, GW95]) and then try to construct a corresponding dual solution for BCR,
+where each set is grown by a (1 + δ) factor more than in the dual solution for UCR (for some positive
+δ > 0). We show that in this way we can either construct a good dual solution to BCR, or we can identify a
+good component to contract, hence improving the primal solution, i.e., the current Steiner tree. We provide
+a more detailed outline of our proof techniques in Section 2.
+While the focus of our work is on proving an upper bound on the integrality gap of BCR and we do not
+discuss algorithmic aspects and running times in detail, we remark that our proof techniques give rise to a
+polynomial-time algorithm. In contrast to previous algorithms for Steiner tree with approximation factor
+smaller than 2, this algorithm does not require enumerating subsets of terminals to construct the improving
+components. In our approach it is the dual growing procedure that identifies a new improving component to
+be added (which can be of arbitrary size).
+1.1 Further Related work
+Chakrabarty, K¨onemann, and Pritchard [CKP10] prove that HYP and BCR are equivalent onquasi-bipartite
+instances of Steiner tree, i.e., the special case when there are no edges between Steiner vertices. Chakrabarty,
+Devanur, and Vazirani [CDV11], using a primal-dual construction, show that the integrality gap of BCR is
+at most 4/3 on quasi-bipartite instances. Feldman, K ¨onemann, Olver, and Sanit `a [FKOS16] later extended
+the equivalence between HYP and BCR to Steiner-claw-free instances of Steiner tree, i.e., instances where
+2Hypergraphic relaxations seem less promising for Steiner forest because in the Steiner forest problem we may assume that
+every vertex is a terminal.
+3For a description of the dual LPs of (UCR) and (BCR), see Section 2. A solution y to one of these LPs has laminar support if
+the support L := {U ⊆ V : yU > 0} of y is a laminar family, i.e., for all sets A, B ∈ L we have A ⊆ B, B ⊆ A, or A ∩ B = ∅.
+3
+
+===== PAGE 5 =====
+
+each Steiner vertex is adjacent to at most2 other Steiner vertices. Notice that this implies an upper bound of
+ln 4 on the integrality gap of BCR on such instances by the result in [GORZ12]. They also showed that, on
+small instances built around a single Steiner claw, BCR can be weaker than HYP. Recently, Hyatt-Denesik,
+Ameli, and Sanit`a improved the upper bound on the integrality gap of HYP and BCR for Steiner-claw-free
+instances to 991
+732 < 1.354 (see proof of Theorem 5 in [HDJAS23]).
+Vicari [Vic20] improved the lower bound on the integrality gap of BCR from the previously know 36
+31
+from [BGRS13] to 6
+5. He also analyzed a strengthening of BCR by adding degree constraints. Filipecki and
+Van Vye [FV20] computationally studied a multi-commodity flow strengthening of BCR.
+Goemans and Williamson [GW95] present a primal-dual 2-approximation for prize-collecting Steiner
+tree. This was slightly improved to 1.9672 by Archer, Bateni, Hajiaghayi, and Karlof [ABHK11], and
+very recently to 1.79 by Ahmadi, Gholami, Hajiaghayi, Jabbarzade, and Mahdavi [AGH +24b]. A 3-
+approximation for the prize-collecting generalization of Steiner forest can be obtained with the technique by
+Bienstock, Goemans, Simchi-Levi, and Williamson [BGSW93]. Goemans later observed that a similar ap-
+proach gives a2.542 approximation (see, e.g., [HJ06] for a detailed proof). Very recently this approximation
+was improved to 2 by Ahmadi, Gholami, Hajiaghayi, Jabbarzade, and Mahdavi [AGH +24a]. K ¨onemann,
+Olver, Pashkovich, Ravi, Swamy, and Vygen [KOP+17] proved that a natural linear programming relaxation
+for the prize-collecting Steiner forest problem (generalizing UCR) has integrality gap larger than 2.
+The Steiner network problem is a generalization of Steiner tree (and Steiner forest) where we are given
+pairwise vertex connectivity requirements r(u, v) ≥ 0, and the task is to compute a cheapest subgraph of
+G such that each such pair of vertices u, v is r(u, v)-edge connected. In a celebrated result, Jain [Jai01]
+obtained a 2-approximation for this problem using the iterative rounding technique. Since then, breaching
+the 2-approximation barrier, even just for relevant special cases of Steiner network, became an important
+open problem. This was recently achieved for some problems in this family, such asconnectivity augmenta-
+tion [BGA23, CTZ21, TZ21, TZ22, TZ23] and forest augmentation [GAT22]. Among the special cases for
+which 2 is still the best-known factor, we already mentioned the Steiner forest problem. Another interesting
+special case is the minimum-weight 2-edge connected spanning subgraph problem.
+In the directed Steiner tree problem (DST) we are given a directed edge-weighted graph, a root r and
+a set of terminals R. Our goal is to find a minimum-weight arborescence rooted at r that includes R. A
+classical result by Charikar, Chekuri, Cheung, Dai, Goel, Guha, and Li [CCC +99] gives a O(kε/ε3) ap-
+proximation for DST in time O(n1/ε). This implies a kε approximation in polynomial time and a O(log3 k)
+approximation in quasi-polynomial time. The quasi-polynomial time approximation factor was improved to
+O(log2 k/ log logk) by Grandoni, Laekhanukit and Li [GLL19], who also present a matching inapproxima-
+bility result. We highlight that, while an analogue of BCR would be a valid relaxation for DST, all known
+integrality gap upper bounds for BCR only apply to the undirected Steiner tree problem. In fact, the natu-
+ral analogue of BCR for DST has integrality gap Ω(
+p
+|R|) [ZK02] and Ω(|V |δ) for some constant δ > 0
+[LL22].
+2 Outline of our approach
+In this section we provide an outline of our techniques and explain the motivation behind our construction.
+We start with a brief recap of the classical primal-dual approach from [AKR95] in Section 2.1. Then we
+explain our dual growth procedure to construct a dual solution for BCR. In Section 2.3 we then discuss under
+which conditions our dual growth procedure is successful and constructs a sufficiently good dual solution.
+We also discuss how to handle situations where this is not the case. Finally, in Section 2.4 we provide a brief
+overview of the analysis of our procedure.
+4
+
+===== PAGE 6 =====
+
+2.1 The primal-dual algorithm for Steiner tree
+The starting point of our approach is the famous primal-dual algorithm from [AKR95] that yields a 2-
+approximation for the Steiner tree problem (and the more general Steiner forest problem). We will describe
+it here for Steiner tree from a perspective that will help us to explain our new techniques later on, in-
+troducing some useful notation along the way. The primal-dual algorithm works with the Undirected Cut
+Relaxation (UCR). As mentioned in the introduction (Section 1), this LP relaxation is well-known to have an
+integrality gap of exactly 2. The upper bound of 2 follows for example from the analysis of the primal-dual
+algorithm [AKR95] (but there are many other proofs, too).
+In the following we will assume without loss of generality that G is a complete graph and the edge
+costs satisfy the triangle inequality (by taking the metric closure). Then the primal-dual algorithm can
+always return a terminal MST, i.e., a minimum-cost spanning tree of the graph G[R] induced by the set R
+of terminals (and we assume without loss of generality that this is indeed the case). We write mst(G[R]) to
+denote the cost of a terminal MST. For t ∈ R≥0, let Gt[R] be the graph G[R] restricted to the edges of cost
+at most 2t. Then, we define S t to be the partition of R into the vertex sets of the connected components of
+Gt[R]. At any time t, the primal-dual algorithm has included the edges of a minimum cost spanning tree
+in G[S] for every set S ∈ S t (hence proceeding like Kruskal’s algorithm for minimum spanning trees). We
+denote by tmax the first time t where Gt[R] is connected. Then the total cost of the returned terminal MST
+is mst(G[R]) = 2
+R tmax
+0
+
+|S t| − 1
+
+dt.
+The primal-dual algorithm also constructs a solution y to the dual linear program of UCR:
+max
+X
+U ⊆V :
+R∩U,R\U ̸=∅
+yU
+s.t.
+X
+U :e∈δ(U )
+yU ≤ c(e) for all e ∈ E
+yU ≥ 0 for all U ⊆ V with R ∩ U, R \ U ̸= ∅.
+(Dual-UCR)
+The cost of a terminal MST will be no more than twice the cost of the constructed dual solutiony and hence
+no more than twice the value of UCR.
+The construction of the dual solution y in the primal-dual algorithm can be described as follows. We
+maintain a feasible dual solution y and start with y being the all-zero vector at time t = 0. We say that an
+edge e is tight if the corresponding constraint in Dual-UCR is tight, i.e.,P
+U :e∈δ(U ) yU = c(e). Then at any
+time t, we grow the dual variables yUS for all sets S ∈ S t, where
+US :=
+
+v ∈ V : v is reachable from S by tight edges (at the current time t)
+	
+,
+where v being reachable from S means that v is reachable from at least one s ∈ S. By the definition of the
+set US, no edge in δ(US) is tight and hence the constraints of Dual-UCR will not be violated. Moreover,
+one can show that for any time t ≤ tmax, the sets US with S ∈ S t are disjoint. In particular, both US ∩ R
+and US \ R will be nonempty and hence y remains a feasible solution to Dual-UCR. At time tmax the dual
+solution y has value
+R tmax
+0 |S t| dt, implying that the cost mst(G[R]) = 2
+R tmax
+0
+
+|S t| −1
+
+dt of the terminal
+MST is at most twice the value of y.
+2.2 Growing dual solutions for BCR
+Instead of the linear programming relaxation UCR with integrality gap 2, we now consider the stronger
+relaxation BCR. We remark that any feasible solution to BCR can be converted into a feasible solution to
+5
+
+===== PAGE 7 =====
+
+UCR of the same cost by omitting the orientation of the edges, i.e., setting x{v,w} := x(v,w) + x(w,v) for
+every edge {v, w} ∈ E. It is well-known that the value of BCR is independent of the choice of the root r
+[GM93]. The dual of BCR is
+max
+X
+U ⊆V \{r}:
+R∩U ̸=∅
+yU
+s.t.
+X
+U :e∈δ+(U )
+yU ≤ c(e) for all e ∈ − →E
+yU ≥ 0 for all U ⊆ V \ {r} with R ∩ U ̸= ∅.
+(Dual-BCR)
+We observe that taking any solutiony to Dual-UCR and omitting the variables corresponding to setsU with
+r ∈ U yields a feasible solution to Dual-BCR. In particular, we can take y to be the solution to Dual-UCR
+produced by the primal-dual algorithm (see Section 2.1) and lety be the solution to Dual-BCR resulting from
+y by omitting the variables corresponding to setsU with r ∈ U. Because S t is a partition of the terminal set,
+at any time t we omit the dual variable corresponding toUS for exactly one set S ∈ S t. Therefore, the value
+of the solution y to Dual-BCR is
+R tmax
+0
+
+|S t| − 1
+
+dt and hence exactly equal to half the cost of a terminal
+MST.
+If the cost of an optimum Steiner tree is significantly less than the cost of a terminal MST, then our
+solution y to Dual-BCR is good enough to prove that the integrality gap of BCR is less than 2. The difficult
+case is when the cost of an optimum Steiner tree is almost equal to the cost of a terminal MST. In this case
+we need to improve the construction of our dual solution.
+Therefore, let us first consider the special case where our Steiner tree instance is an instance of the
+minimum spanning tree problem, i.e., the special case where every vertex is a terminal. In this special case
+it is well-known that BCR is integral [Edm67]. One way to see this is as follows. For two terminals s, ˜s we
+define tmerge(s, ˜s) to be the first time where s and ˜s belong to the same part of the partition S t. Then for a
+directed edge (s, ˜s) ∈ − →E with s ̸= r we have4
+X
+U :(s,˜s)∈δ+(U )
+yU = tmerge(s, ˜s) = 1
+2
+X
+U :{s,˜s}∈δ(U )
+yU ≤ 1
+2 · c({s, ˜s}).
+Hence, in the special case where all vertices are terminals, we can simply multiply the dual solution y with
+a factor 2 and maintain a feasible solution to Dual-BCR. This scaled-up dual solution 2y has a value equal
+to the cost of a terminal MST.
+Let us next consider instances that arise from minimum spanning tree instances by subdividing edges,
+i.e., instances where every non-terminal vertex has degree two in the graph G (before taking the metric
+closure). Such instances are of course equivalent to minimum spanning tree instances. However, for such
+an instance we cannot simply scale up the dual solution y by a factor 2, as Figure 1 illustrates. To obtain
+a solution z to Dual-BCR with twice the value of y also on such instances, we consider the following dual
+growth procedure for BCR, which on instances of the minimum spanning tree problem again yields the
+solution 2y.
+We construct a dual solution z ∈ R2V
+≥0. We highlight that Dual-BCR has no variables zU for sets U with
+U ∩ R = ∅ or r ∈ U and we therefore say that z is a feasible solution to Dual-BCR only if these variables
+are equal to zero (and could thus be omitted). It will nevertheless be convenient to keep these variables when
+explaining the construction of z. To describe the construction we need the following definition.
+4If s = r, there are no variables yU for sets U with (s, ˜s) ∈ δ+(U) in Dual-BCR and hence the constraint corresponding to
+(s, ˜s) can be ignored.
+6
+
+===== PAGE 8 =====
+
+r
+1 1
+c(e) = 1 for all e ∈ E r
+0.5 0.5
+0.5 0.5
+Figure 1: An instance of the Steiner tree problem that arises from a minimum-cost spanning tree problem by subdi-
+viding edges. Terminals are shown as squares and Steiner nodes as circles; all edges have cost 1. On the left, we see
+in blue the dual solution y resulting from the dual solution y computed by the primal-dual algorithm by omitting the
+set containing the root r. Scaling up y by a factor of 2 does not yield a feasible dual solution to BCR because the
+constraints corresponding to outgoing edges of the two terminals in R \ {r} are already tight with respect to y. On the
+right, we see in blue the dual solution z resulting from our dual growth process for BCR. Scaling up z by a factor of 2
+yields an optimum dual solution for BCR. Notice that our construction does not provide a dual solution with laminar
+support.
+Definition 2.1. For δ ≥ 0, we say that an edge e ∈ − →E is δ-tight if
+X
+U ⊆V :e∈δ+(U )
+zU = 1
+1+δ · c(e).
+Let us fix δ = 1 for a moment. We again consider the partition S t of R into the vertex sets of the
+connected components of the undirected graph Gt[R]. To construct z, we start from z being the all-zero
+vector at time t = 0. Then at any time t ∈ [0, tmax), for each S ∈ S t with r /∈ S we grow the dual variable
+zUS for
+US :=
+
+v ∈ V : v is reachable from S by δ-tight edges in − →E at time t
+	
+.
+This yields a feasible dual solution z of the same value as y; see Figure 1 for an example. However, in
+contrast to 2y, the vector 2z is a feasible solution to Dual-BCR (in our special case of instances arising from
+minimum spanning tree instances by subdividing edges).
+Let us now consider general instances of the Steiner tree problem where the cost of an optimum Steiner
+tree is equal to the cost mst(G[R]) of a terminal MST. One can still apply the above construction of z to
+such instances. However, for δ = 1 this might result in growing variableszU for sets U containing the root r
+and hence does not lead to a feasible solution of Dual-BCR. See Figure 2 for an example. However, for
+a sufficiently small but positive value δ, we obtain a vector z for which (1 + δ)z is a feasible solution to
+Dual-BCR of value 1+δ
+2 · mst(G[R]) (see Lemma 3.2 and Section 2.4). Proving this is the main technical
+challenge in our analysis.
+2.3 Contracting components
+So far we considered the setting where the cost of an optimum Steiner tree is equal to the cost of a terminal
+MST. However, we also need to be able to improve the dual solutiony if this is only approximately the case,
+i.e., if the cost of a terminal MST is at most 1 + γ times the cost opt of an optimum Steiner tree for some
+small constant γ > 0. In this case, we might not be able to directly apply the above construction for any
+7
+
+===== PAGE 9 =====
+
+r
+s1 s2
+2
+2 2
+2
+22
+1
+1
+1
+r
+2
+0.510.25
+2
+0.5 1 0.25
+Figure 2: The left part of the figure shows a known instance of the Steiner tree problem where BCR is not integral;
+see e.g. [Vic20]. The numbers next to the edges show the edge costs and terminals are shown as squares. A terminal
+MST (in the metric closure of the instance) has cost 8 and this is also the cost of an optimum Steiner tree. On the
+right we see the dual solution (1 + δ)z that our dual growth procedure yields for δ = 7
+8, which in this example is an
+optimum dual solution. In this example, for every time t ∈ [0, tmax) = [0, 2), the partition S t consists of all singleton
+sets {s} with s ∈ R. The blue sets are sets U{s1} (at different times of the algorithm) and the green ones sets U{s2}.
+For δ > 7
+8, the sets U{s1} and U{s2} would for some time t < t max contain the root vertex r .
+δ > 0, as illustrated in Figure 3. Another example is given in Figure 4, which also illustrates why it seems
+difficult to apply standard primal-dual techniques directly to BCR.
+To address this issue, we proceed as follows. We fix a sufficiently small but positive constant δ. Then
+we prove that if a terminal MST is not only globally almost optimal, i.e., mst(G[R]) < (1 + γ) · opt, but
+in a certain sense also “locally almost optimal”, then our dual growing procedure yields a feasible solution
+to Dual-BCR of value 1+δ
+2 · mst(G[R]). To explain what we mean by a terminal MST being “locally
+almost optimal”, we need the notion of components. We say that a component is any connected subgraph
+of G and we say that a component K connects a vertex set X if all vertices of X are vertices of K.5 If a
+component K connects a set X of terminals, then we can obtain a Steiner tree by computing a minimum
+terminal spanning tree T in the graph G[R]/X (resulting from G[R] by contracting X) and taking the union
+of T and the component K (possibly omitting some superfluous edges). This Steiner tree has cost at most
+mst(G[R]/X) + c(K), where c(K) denotes the total cost of the edges of the component K. We write
+drop(X) := mst(G[R]) − mst(G[R]/X)
+to denote the decrease of the cost of a terminal MST when contracting X, i.e., the total cost of the edges
+that we can drop from a terminal MST when contracting X. Now we consider an instance to be “locally
+almost optimal” if for no component K connecting X, the cost c(K) of the component is significantly less
+than drop(X). This is captured by the following definition.
+Definition 2.2. Let γ > 0. An instance of the Steiner tree problem is locally γ-MST-optimal if for every
+component K connecting a set X of terminals, we have drop(X) < (1 + γ) · c(K).
+5We highlight that our notion of components is more general than the notion of full components used in prior work. We also
+do not have any restriction on the size of components. In particular, the whole graph and an optimum Steiner tree are examples of
+components.
+8
+
+===== PAGE 10 =====
+
+r
+s1
+sk
+s1
+sq
+Figure 3: Consider the Steiner tree instance (G, R) that arises as the metric closure of the depicted graph where all
+shown edges have cost 1. The terminal set R is shown by squares. Then opt = k + q + 1 and mst(G[R]) = 2k + q.
+For any γ > 0, we can choose q large enough compared to k to obtain mst(G[R]) < (1 +γ) · opt. However, if we run
+our dual growth procedure for any value of δ > 1
+k , we would grow dual variables corresponding to sets US containing
+the root r (for S = {si} with i ∈ {1, . . . , k}).
+Note that this is a stronger condition than asking for a MST being “globally almost optimal”, i.e.,
+mst(G[R]) < (1 + γ) · opt. For example, the instances shown in Figure 3 and Figure 4 are globally
+almost optimal, but not locally γ-MST-optimal. The main technical statement we prove in this paper is the
+following theorem.
+Theorem 2.3. Let γ = 0.0774 and δ = 0.00858. Then for any locally γ-MST-optimal instance (G, R) of
+the Steiner tree problem, the value of BCR is at least 1+δ
+2 · mst(G[R]).
+To prove Theorem 2.3, we will use the dual growing procedure described in Section 2.2. We provide
+a brief overview of how we analyze this procedure in Section 2.4. To see that Theorem 2.3 implies the
+desired bound on the integrality gap of BCR, we proceed as follows. Consider an instance I of the Steiner
+tree problem. If there exists a component K connecting a terminal set X with drop(X) ≥ (1 + γ) ·
+c(K), we contract X and iterate until we obtain a locally γ-MST-optimal instance I ′.6 If the cost of a
+terminal MST decreased by a lot through these iterative contractions, then we obtain a Steiner tree for the
+original instance I that is significantly cheaper than the cost of a terminal MST: this immediately implies an
+integrality gap smaller than 2. Otherwise the cost of a terminal MST in the locally γ-MST-optimal instance
+I ′ arising from the iterative contractions is almost the same as the cost of a terminal MST in the original
+instance I. Because the value of BCR can only decrease by contracting terminals, the lower bound on the
+value of BCR for I ′ is also a lower bound on the value of BCR for I, implying that a terminal MST in the
+instance I has cost roughly 2
+1+δ times the value of BCR, i.e., significantly less than twice the value of BCR.
+We refer to the proof of Theorem 1.1 in Section 3 for details.
+2.4 Proving feasibility of our dual solution to BCR
+We now provide an overview of how we prove our main technical statement, Theorem 2.3. We construct a
+solution to Dual-BCR of value 1+δ
+2 · mst(G[R]) as follows. Given a locally γ-MST-optimal instance(G, R)
+of the Steiner tree problem, we apply the dual growth procedure explained in Section 2.2. This yields a
+6This is not a polynomial-time algorithm, but this is not important for proving an upper bound on the integrality gap of BCR.
+We remark that it is also possible to work with a polynomial-time algorithm instead and we refer to Section 3.1 for details.
+9
+
+===== PAGE 11 =====
+
+1 1
+s1 sq
+· · ·
+v1 vq
+1 1 1
+˜s1 ˜sk
+. . .
+r
+s2 sq
+v1 vq
+r
+Figure 4: Consider the Steiner tree instance (G, R) that arises as the metric closure of the left depicted graph where
+all shown edges have cost 1. The terminal set R is shown by squares. Then opt = k + 2q and mst(G[R]) = 2k + 2q.
+For any γ > 0, we can choose q large enough compared to k to obtain mst(G[R]) < (1 + γ) · opt. However, if we
+run our dual growth procedure for any value of δ > 1
+k+1, we would grow dual variables corresponding to sets US
+containing the root r.
+On this instance, our dual growth procedure start by growing the dual variables z{s} to 1
+1+δ for s ∈ R \ {r}, which
+after scaling yields (1 + δ) · z{s} = 1 (as indicated in blue). In fact, any primal-dual algorithm directly applied to
+BCR, would naturally start by growing the dual variables for sets {s} with s ∈ R \ {r} to 1. However, we then
+cannot achieve a feasible solution to Dual-BCR of value more thanq + k + 1 from this, unless we decrease some dual
+variables again (which is not happening in standard primal-dual algorithms). We address this issue by first identifying
+an improving component to contract and only then applying some dual growth procedure. For example, we might
+consider a component K with vertex set {s1, v1, r, ˜s1, . . . ,˜sk}. Then contracting the set X of terminals connected by
+K, we obtain the (metric closure of) the instance shown on the right.
+vector z ∈ R2V
+≥0 that satisfies the constraints of Dual-BCR and where P
+U ⊆V zU = 1+δ
+2 · mst(G[R]). In
+order to obtain the desired solution to Dual-BCR of value 1+δ
+2 · mst(G[R]), the main difficulty is to prove
+zU = 0 for all sets U containing the root vertex r. In other words, we need to show that whenever at time t
+we grow a dual variable zUS for a set S ∈ S t, we have r /∈ US.
+To this end, we prove that at timet for any set S ∈ S t with r /∈ S, all vertices in the setUS have distance
+at most (1 + βδ) · t from S, where β := 7.249. Because the root r is in a different part of the partition S t
+than the terminals in S, the distance of r to each terminal in S is at least 2t, i.e., we have
+c(r, S) := min
+s∈S
+c(r, s) ≥ 2t > (1 + βδ) · t
+and we can thus conclude r /∈ US.
+To prove the claimed upper bound of (1 + βδ) · t on the distance c(u, S) of vertices u ∈ US from the
+terminal set S, we proceed as follows. If u ∈ US, this means that there exists a path of δ-tight edges from
+a terminal s ∈ S to a vertex u. There might be several such paths and we consider one such path P with a
+particular property (which we call S-tight; see Section 4.3) and upper bound its length, i.e, the total cost of
+its edges.
+To upper bound the length of P , we first analyze the structure of the terminal sets S that “contributed”
+to P . We say that a terminal set S contributed to a δ-tight edge e if some dual variable zUS contributed to
+the δ-tightness of the edge e, i.e., if we have grown a set US corresponding to S with e ∈ δ+(US) (at some
+earlier time). Then we say that the sets contributing to the path P are the sets contributing to some edge
+of P .
+10
+
+===== PAGE 12 =====
+
+(a)
+s C1
+C2
+C3
+(b)
+s
+P1 P2 P3
+Figure 5: The top part (a) of the figure shows the terminal sets that contributed to an S-tight path P that starts at
+a terminal s ∈ S. The sets S with s ∈ S are shown in black and dashed. All other sets contributing to P can be
+partitioned into chains C1, C2, and C3, where any two sets belonging two different chains Ci are disjoint. The bottom
+part (b) of the figure illustrates the path P with subpaths P1, P2, and P3. The sets from a chain Ci contribute only
+on edges of Pi. The sets containing the terminal s can contribute to any edge of P (including the edges of P1, P2,
+and P3).
+s
+s1 s2 s3
+P1 P2 P3
+Figure 6: An illustration of the component K that we construct for the path P from Figure 5. We add the grey paths
+from terminals s1, s2, and s3 to vertices of P1, P2, and P3, respectively. Every vertex si is contained in a set Si from
+the chain Ci.
+Among these sets that contributed to the path P we distinguish between sets containing the terminal s
+and other sets. If all the sets that contributed to the pathP contain the terminal s, it is relatively easy to show
+that the length of P is at most (1 + δ) · t (see Section 5.2). The difficulty is to analyze the contribution of
+the sets not containing s. The first step of our analysis is to show that the collection of sets that contributed
+to P but do not contain s is highly structured. It can be partitioned into chains C1, . . . ,Ck such that any two
+sets from different chains Ci are disjoint (see Section 5.3 and the top part of Figure 5 for an illustration).
+Moreover, we can show that each chain Ci contributes only on a subpath of the path P and these subpaths
+for different chains are disjoint 7 (see Section 5.4 and the bottom part of Figure 5 for an illustration). This
+structure allows us to analyze the contribution of every chain separately, which we do using a carefully
+chosen potential function (see Section 5.5).
+Finally, let us comment on how we make use of the fact that our Steiner tree instance is locally γ-MST-
+optimal in this analysis. We prove the claimed length bound on P by an induction over time. For every
+path P whose length we analyze, we construct a componentK connecting the endpoints of P (one of which
+is a terminal) and possibly further terminals. We do this by considering some setsS′ contributing to an edge
+7In our analysis, we will actually allow these subpaths to overlap in one single edge, which by some preprocessing step subdi-
+viding edges will have negligible length.
+11
+
+===== PAGE 13 =====
+
+(v, w) of the path P . We observe that v was contained in US′ at some earlier time (when S contributed to e
+by growing zUS′ ) and this allows us to use the induction hypothesis to show that the distance of S′ to v is
+small. We can now add a short path from S′ to v to our component. See Figure 6 for an illustration.
+Together with the component K we also construct a dual certificate that yields a lower bound on
+drop(X) for the set X of terminals connected by K (see the notion of drop certificates introduced in
+Section 4.2). Intuitively, whenever some set S′ not containing s (or more precisely a chain Ci) contributes
+to the path P , this allows us to improve the component K we obtain. Because our Steiner tree instance
+is locally γ-MST-optimal, we know that any component K connecting a terminal set X we obtain in this
+way cannot be “too good”, i.e., we know that (1 + γ) · c(K) > drop(X). This allows us to limit the total
+contribution of sets S′ not containing s to the path P .
+The details of our analysis are given in Sections 4 and 5.
+3 Constructing the Steiner tree and the dual solution to BCR
+In this section we describe in detail how we construct a Steiner tree and a dual solution for BCR whose cost
+differ by at most a factor 1.9988. We first describe the construction of a good Steiner tree and prove how
+our main result (Theorem 1.1) follows from Theorem 2.3 in Section 3.1. Then in Section 3.2 we describe
+the construction of our dual solution that we will use to prove Theorem 2.3.
+3.1 Constructing a good Steiner tree
+We now show how the bound on the integrality gap for locally γ-MST-optimal Steiner tree instances from
+Theorem 2.3 implies the upper bound on the integrality gap of BCR in the general case.
+Theorem 1.1. The integrality gap of BCR is at most 1.9988.
+Proof. We provide an (exponential-time) procedure to construct a Steiner tree of cost at most 1.9988 times
+the value of BCR. We are given an instance (G, R) of the Steiner tree problem, where without loss of
+generality G is a complete graph with metric edge costs (otherwise, take the metric closure). We start by
+computing a terminal MST, i.e, a minimum-cost spanning tree in G[R].
+While there exists a componentK connecting a set X ⊆ R of terminals with drop(X) ≥ (1+ γ) · c(K),
+we select one such component K, contract X, recompute a terminals MST, and iterate the process. Let
+(G′, R′) be the Steiner tree instance at the end of the process which, by construction, is locally γ-MST-
+optimal.
+We can construct a Steiner tree T for the original instance (G, R) by taking a terminal MST 8 in the
+instance (G′, R′) and adding the components K that we selected in the course of our procedure. Note that
+each of the selected components K connecting a terminal set X satisfies drop(X) ≥ (1 + γ) · c(K), hence
+the total cost of these components is at most 1
+1+γ · (mst(G[R]) − mst(G′[R′])). Define ρ = mst(G′[R′])
+mst(G[R]) . We
+conclude that
+c(T ) ≤ mst(G′[R′]) + 1
+1+γ · (mst(G[R]) − mst(G′[R′])) = (ρ + 1−ρ
+1+γ ) · mst(G[R]).
+Let us next lower bound the value of BCR. This value is at least 1
+2 · mst(G[R]) (see Section 2.2). By
+Theorem 2.3, the value of BCR for the instance(G′, R′) is at least 1+δ
+2 · mst(G′[R′]) = 1+δ
+2 · ρ · mst(G[R]).
+8Technically, we take a set of edges in the input instance corresponding to the edges of such terminal MST.
+12
+
+===== PAGE 14 =====
+
+Because the contraction of vertex sets can only decrease the value of BCR, the latter is also a valid lower
+bound on the value of BCR for the original instance (G, R). Altogether, the value of BCR is at least
+max
+n
+1
+2 · mst(G[R]), 1+δ
+2 · ρ · mst(G[R])
+o
+.
+Therefore, the integrality gap of BCR is at most
+max
+ρ∈[0,1]
+min
+n
+2
+
+ρ + 1−ρ
+1+γ
+
+, 2
+(1+δ)ρ ·
+
+ρ + 1−ρ
+1+γ
+o
+= 2 · 1 + γ + δ
+(1 + γ) · (1 + δ) < 1.9988,
+where the maximum is attained for ρ = 1
+1+δ .
+Note that the above argument only proves a bound on the integrality gap of BCR. It does not show
+how to identify the improving components used in the proof of Theorem 1.1 in polynomial time. One can
+perform this step approximately, by restricting to components connecting a constant number of terminals
+due to a classical result by Borchers and Du [BD95]. While this leads to a polynomial running time, the
+running time will be very high. We thus highlight that our proof of Theorem 2.3 yields another possibility
+to turn the proof of Theorem 1.1 into an algorithm computing a Steiner tree of cost at most1.9988 times the
+value of BCR.
+As already indicated in Section 2.4, our proof of Theorem 2.3 has the form of an algorithm that either
+produces a good Dual-BCR solution, or identifies a component that contradicts the assumption of the in-
+stance being locally γ-MST-optimal. This leads to a scale-or-contract algorithm (which may be seen in
+an analogy to the round-or-cut method that has been used very successfully for various combinatorial opti-
+mization problems), where the procedure in the proof of Theorem 1.1 can be implemented as follows. Try
+to construct a good Dual-BCR solution, and if it fails take the component that manifests the reason of the
+failure, contract the set of terminals the component connects, and iterate in the contracted graph. Then we
+can define (G′, R′) to be the instance on which the construction of a good solution to Dual-BCR succeeded
+and analyze the algorithm as in the proof of Theorem 1.1.
+In the interest of clarity of the argument that BCR has integrality gap less than 2, which is the focus of
+this work, we omit the details of the argument that improving components may be found efficiently.
+3.2 Dual growth process for BCR
+In order to prove Theorem 2.3, fix a locally γ-MST optimal instance (G, R) of the Steiner tree problem,
+where G = (V, E, c) denotes the given edge-weighted graph andR denotes the set of terminals. We assume
+without loss of generality that G is a complete graph with metric edge costs. Recall that for t ∈ R≥0, we
+defined Gt[R] to denote the graph G[R] restricted to the edges of cost at most 2t. Then, S t is the partition
+of R into the vertex sets of the connected components of Gt[R] and tmax is the first time t where Gt[R] is
+connected.
+To prove Theorem 2.3, we construct a solution to Dual-BCR of value 1+δ
+2 · mst(G[R]). In order to
+simplify the analysis of our construction, we consider a graph Gε that arises from G by subdividing edges.
+We will choose some sufficiently small ε > 0 and subdivide edges of G so that every edge of the resulting
+graph Gε has cost at most ε. We write Gε = (V ε, Eε, c) to denote the resulting weighted graph.
+We will construct a solution to Dual-BCR for(Gε, R), which gives rise to a solution to Dual-BCR for the
+original instance (G, R) by undoing the subdivision of edges. More precisely, ifz is a solution to Dual-BCR
+for (Gε, R), we construct a solution z to Dual-BCR for (G, R) by setting
+zU :=
+X
+W ⊆V ε:
+W ∩V =U
+zW
+13
+
+===== PAGE 15 =====
+
+for every set U ⊆ V \ {r} with U ∩ R ̸= ∅. If z is a feasible solution to Dual-BCR for (Gε, R), then z is a
+feasible solution to Dual-BCR for (G, R) of the same value.
+We choose ε′ > 0 small enough (for example ε′ := 10−7) and let
+ε := min
+n
+ε′
+2 · c({s, s′}) : s, s′ ∈ R, s ̸= s′
+o
+. (1)
+Note that the fact that (G, R) is locally γ-MST-optimal (and γ > 0) implies that the distance c({s, s′})
+between two terminals is positive because otherwise the component K connecting s and s′ by a direct edge
+satisfies drop({s, s′}) = c({s, s′}) ≥ (1 + γ) · c(K). Therefore, we indeed have ε > 0.
+We now describe our construction of a solution to Dual-BCR for (Gε, R), where we will proceed as
+outlined in Section 2.2. We write − →E ε to denote the set of edges resulting fromEε by bidirecting every edge,
+i.e, − →E ε contains the directed edges (v, w) and (w, v) for every edge {v, w} ∈ Eε. We define the cost of a
+directed edge (v, w) to be the same as the cost of the corresponding undirected edge {v, w}.
+For every time t ∈ [0, tmax] we define a feasible dual solutionzt to Dual-BCR for (Gε, R), starting with
+zt = 0 at time t = 0. The vector (1 + δ) · ztmax will be the desired dual solution of value 1+δ
+2 · mst(G[R]).
+For convenience of notation, we view zt as a vector in R2V
+(although Dual-BCR has variables only for
+subsets containing at least one terminal, but not the root) and we will ensure zt
+U = 0 for sets U for which
+Dual-BCR has no variable.
+Definition 3.1. We say that an edge e ∈ − →E ε is δ-tight at time t if
+X
+U ⊆V ε:e∈δ+(U )
+zt
+U = 1
+1 + δ · c(e).
+For a set S of terminals and a time t, we define
+U t
+S :=
+n
+v ∈ V ε : v is reachable from S by δ-tight edges at time t
+o
+,
+where v being reachable from S by δ-tight edges means that there exists an s-v path consisting of δ-tight
+edges for at least one terminal s ∈ S.
+Then we construct the dual solutionzt starting with z0 = 0 by growing at every timet the dual variables
+corresponding to sets U t
+S for all S ∈ S t with r /∈ S. Formally, we then have for every time t ∈ [0, tmax],
+zt :=
+Z t
+0
+X
+S∈St′ :r /∈S
+χU t′
+S dt′,
+where χU t′
+S is the vector y ∈ R2V
+with yU = 1 for U = U t′
+S and yU = 0 otherwise.
+By the definition of the setsU t
+S, we never grow a dual variable corresponding to a setU with an outgoing
+δ-tight edge. Hence, we maintain the invariant that for every edge e ∈ − →E ε, we have
+X
+U ⊆V ε:e∈δ+(U )
+zt
+U ≤ 1
+1+δ · c(e). (2)
+Because the set U t
+S always contains the terminal set S ⊆ R, we only grow dual variables corresponding to
+sets containing at least one terminal. The most difficult part of our analysis is to prove that we never grow
+dual variables corresponding to sets U with r ∈ U. In Section 4, we will prove the following.
+14
+
+===== PAGE 16 =====
+
+δ = 0.00858
+γ = 0.0774
+ε′ = 10−7
+β = 7.249
+α = 2.081
+λ = 0.02004
+µ = 0.377
+M =
+2
+1+γ − 1 − βδ
+(1+βδ)2
+1−βδ − ( 2
+1+γ − 1 − βδ)
+≈ 1.941792
+Table 1: A list of the constants appearing in our proofs.
+Lemma 3.2. Let γ = 0.0774 and δ = 0.00858. Then for every set U ⊆ V ε with r ∈ U we have ztmax
+U = 0.
+From Lemma 3.2 we conclude that ztmax
+U = 0 for every set U ⊆ V ε for which Dual-BCR for (Gε, R)
+does not have a variable (i.e., where U ∩ R = ∅ or r ∈ U). Therefore, by (2), the vector (1 + δ) · ztmax is a
+feasible solution to Dual-BCR for (Gε, R). It has value
+(1 + δ)
+X
+U ⊆V ε
+ztmax
+U = (1 + δ)
+Z tmax
+0
+
+|S t| − 1
+
+dt = 1+δ
+2 · mst(G[R]),
+where we refer to Section 2.1 for an explanation of the last equality. In order to prove Theorem 2.3 and thus
+Theorem 1.1, it now remains to prove Lemma 3.2.
+In our proof of Lemma 3.2 we will define a few constants (besides the already mentioned δ, γ, and ε′).
+For easier reference, we provide an overview of all these constants in Table 1.
+4 Feasibility of the dual solution (Proof of Lemma 3.2)
+In this section we describe several key concepts we use to prove Lemma 3.2. We start with a few basic
+observations about the partitions S t of the terminal set R in Section 4.1. Then we introduce the concept
+of drop certificates, which we will use to derive lower bounds on drop(X) for terminal sets X ⊆ R (Sec-
+tion 4.2). Finally, in Section 4.3 we introduce the concept ofS-tight paths and argue why it suffices to bound
+the length of such paths in order to prove Lemma 3.2. In Section 5 we will then prove such an upper bound
+on the length of S-tight paths.
+4.1 The partitions S t of the terminals
+Recall that (G, R) is a locally γ-MST-optimal instance of the Steiner tree problem, where G = ( V, E, c)
+denotes the given complete weighted graph and R denotes the set of terminals. For t ∈ R≥0, we defined
+Gt[R] to denote the graph G[R] restricted to the edges of cost at most 2t. Then, S t is the partition of R into
+the vertex sets of the connected components of Gt[R] and tmax is the first time t where Gt[R] is connected.
+We view S t as a partition evolving over time t. Then S t only changes at finitely many times t, because
+every time it changes the number of its parts decreases by one. We write S to denote the union of all
+set families S t for t ∈ [0, tmax). Whenever S t changes, some of its parts get merged into a larger part.
+Therefore, the unionS of all collectionsS t is a laminar family. (This means that for every two setsA, B ∈ S ,
+we have A ⊆ B, B ⊆ A, or A ∩ B = ∅.)
+15
+
+===== PAGE 17 =====
+
+If S ∈ S t and r /∈ S, we say that S is active at time t. We observe that for every set S ∈ S , the set of
+times at which S is active is a (half-open) interval.
+Definition 4.1. For a set S ∈ S with r /∈ S, we write [aS, dS) to denote the interval of times t with S ∈ S t.
+We call aS the activation time of S and dS the deactivation time of S.
+If at some time t the terminal set S is active and we havee ∈ δ+(U t
+S), then we say that S is contributing
+to e at time t.
+Recall that for two terminals s1, s2 we write tmerge(s1, s2) to denote the first time t ∈ [0, tmax] at which
+s1 and s2 belong to the same part of the partition S t. We highlight that these merge times satisfy the
+following properties.
+Observation 4.2. For a set S ∈ S with r /∈ S and two terminals s1 and s2 with s1 ∈ S, we have
+tmerge(s1, s2) < d S if and only if s2 ∈ S.
+Observation 4.3. For any three terminals s1, s2, s3, we have
+tmerge(s1, s3) ≤ max
+
+tmerge(s1, s2), t merge(s2, s3)
+	
+.
+We also observe that the minimum deactivation time of a set S ∈ S with r /∈ S is half of the minimum
+distance of two terminals. Therefore, by the choice of ε in (1), we have
+ε ≤ ε′ · dS (3)
+for every set S ∈ S with r /∈ S.
+Recall that the graph Gε = (V ε, Eε, c) arose from G by the subdivision of edges. We write dist(v, w)
+to denote the shortest-path distance (with respect to the edge costs c) between any two vertices v and w in
+the graph Gε. We highlight that for any two vertices v and w of the original graph G this distance is the
+same as the cost of the edge {v, w} of G, where we use that the edge costs of the complete graph G satisfy
+the triangle inequality. We observe that by the definition of the partitions S t for t ∈ [0, tmax], we have the
+following lower bound on the distance of two terminals.
+Observation 4.4. For any two terminals s1, s2, we have
+dist(s1, s2) ≥ 2 · tmerge(s1, s2).
+4.2 Drop certificates for lower bounds on the cost of components
+In this section we derive the key property of locally γ-MST-optimal instances that we will use to prove
+Lemma 3.2. Recall that drop(X) denotes the total cost of the terminal MST edges we could drop when
+adding a component connecting the terminals in X. We now introduce the notion of a drop certificate
+for X, which provides a lower bound on drop(X) as we will show in Lemma 4.6 below. See Figure 7 for
+an example.
+Definition 4.5. We call ˜S ⊆ S a drop certificate for a terminal set X ⊆ R if
+• | ˜S| = |X| − 1, and
+• for all s1, s2 ∈ X with s1 ̸= s2, there is a set S ∈ ˜S with |S ∩ {s1, s2}| = 1.
+We also say that 2P
+S∈ ˜S dS is the value of the drop certificate ˜S.
+16
+
+===== PAGE 18 =====
+
+Figure 7: An example of a drop certificate ˜S (green) for a set X of terminals (black squares).
+We next show that the value of any drop certificate for X is a lower bound on drop(X), which justifies
+the name “drop certificate”. Even more, we show that the maximum value of a drop certificate for X is
+equal to drop(X). We remark that for the remainder of our analysis it would be sufficient to only prove that
+the drop(X) is at least the maximum value of a drop certificate, but we prove equality for completeness and
+to provide more intuition.
+Lemma 4.6. Let X ⊆ R and K be a component connecting X. Then drop(X) is the maximum value of a
+drop certificate for X, i.e.,
+drop(X) := max
+n
+2P
+S∈ ˜S dS : ˜S is a drop certificate for X
+o
+.
+Proof. Recall that the graph Gt[R] for t ∈ R≥0 is the graph G[R] restricted to the edges of cost at most
+2t. Moreover, for t ∈ R≥0 we write S t to denote the partition of R into the vertex sets of the connected
+components of Gt[R]. Any terminal MST has cost mst(G[R]) = 2
+R tmax
+0
+ 
+|S t| − 1
+
+dt.
+For any t ∈ R≥0 we write S t
+X to denote the partition of R/X into the vertex sets of the connected
+components of Gt[R]/X. Then any minimum-cost spanning tree of G[R]/X has cost mst(G[R]/X) =
+2
+R tmax
+0
+ 
+|S t
+X | − 1
+
+dt. Therefore, we have
+drop(X) = mst( G[R]) − mst(G[R]/X) = 2
+Z tmax
+0
+
+|S t| − |S t
+X |
+
+dt.
+We will show that for any drop certificate ˜S for X and any time t ∈ [0, tmax] we have
+|S t| − |S t
+X | ≥
+
+S ∈ ˜S : dS ≥ t
+	 (4)
+and that for every X ⊆ R there exists a drop certificate that satisfies for all t ∈ [0, tmax] the inequality (4)
+with equality. Because the value of a drop certificate ˜S is
+2
+X
+S∈ ˜S
+dS = 2
+Z tmax
+0
+
+S ∈ ˜S : dS ≥ t
+	 dt,
+this will complete the proof.
+We now consider a drop certificate ˜S for X and a time t ∈ [0, tmax] and prove (4). Note that the
+partition S t
+X of R/X arises from the partition S t of R by merging the parts of S t that have a nonempty
+17
+
+===== PAGE 19 =====
+
+intersection with X. Let S1, . . . , Sk ∈ S t be the parts of S t that have a nonempty intersection with X and
+write Xi := Si ∩ X for each i ∈ { 1, . . . , k}. Because S is a laminar family, every set S ∈ ˜S ⊆ S that
+separates two terminals s, s′ ∈ Xi ⊆ Si, i.e., where |S ∩{s, s′}| = 1, must be a proper subset ofSi. Because
+the drop certificate ˜S contains a set separating s and s′ for all terminal pairs s, s′ ∈ Xi, it must contain at
+least |Xi| −1 proper subsets of Si. Each such proper subset S ∈ S of Si ∈ S t satisfies dS < t. We conclude
+that the number of sets S in the drop certificate ˜S with dS < t is at leastPk
+i=1
+ 
+|Xi| − 1
+
+= |X| − k and
+hence
+
+S ∈ ˜S : dS ≥ t
+	 ≤ | ˜S| −
+ 
+|X| − k
+
+= |X| − 1 −
+ 
+|X| − k
+
+= k − 1 = |S t| − |S t
+X |,
+which shows (4).
+Finally, we consider a set X ⊆ R and construct a drop certificate ˜S for X satisfying (4) with equality
+for all t ∈ [0, tmax]. We again view the partition S t as a partition changing over time, starting with t = 0
+and ending with t = tmax. At time t = 0, every element of X is in a different part of S t. (Here, we use that
+because our Steiner tree instance is locally γ-MST-optimal, the distance of every two terminals is positive.)
+At time t = tmax the partition S t has only one part containing all elements of X. Going from time t = 0 to
+time t = tmax, the partition S t changes at discrete time steps by merging several of its parts to a single new
+part. Whenever several parts S1, . . . , Sk with a nonempty intersection with X merge into a single part at
+time t, we include the parts S1, . . . , Sk−1 into ˜S. Note that the deactivation time of these sets S1, . . . , Sk−1
+is equal to the current time t and hence the set family ˜S we obtain in this way satisfies (4) with equality for
+all t ∈ [0, tmax]. Because we add k −1 sets whenever the number of parts ofS t with a nonempty intersection
+with X decreases by k − 1, the total number of sets included in ˜S is indeed |X| − 1. Moreover, for any two
+distinct terminals s, s′ ∈ X, we consider the timet = tmerge(s, s′), i.e., the first timet where s and s′ belong
+to the same part of S t. At this time t, the two parts Si and Sj containing s and s′, respectively, got merged
+and hence we added at least one of them, say Si to ˜S. Then Si separates s and s′, i.e, |S ∩ {s, s′}| = 1,
+which proves that ˜S is indeed a drop certificate for X.
+The following is the key property of locallyγ-MST-optimal instances that we will use to prove Lemma 3.2.
+Corollary 4.7. Let X ⊆ R and ˜S ⊆ S be a drop certificate for X. Then every component K connecting
+the terminals in X has cost c(K) > 2
+1+γ
+P
+S∈ ˜S dS.
+Proof. Because our instance (G, R) of the Steiner tree problem is locally γ-MST-optimal, we havec(K) >
+1
+1+γ · drop(X) for every component K connecting X. By Lemma 4.6, the value 2P
+S∈ ˜S dS of any drop
+certificate ˜S for the terminal set X is a lower bound on drop(X).
+4.3 S-tight paths
+We now analyze the dual growth procedure described in Section 3.2 and prove Lemma 3.2. From now on,
+we will only work with the bidirected graph (V ε, − →E ε), but not with the original graph G anymore.
+We need to show that for any time t and for every active set S ∈ S t, the set U t
+S does not contain the
+root r. Recall that U t
+S is the set of vertices v that are reachable from the set S by δ-tight edges at time t. For
+a vertex v, we denote by tSv the first time by which v is reachable from S by δ-tight edges.
+By the definition of U t
+S, for every vertex v ∈ U t
+S there is an S-v path of δ-tight edges at time t. (An S-v
+path is an s-v path for some s ∈ S.) There might be many such paths and we will consider one such path P
+with particular properties. Informally speaking, we want the path P to be a “first path by which we reached
+18
+
+===== PAGE 20 =====
+
+v from S”. Moreover, also for every other vertex u of P , we want the s-u subpath of P to be a “first path
+by which we reached u from S”. More precisely, for a directed path P and vertices a and b of P with a
+lying before b on P , we denote by P[a,b], the a-b subpath of P . We want the s-v path P (with s ∈ S) to have
+the following property. For every vertex u of P , all edges of the s-u subpath P[s,u] of P should be δ-tight
+already at time tSu.
+An equivalent way of expressing the two above mentioned properties of P is to require all edges of P
+to be S-tight, which we define as follows.
+Definition 4.8. An edge e = (u, v) ∈ − →E ε is S-tight if e is δ-tight at time tSv and tSu ≤ tSv.
+Definition 4.9. For a set S ∈ S and a vertex v ∈ V ε, we say that an S-v path is S-tight if all its edges are
+S-tight.
+We highlight that for every vertex u of an S-tight path P starting at s ∈ S, the subpath P[s,u] is also
+S-tight. A simple induction on the length of the path P implies that indeed every S-tight path P has the
+property that for every vertex u of P all edges of P[s,u] are δ-tight at time tSu.
+Moreover, we observe that whenever there exists some S-v path consisting of δ-tight edges, then there
+also exists an S-tight S-v path.
+Lemma 4.10. If for a set S ⊆ R, a vertex w is reachable from S by δ-tight edges, then there exists an
+S-tight path (from S) to w:
+Proof. We prove the statement for every vertex w in an order of non-decreasing tSw. Thus, when proving
+the statement for a vertex w, we may assume that it holds for every vertex v with tSv < t Sw.
+We consider any S-w path Q consisting of δ-tight edges at time tSw, which exists by definition of the
+time tSw. Then we have tSu ≤ tSw for every vertex u of Q. If tSw = 0, the path Q is S-tight and hence we
+may assume that this is not the case. We consider the last vertex v of Q with tSv < t Sw. Then there exists
+an S-tight S-v path Q′. Because tSu ≤ tSv < t Sw for every vertex u of Q′, the only vertex of Q[v,w] that is
+contained in Q′ is the vertex v. Appending the path Q[v,w] to the S-tight path Q′ yields the desired S-tight
+S-w path P .
+In particular, Lemma 4.10 implies that for every vertex v in the set U t
+S for S ∈ S t, there exists some
+S-tight path ending at v.
+The key step of our proof of Lemma 3.2 will be to bound the maximum length of S-tight paths. For
+a path P , we write c(P ) to denote its length, i.e., the total cost of its edges. Because our goal is to show
+that the root r is not contained in U t
+S for active sets S at time t, we will only consider S-tight paths existing
+before the deactivation time dS of the set S.
+Lemma 4.11. Let β := 7.249. Let t ∈ [0, tmax) and S ∈ S with t < d S and r /∈ S. Then every S-tight path
+P has length
+c(P ) ≤ (1 + βδ) · t.
+We prove Lemma 4.11 in Section 5. First, we show that it implies Lemma 3.2.
+Lemma 3.2. Let γ = 0.0774 and δ = 0.00858. Then for every set U ⊆ V ε with r ∈ U we have ztmax
+U = 0.
+Proof. Consider a time t ∈ [0, tmax) and an active set S ∈ S t with r /∈ S. For every vertex v ∈ U t
+S,
+there exists an S-tight S-v path by Lemma 4.10. Then Lemma 4.11 implies that this path has length at most
+(1 + βδ) · t and hence
+dist(S, v) := min
+s∈S
+dist(s, v) ≤ (1 + βδ) · t < 2 · t. (5)
+19
+
+===== PAGE 21 =====
+
+Because r /∈ S, we have dS ≤ tmerge(s, r) for all s ∈ S by Observation 4.2. Thus, by Observation 4.4, we
+have dist(S, r) ≥ 2 · dS > 2 · t. This implies r /∈ U t
+S.
+We remark (although we will not need this fact) that the same argument implies that for any active set
+S at time t, no terminal s ∈ R \ S is contained in U t
+S, i.e., the terminals contained in U t
+S are exactly those
+in S. The special case s = r is the statement on Lemma 3.2.
+The reason for choosing the constant δ = 0.00858 smaller than required for (5) is that we will need this
+small value of δ to guarantee various structural properties in the proof of Lemma 4.11.
+It now remains to prove Lemma 4.11.
+5 Proof of Lemma 4.11
+We continue to work with the graph (V ε, − →E ε) throughout this section, where we prove Lemma 4.11. We
+observe that the set ofδ-tight edges changes only a finite number of times at discrete time steps. In particular,
+the set of S-tight paths for sets S ∈ S changes only a finite number of times at discrete time steps. This
+will allow us to prove Lemma 4.11 by induction over time. In fact, we will prove a stronger statement than
+Lemma 4.11 by induction. This will be useful because we then have a stronger induction hypothesis that we
+can use in our induction step. We start by explaining the statement we prove by induction.
+5.1 Inductive argument to construct components
+To explain the statement we prove by induction, we need the following notation. For a set X of terminals
+and a terminal s ∈ X, we write
+drop(X, s) := max
+n
+2P
+S∈ ˜S dS : ˜S is a drop certificate for X and ˜S ⊆ 2V \{s}
+o
+to denote the maximum value of a drop certificate consisting only of sets not containing the vertex s. Con-
+sidering such drop certificates with sets not containing a particular vertex s will be useful when extending a
+component to a larger component and constructing a drop certificate for the larger component from the drop
+certificate of the original component. We remark that by Corollary 4.7 we havec(K)− 1
+1+γ ·drop(X, s) > 0
+for every component K connecting a terminal set X with s ∈ X.
+Let us fix constants α := 2.081, µ := 0.377, and λ := 0.02004. We are now ready to state the claim that
+we will prove by induction. For an illustration of (a), see Figure 8.
+Claim 5.1. Consider a time t ∈ [0, tmax), a set S ∈ S with t < d S and r /∈ S, and an S-tight path P (at
+time t). Let s be the start vertex of P , which is a terminal, and let w be the end vertex of P , which can be an
+arbitrary vertex. Then we have the following:
+(a) There exists a terminal set X ⊆ R with s ∈ X and a component K connecting X ∪ {w} such that
+c(P ) ≤ (1 + δ) · t + λ · drop(X, s)
+c(K) − 1
+1+γ · drop(X, s) ≤ (1 + δ) · t − µ · drop(X, s)
+tmerge(s, s′) < (1 + αδ) · t for all s′ ∈ X.
+(b) We have c(P ) ≤ (1 + βδ) · t.
+20
+
+===== PAGE 22 =====
+
+s wP
+s wK
+Figure 8: Illustration of (a) of Claim 5.1. On the left, we see the path P from s to w. On the right, we see the
+component K connecting w and a set X of terminals (shown as squares).
+Let us provide a few observations about these technical statements. First, we observe that (b) is exactly
+what we claimed in Lemma 4.11 and thus proving (a) and (b) will complete the proof of Lemma 4.11.
+Moreover, we observe that (b) is a direct consequence of (a) because by Corollary 4.7 we have
+0 ≤ c(K) − 1
+1+γ · drop(X, s) ≤ (1 + δ) · t − µ · drop(X, s),
+implying drop(X, s) ≤ 1+δ
+µ · t and hence
+c(P ) ≤ (1 + δ) · t + λ · drop(X, s) ≤ (1 + δ) · (1 + λ
+µ) · t ≤ (1 + βδ) · t,
+where we refer to Table 1 for the values of the constants used in the last inequality.
+Let us also briefly comment on the conditiontmerge(s, s′) < (1+ αδ)·t for all s′ ∈ X. It will be used in
+our proof when combining two components K1 and K2, connecting terminal sets X1 and X2, respectively
+to a new component connecting X1 ∪ X2. (The two components K1 and K2 arise by applying the induction
+hypothesis to different paths P .) Then we will use this condition to argue that the terminal sets X1 and X2
+are disjoint and to show that we can use drop certificates for X1 and X2 to construct a new drop certificate
+for X1 ∪ X2. See the proof of Lemma 5.11 for details.
+Recall that the set of δ-tight edges , and thus the set ofS-tight paths for sets S ∈ S , changes only a finite
+number of times at discrete time steps. This allows us to prove Claim 5.1 by induction over time. At time 0
+only edges of cost 0 are δ-tight and hence the claim trivially holds (withX = {s}). We now consider a time
+t∗ > 0 and may assume by induction that Claim 5.1 holds for all times t < t ∗ (for every set S ∈ S with
+dS ≥ t and r /∈ S and for every S-tight path existing at time t).
+To prove Claim 5.1 for the current time t∗ and a fixed set S∗ ∈ S with dS∗
+> t ∗ and r /∈ S∗, we
+apply induction over the number of edges of the path. We fix an S∗-tight path P ∗ existing at time t∗ and
+may assume by the induction hypothesis that Claim 5.1 holds for allS∗-tight paths with strictly fewer edges
+than P ∗ (existing at the current time t∗). We have already observed above that (b) follows from (a) and
+Corollary 4.7. Hence, it suffices to prove (a).
+We start by bounding the total contribution of sets containing the start vertex s∗ of P ∗ to edges of P ∗
+(Section 5.2). Next, in Section 5.3, we analyze the structure of other sets contributing to P ∗ and prove that
+these can be partitioned into chains C1, . . . ,Ck as outlined in Section 2.4. In Section 5.4, we then prove that
+we can subdivide the path P ∗ into two subpaths (overlapping in only one edge which has length at most
+ε and is hence negligible) such that on the first subpath only sets from the chains C1, . . . ,Ck−1 (and sets
+containing s∗) contributed and on the second subpath only sets from the chain Ck (and sets containing s∗)
+21
+
+===== PAGE 23 =====
+
+contributed. To the first subpath we will apply the induction hypothesis and the length of the second subpath
+will be analyzed in Section 5.5. Finally, Section 5.6 describes how to put these ingredients together to
+prove (a).
+5.2 Bounding the contribution of sets containing s∗
+Let s∗ be the start vertex of the path P ∗ and let w∗ be the end vertex of P ∗. In this section we analyze the
+total contribution of sets containing s∗ to the path P ∗ (until the current time t∗).
+The following simple observation will be useful.
+Observation 5.2. For a vertex v and two sets A, B ∈ S with A ⊆ B, we have tBv ≤ tAv.
+Lemma 5.3. For every edge(v, w) of the path P ∗, the total contribution of terminal setsS ∈ S with s∗ ∈ S
+is at most tS∗w − tS∗v.
+Proof. Consider a set S ∈ S with s∗ ∈ S that contributed to an edge of P ∗ (before the current time t∗),
+implying aS < t ∗ < d S∗
+(where the last inequality holds by the assumption of Claim 5.1). We conclude
+that S∗ cannot be a proper subset of S. Hence, because s∗ ∈ S ∩ S∗ and S is a laminar family, we have
+S ⊆ S∗. Then by Observation 5.2, we have for every vertex v,
+t{s∗}v ≥ tSv ≥ tS∗v.
+Because P ∗ is an S∗-tight path starting at the terminal s∗ ∈ S∗, we have for every vertex v of P ∗ that
+t{s∗}v = tS∗v and hence tSv = tS∗v. Because P ∗ is S∗-tight, we have tS∗v ≤ tS∗w for every edge (v, w) of
+P ∗. By the definition of the set U t
+S for time t, an edge (v, w) is only outgoing of U t
+S if tS∗v = tSv ≤ t <
+tSw = tS∗w. Thus, at most one outgoing edge of U t
+S is contained in P ∗. Because at every time t there is at
+most one active set S ∈ S t containing s∗, this completes the proof.
+Lemma 5.3 implies that the total contribution of the terminal sets S ∈ S with s∗ ∈ S to the path P ∗ is
+at most X
+(v,w)∈P ∗
+(tS∗w − tS∗v) = tS∗w∗
+− tS∗s∗
+≤ t∗ − 0 = t∗.
+Note that we crucially used both dS∗
+≥ t∗ and the fact that P ∗ is S∗-tight. See Figure 9 for an example that
+these conditions are necessary.
+We conclude that if every set that contributed to P ∗ contains s∗, we have t∗ ≥ 1
+1+δ · c(P ∗) because all
+edges of P ∗ are δ-tight. Then c(P ∗) ≤ (1 + δ) · t∗, which implies Claim 5.1 for K = P ∗ and X = {s∗}.
+The main difficulty when proving Claim 5.1 is to bound the contribution of sets not containing the
+terminal s∗. Next, we will investigate the structure of these sets.
+5.3 Structure of the sets contributing to the path P ∗
+In this section we investigate the structure of the sets that contributed to edges of the path P ∗ (before the
+current time t∗). We denote the collection of sets that contributed to P ∗ but do not contain the vertex s∗ by
+C ⊆ S . In Section 5.2, we have shown Claim 5.1 in the special case whereC = ∅. From now on, we assume
+that C is nonempty.
+We will prove that we can partitionC into chains C1, . . . ,Ck such that any two sets from different chains
+are disjoint; see Figure 5. Moreover, we will prove that every set from C1 ∪ · · · ∪ Ck−1 is a subset of S∗.
+22
+
+===== PAGE 24 =====
+
+(a)
+s1
+s2
+s3
+r1 η η η η 3
+1 − η
+1
+2
+1+δ 4
+(b)
+s1 s2 s3
+1
+1+δ
+1
+1+δ
+δ
+1+δ
+1
+1
+(c)
+s1
+s2
+s3
+rw∗
+1 − η
+η
+η
+1
+1
+η
+(d)
+s1
+s2
+s3
+rw∗
+Figure 9: An example illustrating that the conditions dS∗
+> t ∗ and P ∗ being S∗-tight are necessary. We choose η
+such that 0 < η ≤ δ. The instance is given by the (metric closure of) the graph shown in (a). The sets in S not
+containing r are shown in (b). The number next to a set S shows the length dS − aS of the time interval where S is
+active. (c) shows the (scaled) dual solution (1 + δ)zt∗
+at time t∗ = 1+η
+1+δ . The sets are shown in the same color as their
+corresponding set in (b). (d) shows the δ-tight edges at time t∗, where edges are colored by the set contributing to it.
+(In this example, this is only one set for each edge.) There is only one path from s1 to w∗ consisting of δ-tight edges.
+This path is {s1}-tight (but the deactivation time of {s1} is less than t∗) but it is not {s1, s2}-tight. The contribution
+of sets containing s1 is 1+2η
+1+δ > t ∗.
+23
+
+===== PAGE 25 =====
+
+Consider a set S ∈ C . Then, because S ∈ S and s∗ /∈ S, the merge time tmerge(s, s∗) is the same for
+all terminals s ∈ S. We denote this time by tmerge(S, s∗). Because for every set S ∈ C we have s∗ /∈ S,
+Observation 4.2 implies the following.
+Observation 5.4. For every set S ∈ C , we have tmerge(S, s∗) ≥ dS.
+We now prove that a set S ∈ C cannot contribute to edges of the path P ∗ that are too far away from the
+start vertex s∗ of P ∗.
+Lemma 5.5. If a set S ∈ C contributed to an edge (u, v) of the path P ∗, then
+c(P ∗
+[s∗,u]) ≤ (1 + βδ) · tmerge(S, s∗).
+Proof. First, we show tS∗u ≤ tmerge(S, s∗). If tmerge(S, s∗) ≥ t∗, this follows from tS∗u ≤ t∗ ≤
+tmerge(S, s∗), where we used that all edges of the path P ∗
+[s∗,u] are δ-tight at the current time t∗.
+If tmerge(S, s∗) < t ∗, the fact that t∗ < d S∗
+(by the assumptions of Claim 5.1) implies S ⊊ S∗ by
+Observation 4.2. Hence, using Observation 5.2 and Observation 5.4 we then get tS∗u ≤ tSu ≤ dS ≤
+tmerge(S, s∗), where for the second last inequality we used that S contributed to the edge (u, v) before time
+dS. We conclude tS∗u ≤ tmerge(S, s∗) in both cases.
+Because all edges of the pathP ∗
+[s∗,u] are S∗-tight (using that P ∗ is S∗-tight), the path P ∗
+[s,u] is an S∗-tight
+path and it has strictly fewer edges than P ∗ (using that (u, v) is an edge of P ∗). Therefore, we can apply (b)
+from the induction hypothesis to obtain c(P ∗
+[s∗,u]) ≤ (1 + βδ) · tS∗u ≤ (1 + βδ) · tmerge(S, s∗).
+We now prove that for every set S ∈ C , its merge time tmerge(S, s∗) is approximately equal to its
+deactivation time dS. Recall that by Observation 5.4 we have tmerge(S, s∗) ≥ dS. The following lemma
+shows that the deactivation time dS cannot be much smaller than the merge time tmerge(S, s∗).
+Lemma 5.6. For every set S ∈ C , we have
+min{t∗, dS} > 1−βδ
+1+βδ · tmerge(S, s∗).
+Proof. By the definition of tmerge(S, s∗) and Observation 4.4, we have dist(S, s∗) ≥ 2 · tmerge(S, s∗). Let
+(u, v) be an edge of P ∗ to which S contributed. Then tSu < min{t∗, dS}. By Lemma 4.10 there existed an
+S-tight path P from S to u at time tSu < min{t∗, dS}. Using (b) of the induction hypothesis applied to P
+at time tSu and Lemma 5.5 we conclude
+2 · tmerge(S, s∗) ≤ dist(S, s∗)
+≤ dist(S, u) + c(P ∗
+[s∗,u])
+< (1 + βδ) · min{t∗, dS} + (1 + βδ) · tmerge(S, s∗),
+implying min{t∗, dS} > 1−βδ
+1+βδ · tmerge(S, s∗).
+Next, we prove that any two disjoint sets from C have a very different merge time with s∗. Let us fix a
+constant
+M :=
+2
+1+γ − 1 − βδ
+(1+βδ)2
+1−βδ − ( 2
+1+γ − 1 − βδ)
+≈ 1.941792.
+For intuition, we advise the reader to think about M as any sufficiently large constant. (In fact it would be
+possible to choose M arbitrarily large by choosingδ and γ small enough, which comes at the cost of a worse
+but still better-than-2 integrality gap upper bound for BCR.)
+24
+
+===== PAGE 26 =====
+
+Lemma 5.7. Let S1, S2 ∈ C with S1 ∩ S2 = ∅, where without loss of generality we have tmerge(S1, s∗) ≤
+tmerge(S2, s∗). Then we have tmerge(S2, s∗) > M · tmerge(S1, s∗).
+Proof. Let e1 = (v1, w1), e2 = (v2, w2) be the first edges of P ∗ where the sets S1, S2 contributed, respec-
+tively. Let j ∈ {1, 2} such that vj is no earlier on P ∗ than the other vertex from v1, v2. By Lemma 5.5, we
+have
+c(P ∗
+[s∗,vj ]) ≤ (1 + βδ) · tmerge(Sj, s∗) ≤ (1 + βδ) · tmerge(S2, s∗). (6)
+For i ∈ {1, 2}, the set Si contributed to the edge (vi, wi) and hence tSivi < min{t∗, dSi}. By Lemma 4.10,
+there exists an Si-tight path from Si to vi at time tSivi < min{t∗, dSi}. Applying (b) of the induction
+hypothesis to this Si-tight path yields
+dist(Si, vi) ≤ (1 + βδ)tSivi < (1 + βδ) · dSi. (7)
+By combing P[s∗,vj ] with a shortest S1-v1 path and a shortest S2-v2 path we obtain a component K connect-
+ing terminals s∗, s1, s2 with s1 ∈ S1 and s2 ∈ S2. By (6) and (7) the component K has cost
+c(K) < (1 + βδ) · (dS1 + dS2) + (1 +βδ) · tmerge(S2, s∗).
+Because S1 and S2 are disjoint and both do not contains∗, we conclude that {S1, S2} is a drop certificate for
+{s∗, s1, s2}. By Corollary 4.7, the cost of the component K must be more than 2
+1+γ · (dS1 + dS2), implying
+(1 + βδ) · tmerge(S2, s∗) >
+  2
+1+γ − 1 − βδ
+
+· (dS1 + dS2)
+> 1−βδ
+1+βδ
+  2
+1+γ − 1 − βδ
+
+·
+ 
+tmerge(S1, s∗) + tmerge(S2, s∗)
+
+,
+where we used Lemma 5.6 in the second inequality. We conclude
+tmerge(S2, s∗) >
+2
+1+γ − 1 − βδ
+(1+βδ)2
+1−βδ − ( 2
+1+γ − 1 − βδ)
+· tmerge(S1, s∗) = M · tmerge(S1, s∗).
+We are now ready to prove that we can indeed partition C into chains as described above.
+Lemma 5.8. We can partition C into chains C1, . . . ,Ck such that for any two sets Si ∈ C i and Sj ∈ C j with
+i < j we have that
+• Si is disjoint from Sj, and
+• tmerge(Sj, s∗) > M · tmerge(Si, s∗).
+Proof. We partition C into set families C1, . . . ,Ck by there merge time with s∗, meaning that
+• any two sets S and S′ in the same set familyCi have the same merge time, i.e., we havetmerge(S, s∗) =
+tmerge(S′, s∗), and
+• any two sets S and S′ in the different set families Ci have different merge times, i.e., tmerge(S, s∗) ̸=
+tmerge(S′, s∗).
+25
+
+===== PAGE 27 =====
+
+We choose the numbering of C1, . . . ,Ck such that for any two sets Si ∈ C i and Sj ∈ C j with i < j , we have
+tmerge(Si, s∗) < t merge(Sj, s∗).
+Now consider two sets S, S′ ∈ C ⊆ S with S ⊆ S′. Then because s∗ /∈ S′, we have tmerge(S, s∗) =
+tmerge(S′, s∗). Because S is a laminar family, this show that for any two setsS,S′ ∈ C with tmerge(S, s∗) ̸=
+tmerge(S′, s∗), we have S ∩ S′ = ∅. In particular, any two sets Si ∈ C i and Sj ∈ C j with i < j are
+disjoint. By the choice of the numbering of C1, . . . ,Ck and Lemma 5.7, we also have tmerge(Sj, s∗) >
+M · tmerge(Si, s∗).
+It remains to prove that each set family Ci is a chain. Suppose this is not the case. Then because Ci ⊆ S
+is a laminar family, Ci contains two disjoint sets, which by Lemma 5.7 have a different merge time with s∗.
+This contradicts our choice of C1, . . . ,Ck.
+Finally, we show that every set from each one of the firstk − 1 chains is a (proper) subset of S∗.
+Lemma 5.9. For every set S ∈ C 1 ∪ · · · ∪ Ck−1, we have S ⊊ S∗.
+Proof. Let S ∈ C 1 ∪ · · · ∪ Ck−1 and Sk ∈ C k. Then
+t∗ Lem.5.6
+> 1−βδ
+1+βδ · tmerge(Sk, s∗)
+Lem.5.8
+≥ 1−βδ
+1+βδ · M · tmerge(S, s∗) ≥ tmerge(S, s∗),
+where we used the values of the constants β, δ, and M in the last inequality (see Table 1). Because s∗ ∈ S∗
+and dS∗
+> t ∗ (by assumption of Claim 5.1), this implies S ⊊ S∗ by Observation 4.2.
+5.4 Separating the contribution of the last chain
+In this section we show that we can subdivide the path P ∗ (from the terminal s∗ to the vertex w∗) into
+two subpaths where on the first subpath the chain Ck did not contribute and on the second subpath the
+chains C1, . . . ,Ck−1 did not contribute. Later, we will apply the induction hypothesis to the first subpath
+(Section 5.6). For the second subpath only the chain Ck (and of course sets containing the vertex s∗)
+contributed, which will help us to analyze the length of this subpath (see Section 5.5).
+To subdivide the path P ∗ into the above-mentioned subpaths, we consider the last edge (u1, u2) of P ∗
+with tS∗u1 ≤
+tk
+merge
+1+αδ . We will prove that the chainCk did not contribute to the subpath P ∗
+[s∗,u2] and the chains
+C1 ∪ · · · ∪ C k−1 did not contribute to the subpath P ∗
+[u2,w∗]. For an illustration and overview of our analysis,
+see Figure 10.
+First, we prove that indeed no set from the first k − 1 chains contributed to the path P ∗
+[u2,w∗]. For every
+two sets S, S′ in the same chain Cj, we have tmerge(S, s∗) = tmerge(S′, s∗) because s∗ is contained neither
+in S nor in S′. We denote this time by tj
+merge and we then have tj
+merge = tmerge(S, s∗) for every S ∈ C j.
+Lemma 5.10. No set S ∈ C 1 ∪ · · · ∪ Ck−1 contributed to any edge of P ∗
+[u2,w∗].
+Proof. The statement is trivial if P ∗
+[u2,w∗] has no edges. Otherwise, consider an edge (v, w) of P ∗
+[u2,w∗] and a
+set S ∈ C j with j < k . By the definition of the edge (u1, u2), we have tS∗v >
+tk
+merge
+1+αδ , which by Lemma 5.8
+implies
+tS∗v > M
+1+αδ · tj
+merge ≥ tj
+merge = tmerge(S, s∗) ≥ dS,
+where we used Observation 5.4 in the last inequality. By Lemma 5.9, we have S ⊊ S∗ and hence by
+Observation 5.2 we get tSv ≥ tS∗v > d S, implying that S did not contributed to the edge (v, w).
+26
+
+===== PAGE 28 =====
+
+s∗ u1 u2 u3 u4 w∗
+tS∗u1 ≤
+tk
+merge
+1+αδ < t S∗u2 tS∗u3 ≤ tk
+merge < t S∗u4 tS∗w∗
+≤ t∗
+Ck might contribute
+Figure 10: Illustration of the path P ∗ in the case where tk
+merge < t S∗w∗
+. (Without this assumption, there might be
+some degeneracy, where several of the depicted vertices will be defined to be identical.) Single edges are shown as
+solid lines, whereas paths with potentially several edges are dashed.
+Recall that by the definition of an S∗-tight path, the times tS∗v for vertices v of P ∗ increase monotonically along the
+path P ∗. The edge (u1, u2) is defined so that tS∗u1 ≤
+tk
+merge
+1+αδ < t S∗u2. We will later also consider the edge (u3, u4)
+chosen so that tS∗u3 ≤ tk
+merge < t S∗u4. We will show that Ck only contributed to the subpath P ∗
+[u1,u4] (red) . We will
+also show that the chains C1 ∪ · · · ∪ Ck−1 did not contribute to the subpath P ∗
+[u2,w∗] (see Lemma 5.10).
+To bound the length of P ∗
+[s∗,u1] we will use the induction hypothesis. The length of P ∗
+[u2,u4] will be bounded by
+3 · (1 + δ) · (tk
+merge −
+tk
+merge
+1+αδ ) + 2ε (see Lemma 5.17). The length of P ∗
+[u4,w∗], where no set from C contributes, will be
+bounded by (1 + δ) · (t∗ − tk
+merge) (see Lemma 5.18).
+We next show that Ck does not contribute to the edges of P ∗
+[s∗,u1]. The key technical statement we will
+use to prove this is the following.
+Lemma 5.11. Let ˜S ∈ C k and v ̸= w∗ a vertex of the path P ∗. If t ˜Sv < t ∗, then max{t ˜Sv , tS∗v} >
+tk
+merge
+1+αδ .
+Proof. Suppose for the sake of deriving a contradiction that we have t ˜Sv ≤
+tk
+merge
+1+αδ and tS∗v ≤
+tk
+merge
+1+αδ .
+Because v ̸= w∗, the path P ∗
+[s∗,v] is an S∗-tight path with strictly fewer edges than P ∗ at time tS∗v ≤ t∗
+and hence we can apply (a) of the induction hypothesis to P ∗
+[s∗,v]. We obtain a terminal set X ∗ ⊆ R with
+s∗ ∈ X ∗ and a component K∗ connecting X ∗ ∪ {v} such that
+c(P ∗
+[s∗,v]) ≤ (1 + δ) · tS∗v + λ · drop(X ∗, s∗)
+c(K∗) − 1
+1+γ · drop(X ∗, s∗) ≤ (1 + δ) · tS∗v − µ · drop(X ∗, s∗)
+tmerge(s∗, s) < (1 + αδ) · tS∗v for all s ∈ X ∗
+(8)
+By Lemma 4.10, there is an ˜S-tight path ˜P from a terminal ˜s ∈ ˜S to v at time t ˜Sv. Because t ˜Sv < t ∗, we
+can apply (a) of the induction hypothesis to the path ˜P . We obtain a terminal set ˜X ⊆ R with ˜s ∈ ˜X and a
+component ˜K connecting ˜X ∪ {v} such that
+c( ˜P ) ≤ (1 + δ) · t
+˜Sv + λ · drop( ˜X, ˜s)
+c( ˜K) − 1
+1+γ · drop( ˜X, ˜s) ≤ (1 + δ) · t
+˜Sv − µ · drop( ˜X, ˜s)
+tmerge(˜s, s) < (1 + αδ) · t
+˜Sv for all s ∈ ˜X
+(9)
+The union K∗ ∪ ˜K of the components K∗ and ˜K is a component connecting X ∗ ∪ ˜X. We will show
+c(K∗ ∪ ˜K) − 1
+1+γ · drop(X ∗ ∪ ˜X, s∗) ≤ 0, contradicting Corollary 4.7.
+In order to derive a lower bound on drop(X ∗ ∪ ˜X, s∗), we first prove the following claim.
+27
+
+===== PAGE 29 =====
+
+Claim 5.12. drop(X ∗ ∪ ˜X, s∗) ≥ drop( ˜X, ˜s) + drop(X ∗, s∗) + 2 · d ˜S.
+Proof. Let S ∗ ⊆ S be a drop certificate for X ∗ such that s∗ /∈ S′ for all S′ ∈ S ∗ and drop(X ∗, s∗) =
+2P
+S∈S∗ dS (which exists by the definition of drop(X ∗, s∗)). Similarly, we let ˜S ⊆ S be a drop certificate
+for ˜X such that ˜s /∈ S for all S ∈ ˜S and drop( ˜X, ˜s) = 2P
+S∈ ˜S dS. We will prove that S ∗ ∪ ˜S ∪ { ˜S} is a
+drop certificate for X ∗ ∪ ˜X.
+We claim that X ∩ ˜X = ∅ and that for any two distinct terminals s1, s2 ∈ X ∗ ∪ ˜X, there exists a set
+S ∈ S ∗ ∪ ˜S ∪ { ˜S} with |S ∩ {s1, s2}| = 1. To see this, consider two terminals s1, s2 ∈ X ∗ ∪ ˜X. If we
+have s1, s2 ∈ X ∗, then either s1 = s2 or there exists a set S ∈ S ∗ with |S ∩ {s1, s2}| = 1. Similarly, if
+s, s′ ∈ ˜X, then either s1 = s2 or there exists a set S ∈ ˜S with |S ∩ {s1, s2}| = 1.
+Now consider the case where one of the terminals s1, s2 is contained in X ∗ and the other in ˜X, say
+s1 ∈ X ∗ and s2 ∈ ˜X. Using tmerge(s∗, s) < (1 + αδ) · tS∗v for all s ∈ X ∗, we get
+tmerge(s∗, s1) < (1 + αδ) · tS∗v ≤ (1 + αδ) ·
+tk
+merge
+1+αδ = tk
+merge, (10)
+and similarly, using tmerge(˜s, s) < (1 + αδ) · t ˜Sv for all s ∈ ˜X, we get
+tmerge(˜s, s2) < (1 + αδ) · t
+˜Sv ≤ (1 + αδ) ·
+tk
+merge
+1+αδ = tk
+merge. (11)
+Using tmerge(s∗, ˜s) = tk
+merge, this implies tmerge(s1, s2) ≥ tk
+merge as otherwise by Observation 4.4
+tk
+merge = tmerge(s∗, ˜s) ≤ max
+n
+tmerge(s∗, s1), tmerge(s1, s2), tmerge(s2, ˜s)
+o
+< t k
+merge.
+In particular, we get s1 ̸= s2, implying X ∗ ∩ ˜X = ∅. If s1 = s∗ and s2 = ˜s, then s2 ∈ ˜S and s1 /∈ ˜S. Now
+consider the case where s1 ̸= s∗. Then the drop certificate S ∗ contains a set S with s1 ∈ S and s∗ /∈ S.
+Using Observation 4.2 and tmerge(s1, s2) ≥ tk
+merge, we get
+dS ≤ tmerge(s∗, s1)
+(10)
+< t k
+merge ≤ tmerge(s1, s2),
+implying s2 /∈ S. Similarly, if s2 ̸= ˜s, the drop certificate ˜S contains a set S with s2 ∈ S and ˜s /∈ S. Then
+dS ≤ tmerge(˜s, s2)
+(11)
+< t k
+merge ≤ tmerge(s1, s2),
+implying s1 /∈ S.
+We have shown that for any two distinct terminals s1, s2 ∈ X ∗ ∪ ˜X, there is a set S ∈ S ∗ ∪ ˜S ∪ { ˜S}
+with |S ∩ {s1, s2}| = 1, which in particular implies |S ∗ ∪ ˜S ∪ { ˜S}| ≥ | X ∗ ∪ X| − 1. Moreover, we have
+shown X ∗ ∩ ˜X = ∅ and hence
+|X ∗ ∪ X| − 1 ≤ |S ∗ ∪ ˜S ∪ { ˜S}| ≤ |S ∗| + | ˜S| + 1 = |X ∗| − 1 + | ˜X| − 1 + 1 = |X ∗ ∪ X| − 1.
+This implies that we have equality throughout and hence S ∗, ˜S, and { ˜S} are disjoint. We conclude that
+S ∗ ∪ ˜S ∪ { ˜S} is indeed a drop certificate for X ∗ ∪ ˜X and has value drop( ˜X, ˜s) + drop(X ∗, s∗) + 2 · d ˜S.
+■
+28
+
+===== PAGE 30 =====
+
+Having shown Claim 5.12, we next prove a lower bound on drop( ˜X, ˜s) + drop(X ∗, s∗). Recall that
+t ˜Sv ≤
+tk
+merge
+1+αδ and tS∗v ≤
+tk
+merge
+1+αδ by the assumption we made for the sake of deriving a contradiction. Using
+˜S ∈ C k and Observation 4.4, we get 2 · tk
+merge = 2 · tmerge(˜s, s∗) ≤ dist(˜s, s∗). Hence,
+2 · tk
+merge ≤ c( ˜P ) + c(P ∗
+[s∗,v])
+≤ (1 + δ) · t
+˜Sv + λ · drop( ˜X, ˜s) + (1 +δ) · tS∗v + λ · drop(X ∗, s∗)
+≤ 2 · (1 + δ) ·
+tk
+merge
+1+αδ + λ ·
+ 
+drop( ˜X, ˜s) + drop(X ∗, s∗)
+
+.
+(12)
+Using the properties (8) and (9) of the components K∗ and ˜K guaranteed by the induction hypothesis and
+Claim 5.12, we get
+c(K∗ ∪ ˜K) − 1
+1+γ · drop( ˜X ∪ X ∗, s∗)
+≤ c(K∗) − 1
+1+γ · drop(X ∗, s∗) + c( ˜K) − 1
+1+γ · drop( ˜X, s∗) − 2
+1+γ · d
+˜S
+≤ (1 + δ) · tS∗v − µ · drop(X ∗, s∗) + (1 +δ) · t
+˜Sv − µ · drop( ˜X, ˜s) − 2
+1+γ · d
+˜S
+≤ 2 · (1 + δ) ·
+tk
+merge
+1+αδ − µ ·
+ 
+drop( ˜X, ˜s) + drop(X ∗, s∗)
+
+− 2
+1+γ · d
+˜S.
+Using the lower bound (12) on drop( ˜X, ˜s) + drop(X ∗, s∗) and Lemma 5.6, we conclude
+c(K∗ ∪ ˜K) − 1
+1+γ · drop( ˜X ∪ X ∗, s∗)
+≤ 2 · (1 + δ) ·
+tk
+merge
+1+αδ − 2µ
+λ ·
+ 
+tk
+merge − (1 + δ) ·
+tk
+merge
+1+αδ
+
+− 2
+1+γ · d
+˜S
+= 2
+1+αδ ·
+ 
+1 + δ − µ
+λ · (α − 1) · δ
+
+· tk
+merge − 2
+1+γ · d
+˜S
+≤
+
+2
+1+αδ ·
+ 
+1 + δ − µ
+λ · (α − 1) · δ
+
+− 2
+1+γ · 1−βδ
+1+βδ
+
+· tk
+merge
+≤ 0,
+contradicting Corollary 4.7. (Recall Table 1 for the values of the constants used in the last inequality.)
+Corollary 5.13. We have tk
+merge < (1 + αδ) · t∗.
+Proof. Consider the first edge (u, v) of the path P ∗ where a set S ∈ C k contributed. Then tSu < t ∗ and
+hence Lemma 5.11 impliesmax{tSu, tS∗u} >
+tk
+merge
+1+αδ . Because u is a vertex of the pathP ∗, which is S∗-tight
+at time t∗, we have tS∗u ≤ t∗, implying
+tk
+merge
+1+αδ < max{tSu, tS∗u} ≤ t∗.
+From Lemma 5.11 and Corollary 5.13 we can conclude that no set S ∈ C k contributed to any edge of
+the path P ∗
+[s∗,u2].
+Corollary 5.14. No set S ∈ C k contributed to any edge of P ∗
+[s∗,u1].
+Proof. By the choice of the edge (u1, u2), we have tS∗u1 ≤
+tk
+merge
+1+αδ and hence because P ∗ is S∗-tight, for
+every vertex u of the path P ∗
+[s∗,u1], we have tS∗u ≤ tS∗u1 ≤
+tk
+merge
+1+αδ . Consider an edge (v, w) of the path
+P ∗
+[s∗,u1]. Because P ∗ is an S∗-tight path, this edge was δ-tight already at time tS∗w.
+29
+
+===== PAGE 31 =====
+
+Suppose for the sake of deriving a contradiction that S ∈ C k contributed to the edge (v, w). Then
+tSv < t ∗ and hence by Lemma 5.11, we have max{tSv , tS∗v} >
+tk
+merge
+1+αδ , implying tSv >
+tk
+merge
+1+αδ (because
+tS∗v ≤
+tk
+merge
+1+αδ ). However, the edge (v, w) was δ-tight already at time tS∗w ≤
+tk
+merge
+1+αδ < t Sv, contradicting the
+fact that S contributed to (v, w).
+5.5 Analyzing the contribution of a single chain
+The goal of this section is to prove an upper bound on the length of the path P ∗
+[u2,w∗]. To this end we will
+first define a potential function π : V ε → R≥0. Then we will prove the following key property. For an edge
+e = (v, w) we denote by zk
+e the contribution of the chain Ck to e and byeze the total contribution of other
+sets (until the current time t∗). We will prove
+π(w) − π(v) ≤eze − zk
+e (13)
+for every δ-tight edge e = (v, w).
+This will allow us to bound the contribution of the chain Ck to subpaths of P ∗, in terms of the potential
+difference of its endpoints. More precisely, because every edge of P ∗ is δ-tight, we haveeze = c(e)
+1+δ − zk
+e for
+each edge e of P ∗. Hence for every subpath P ∗
+[u,v], we have
+π(v) − π(u) ≤
+X
+e∈P ∗
+[u,v]
+ 
+eze − zk
+e
+
+= 1
+1+δ · c
+ 
+P ∗
+[u,v]
+
+− 2
+X
+e∈P ∗
+[u,v]
+zk
+e ,
+which implies X
+e∈P ∗
+[u,v]
+zk
+e ≤ 1
+2 ·
+
+1
+1+δ · c(P ∗
+[u,v]) + π(u) − π(v)
+
+.
+We now define the potential functionπ. For each set S ∈ C k and every vertex v, we define
+π(S, v) := max
+n
+0, min
+n
+t∗, d S
+o
+− max
+n
+tSv , a S
+oo
+.
+Intuitively, this is (an upper bound on) the length of the time interval in which S contributed to a subpath
+of P ∗ starting at the vertex v: the set S could not contribute before its activation time aS or before time tSv
+and it could not contribute after it was deactivated. We now define
+π(v) :=
+X
+S∈Ck
+π(S, v).
+See Figure 11 for an example.
+Lemma 5.15. The potential function π fulfills (13) for every δ-tight edge e = (v, w).
+Proof. We consider an edge{v, w} ∈ Eε and prove that both orientations of it fulfill (13) if they areδ-tight.
+More precisely, we will show that
+π(w) − π(v) ≤ ez(v,w) − zk
+(v,w) (14)
+if (v, w) is δ-tight and
+π(v) − π(w) ≤ ez(w,v) − zk
+(w,v) (15)
+if (w, v) is δ-tight.
+We call a set S ∈ C k irrelevant (for {v, w}) if it satisfies at least one of the following conditions:
+30
+
+===== PAGE 32 =====
+
+s r
+s∗
+1 − δ
+2
+δ
+2 δ
+3
+2 δ
+1
+s r
+s∗
+3
+2 · δ
+1+δ
+δ
+1+δ
+Figure 11: The left part of the figure shows an instance with three terminals s, s∗, and r. The costs of the edges are
+shown in the corresponding color. For t ∈ [0, 1), we have S t = {{s}, {s∗}, {r}} and for t ∈ [1, tmax) = [1, 1 + δ
+2),
+we have S t = {{s, s∗}, {r}}.
+The right part of the figure shows the δ-tight edges at time t∗ = 1 and an S∗-tight path of length 1 + 3δ highlighted
+in gray. On solid edges only the set S∗ = {s∗} contributed, on dotted edges only the set S = {s} contributed, and on
+the dashed edge both S and S∗ contributed. The color of a vertex v indicates its potential π(v) = π(S, v), where all
+black Steiner nodes and all terminals have potential zero.
+• t∗ ≤ aS
+• t∗ ≤ min
+
+tSv , tSw	
+• aS ≥ max
+
+tSv , tSw	
+• dS ≤ min
+
+tSv , tSw	
+.
+We observe that if S is irrelevant, then its contribution (until the current time t∗) to the edges (v, w) and
+(w, v) is 0. Moreover, we then also have π(S, v) = π(S, w).
+We call S ∈ C k relevant if it is not irrelevant. Let us assume that the chain Ck contains at least one
+relevant set (otherwise the claim trivially holds), and let Smin be the minimal such set. We assume tSminv ≤
+tSminw without loss of generality (by symmetry). We denote by zS
+e the contribution of a set S to an edge e
+(until the current time t∗) and claim that
+zS
+(v,w) = π(S, v) − π(S, w) (16)
+and
+zS
+(w,v) = 0 (17)
+for every set S ∈ C k.
+Before proving (16) and (17), we observe that they imply (14) and (15). Summing (16) for all sets
+S ∈ C k, we obtain zk
+(v,w) = π(v) − π(w). Becauseez(v,w) ≥ 0, this implies (14). Summing (17) for all sets
+S ∈ C k, we obtain zk
+(w,v) = 0. Hence, if (w, v) is δ-tight, we have
+π(v) − π(w) = zk
+(v,w) ≤ c({v, w})
+1 + δ = c({v, w})
+1 + δ − zk
+(w,v) − zk
+(w,v) =ez(w,v) − zk
+(w,v).
+31
+
+===== PAGE 33 =====
+
+It remains to prove (16) and (17) for every set S ∈ C k. Observe that every irrelevant set S satisfies (16)
+and (17) because both sides of (16) and (17) are zero.
+Now consider a relevant set S. First, we show tSv ≤ tSw. If S = Smin, this holds by the above
+assumption (which we made without loss of generality). Otherwise Smin ⊊ S. Then we have aS ≥ dSmin
+and tSv ≤ tSminv (by Observation 5.2). Because S and Smin are relevant, this implies
+tSv ≤ tSminv = min
+
+tSminv, tSminw	
+< d Smin ≤ aS < max
+
+tSv , tSw	
+,
+implying tSv < t Sw.
+Having shown tSv ≤ tSw, we conclude that zS
+(w,v) = 0 and hence (17). It remains to prove (16). We
+observe that if the set S contributed to the edge (v, w), then it started to contribute at time max
+
+tSv , aS	
+and stopped contributing at time min
+
+t∗, dS, tSw	
+. More precisely, we have
+zS
+(v,w) = max
+n
+0, min
+
+t∗, dS, tSw	
+− max
+
+tSv , aS	o
+. (18)
+We now distinguish two cases.
+Case 1: tSw > min{t∗, dS}.
+Then π(S, w) = max
+
+0, min
+
+t∗, d S	
+− max
+
+tSw , a S		
+= 0 and hence
+π(S, v) − π(S, w) = π(S, v)
+= max
+n
+0, min
+
+t∗, d S	
+− max
+
+tSv , a S	o
+= max
+n
+0, min
+
+t∗, dS, tSw	
+− max
+
+tSv , aS	o
+(18)
+= zS
+(v,w).
+Case 2: tSw ≤ min{t, dS}.
+Then we have tSv ≤ tSw ≤ min{t, dS}. Moreover, because S is relevant, we have aS < t ∗ and hence
+aS ≤ min{t∗, dS}. We conclude
+π(S, v) − π(S, w) = max
+n
+0, min
+
+t∗, d S	
+− max
+
+tSv , a S	o
+− max
+n
+0, min
+
+t∗, d S	
+− max
+
+tSw , a S	o
+= max
+
+tSw , a S	
+− max
+
+tSv , a S	
+(19)
+and by (18) we have
+zS
+(v,w) = max
+n
+0, min
+
+t∗, dS, tSw	
+− max
+
+tSv , aS	o
+= max
+n
+0, t Sw − max
+
+tSv , aS	o
+.
+(20)
+Because S is relevant, we have aS < max
+
+tSv , tSw	
+= tSw and hence
+π(S, v) − π(S, w)
+(19)
+= tSw − max
+
+tSv , aS	 (20)
+= zS
+(v,w),
+where we also used tSv ≤ tSw for the last equality.
+32
+
+===== PAGE 34 =====
+
+Recall that we will use the potential π to obtain an upper bound on the length of P ∗
+[u2,w∗]. To this end,
+we first observe that Lemma 5.11 implies an upper bound on the potential π(u2).
+Lemma 5.16. We have π(u2) ≤ max
+n
+0, min
+
+t∗, t k
+merge
+	
+−
+tk
+merge
+1+αδ
+o
++ ε
+1+δ .
+Proof. Recall that (u1, u2) is the last edge of P ∗ with tS∗u1 ≤
+tk
+merge
+1+αδ . We will prove the following upper
+bound on π(u1):
+π(u1) ≤ max
+n
+0, min
+
+t∗, t k
+merge
+	
+−
+tk
+merge
+1+αδ
+o
+. (21)
+This implies the claim by applying Lemma 5.15 to e = (u1, u2):
+π(u2) ≤ π(u1) +eze − zk
+e ≤ π(u1) + c(e)
+1+δ ≤ π(u1) + ε
+1+δ .
+If π(u1) = 0 , the claimed bound (21) is trivially satisfied. Hence, we may assume π(u1) > 0. Let
+{S ∈ C k : π(S, u1) > 0} = {S1, S2, . . . , Sl} with S1 ⊊ S2 ⊊ · · · ⊊ Sl. Then π(u1) = Pl
+i=1 π(Si, u1)
+and for i ∈ {1, . . . , l},
+π(Si, u1) = max
+
+0, min
+
+t∗, d Si
+	
+− max
+
+tSiu1, a Si
+		
+= min
+
+t∗, d Si
+	
+− max
+
+tSiu1, a Si
+	
+.
+For i ∈ {1, . . . , l−1}, we haveaSi+1 ≥ dSi because Si ⊊ Si+1. Hence, we havemax
+
+tSi+1u1, a Si+1
+	
+≥
+min
+
+t∗, d Si
+	
+and thus
+π(u1) =
+lX
+i=1
+π(Si, u1)
+=
+lX
+i=1
+ 
+min
+
+t∗, d Si
+	
+− max
+
+tSiu1, a Si
+	
+≤ min
+
+t, d Sl
+	
+− max
+
+tS1u1, a S1
+	
+.
+The definition of the edge (u1, u2) implies tS∗u1 ≤
+tk
+merge
+1+αδ . Hence, by Lemma 5.11 for every set S ∈ C k we
+have tSu1 >
+tk
+merge
+1+αδ (unless tSu1 ≥ t∗, but then tSu1 ≥ t∗ >
+tk
+merge
+1+αδ by Corollary 5.13). By Observation 5.4,
+we have tk
+merge ≥ dSl. We conclude
+π(u1) ≤ min
+
+t∗, d Sl
+	
+− max
+
+tS1u1, a S1
+	
+≤ min
+
+t∗, t k
+merge
+	
+− max
+n tk
+merge
+1+αδ , a S1
+o
+≤ min
+
+t∗, t k
+merge
+	
+−
+tk
+merge
+1+αδ .
+In order to prove an upper bound on the length of the path P ∗
+[u2,w∗], we consider the last vertex u3 of
+P ∗
+[u2,w∗] with tS∗u3 ≤ tk
+merge (recall Figure 10 for an illustration). If no such vertex exists, we let u3 = u2.
+We will upper bound the length of the subpaths P ∗
+[u2,u3] and P ∗
+[u3,w∗] separately in the next two lemmas.
+First, we use the potential function π to bound the length of P ∗
+[u2,u3].
+33
+
+===== PAGE 35 =====
+
+Lemma 5.17. We have
+c(P ∗
+[u2,u3]) ≤ (1 + δ) · 2 ·
+
+tk
+merge −
+tk
+merge
+1+αδ
+
++ (1 + δ) ·
+
+min
+
+t∗, t k
+merge
+	
+−
+tk
+merge
+1+αδ
+
++ ε.
+Proof. Recall that (u1, u2) was the last edge of P ∗ with tS∗u1 ≤
+tk
+merge
+1+αδ . We may assume u2 ̸= u3 because
+otherwise the claimed bound on c(P ∗
+[u2,u3]) is trivially satisfied (using t∗ ≥
+tk
+merge
+1+αδ by Corollary 5.13). Then
+tS∗u3 ≤ tk
+merge by the choice of u3. Moreover, the edge (u1, u2) is not the last edge of P ∗ and thus
+tS∗u2 >
+tk
+merge
+1+αδ .
+By Lemma 5.10, the only sets that contributed to edges of P ∗
+[u2,u3], are sets containing the terminal s∗
+and sets from the chainCk. Therefore,eze ≤ tS∗w −tS∗v for every edgee = (v, w) of P ∗
+[u2,u3] by Lemma 5.3.
+Using that every edge of P ∗ is δ-tight and satisfies (13) by Lemma 5.15, we conclude
+c(P ∗
+[u2,u3]) = (1 + δ) ·
+X
+e∈P ∗
+[u2,u3]
+ 
+˜ze + zk
+e
+
+Lem.5.15
+≤ (1 + δ) ·
+ X
+e∈P ∗
+[u2,u3]
+2 ·eze + π(u2) − π(u3)
+
+≤ (1 + δ) ·
+
+2
+ 
+tS∗u3 − tS∗u2
+
++ π(u2) − π(u3)
+
+≤ (1 + δ) ·
+
+2
+ 
+tk
+merge −
+tk
+merge
+1+αδ
+
++ π(u2) − 0
+
+Lem.5.16
+≤ (1 + δ) · 2 ·
+
+tk
+merge −
+tk
+merge
+1+αδ
+
++ (1 + δ) · max
+n
+0, min
+
+t∗, t k
+merge
+	
+−
+tk
+merge
+1+αδ
+o
++ ε
+= (1 + δ) · 2 ·
+
+tk
+merge −
+tk
+merge
+1+αδ
+
++ (1 + δ) ·
+
+min
+
+t∗, t k
+merge
+	
+−
+tk
+merge
+1+αδ
+
++ ε,
+where in the last equality we used t∗ ≥
+tk
+merge
+1+αδ by Corollary 5.13.
+We next upper bound the length of P ∗
+[u3,w∗]. To this end, we will exploit the fact that the chain Ck can
+only contribute to the first edge of the path P ∗
+[u3,w∗], but not to any other edge of P ∗
+[u3,w∗] (recall Figure 10
+for an illustration).
+Lemma 5.18. If u3 ̸= w∗, we have
+c(P ∗
+[u3,w∗]) < (1 + δ) ·
+ 
+t∗ − tk
+merge
+
++ ε.
+Proof. Because u3 ̸= w∗, the choice of u3 implies tk
+merge < t S∗w∗
+≤ t∗. Hence, because dS∗
+> t ∗ (by
+assumption), every set S ∈ C k is a subset of the set S∗ by Observation 4.2. Therefore, by Observation 5.2
+we have tSv ≥ tS∗v for every vertex v and every set S ∈ C k.
+Let u4 be the successor of u3 on the path P ∗. Then by the choice of u3, we have tS∗v > t k
+merge
+for every vertex v of P ∗
+[u4,w∗]. For every set S ∈ C k and every vertex v of P ∗
+[u4,w∗] we therefore have
+tSv ≥ tS∗v > t k
+merge ≥ dS (using Observation 5.4 in the last inequality). This shows that no set from the
+chain Ck contributed to any edge of P ∗
+[u4,w∗]. Hence, by Lemma 5.10, no set from C contributed to P ∗
+[u4,w∗].
+This implies that for every edge e = ( v, w) of P ∗
+[u4,w∗] we have tS∗w − tS∗v ≥ c(e)
+1+δ by Lemma 5.3. We
+34
+
+===== PAGE 36 =====
+
+conclude
+c(P ∗
+[u3,w∗]) ≤ c(P ∗
+[u4,w∗]) + ε
+≤
+X
+(v,w)∈P ∗
+[u4,w∗]
+(1 + δ) · (tS∗w − tS∗v) + ε
+= (1 + δ) · (tS∗w∗
+− tS∗u4) + ε
+< (1 + δ) ·
+ 
+t∗ − tk
+merge
+
++ ε,
+where we used that tS∗u4 > t k
+merge by the definition of u3.
+Combining Lemma 5.17 and Lemma 5.18 we obtain the main result of this section.
+Lemma 5.19. We have
+c(P ∗
+[u2,w∗]) ≤ (1 + δ) · t∗ + (1 + δ) · 2 ·
+
+tk
+merge −
+tk
+merge
+1+αδ
+
++ 2ε − (1 + δ) ·
+tk
+merge
+1+αδ .
+Proof. If u3 = w∗, Lemma 5.17 implies
+c(P ∗
+[u2,w∗]) = c(P ∗
+[u2,u3])
+≤ (1 + δ) · 2 ·
+
+tk
+merge −
+tk
+merge
+1+αδ
+
++ (1 + δ) ·
+
+min
+
+t∗, t k
+merge
+	
+−
+tk
+merge
+1+αδ
+
++ ε
+< (1 + δ) · t∗ + (1 + δ) · 2 ·
+
+tk
+merge −
+tk
+merge
+1+αδ
+
++ 2ε − (1 + δ) ·
+tk
+merge
+1+αδ .
+Otherwise, Lemma 5.17 and Lemma 5.18 imply
+c(P ∗
+[u2,w∗]) = c(P ∗
+[u2,u3]) + c(P ∗
+[u3,w∗])
+≤ (1 + δ) · 2 ·
+
+tk
+merge −
+tk
+merge
+1+αδ
+
++ (1 + δ) ·
+
+min
+
+t∗, t k
+merge
+	
+−
+tk
+merge
+1+αδ
+
++ ε
++ (1 + δ) ·
+ 
+t∗ − tk
+merge
+
++ ε
+≤ (1 + δ) · t∗ + (1 + δ) · 2 ·
+
+tk
+merge −
+tk
+merge
+1+αδ
+
++ 2ε − (1 + δ) ·
+tk
+merge
+1+αδ .
+5.6 Completing the proof of Lemma 4.11
+In this section we prove (a) of Claim 5.1 for the S∗-tight path P ∗at the current time t∗. This completes the
+proof of Lemma 4.11 and hence of Lemma 3.2 and Theorem 1.1.
+Because (u1, u2) is an edge of P ∗, the S∗-tight path P ∗
+[s∗,u1] has strictly fewer edges than P ∗ and hence
+we can apply the induction hypothesis to it. By the definition of u1, we have tS∗u1 ≤
+tk
+merge
+1+αδ and hence
+P ∗
+[s∗,u1] was S∗-tight at time
+tk
+merge
+1+αδ . By (a) of the induction hypothesis, we obtain a terminal set X with
+s∗ ∈ X and a component K connecting X ∪ {u1} such that
+c(P ∗
+[s∗,u1]) ≤ (1 + δ) ·
+tk
+merge
+1+αδ + λ · drop(X, s∗),
+c(K) − 1
+1+γ · drop(X, s∗) ≤ (1 + δ) ·
+tk
+merge
+1+αδ − µ · drop(X, s∗)
+tmerge(s∗, s) < (1 + αδ) ·
+tk
+merge
+1+αδ = tk
+merge for all s ∈ X.
+35
+
+===== PAGE 37 =====
+
+s∗
+s
+u1 v w∗K P ∗
+[u1,w∗]
+P
+Figure 12: An illustration of the component K ∗ that we construct from the component K, the path P ∗
+[u1,w∗], and the
+path P . The terminals in X ∗, which are connected by the component K ∗, are shown as squares.
+Now consider a set S ∈ C k. Because S contributes to some edge of P ∗, Corollary 5.14 implies that
+there exists a vertex v of P ∗
+[u1,w∗] with tSv < min{t∗, dS}. Hence, by Lemma 4.10 at time tSv there exists
+an S-tight path P from some terminal s ∈ S to the vertex v on the path P ∗
+[u1,w∗]. By (b) of the induction
+hypothesis applied to the path P , we have
+c(P ) < (1 + βδ) · min{t∗, dS}. (22)
+To prove (a) for the S∗-tight path P ∗at the current time t∗ we need to show that there exists a terminal
+set X ∗ with s∗ ∈ X ∗ and a component K∗ connecting X ∗ ∪ {w∗} such that
+c(P ∗) ≤ (1 + δ) · t∗ + λ · drop(X ∗, s∗) (23)
+c(K∗) − 1
+1+γ · drop(X ∗, s∗) ≤ (1 + δ) · t∗ − µ · drop(X ∗, s∗) (24)
+tmerge(s∗, s) < (1 + αδ) · t∗ for all s ∈ X ∗ (25)
+We define X ∗ := X ∪ {s} and let K∗ be the union of the component K, the path P ∗
+[u1,w∗], and the
+path P . See Figure 12. Then K∗ is a component connecting X ∗ ∪ {w∗}. It remains to show (23) – (25).
+We first show (25). Recall that for s ∈ X we have tmerge(s∗, s) < t k
+merge. Moreover, because s ∈ S ∈
+Ck, we have tmerge(s∗, s) = tk
+merge. By Corollary 5.13, we have tk
+merge < (1 +αδ) · t∗, completing the proof
+of (25).
+Before proving (23) and (24), we first derive a lower bound ondrop(X ∗, s∗). Let S ∗ be a drop certificate
+for X of value drop(X, s∗) such that s∗ /∈ S for all S ∈ S ∗ (which exists by the definition ofdrop(X, s∗)).
+We now show that S ∗ ∪ {S} is a drop certificate for X ∗. Note that we have s∗ /∈ S because S ∈ C k.
+For any two terminals s1, s2 ∈ X, the drop certificate S ∗ contains a set S with |S ∩ {s1, s2}| = 1. Consider
+now a terminal s ∈ X. Because tmerge(s, s∗) < t k
+merge and tmerge(s∗, s) = tk
+merge, Observation 4.3 implies
+tmerge(s, s) ≥ tk
+merge ≥ dS, where the second inequality follows from Observation 5.4. Hence, we have
+s /∈ S by Observation 4.2. In particular, this implies that s ̸= s and S ∗ ∪ {S} is a drop certificate for X ∗ .
+Because s∗ /∈ S for all S ∈ S ∗ ∪ {S} we conclude
+drop(X ∗, s∗) ≥ drop(X, s∗) + 2 · dS. (26)
+36
+
+===== PAGE 38 =====
+
+We now prove (23). Notice that c(P ∗
+[u1,w∗]) ≤ ε + c(P ∗
+[u2,w∗]) and recall that we have c(P ∗
+[s∗,u1]) ≤
+(1 + δ) ·
+tk
+merge
+1+αδ + λ · drop(X, s∗) by the induction hypothesis. Then we obtain (23) as follows:
+c(P ∗) ≤ c(P ∗
+[s∗,u1]) + ε + c(P ∗
+[u2,w∗])
+≤ (1 + δ) ·
+tk
+merge
+1+αδ + λ · drop(X, s∗) + ε + c(P ∗
+[u2,w∗])
+Lem.5.19
+≤ (1 + δ) ·
+tk
+merge
+1+αδ + λ · drop(X, s∗) + ε
++ (1 + δ) · t∗ + (1 + δ) · 2 ·
+ 
+tk
+merge −
+tk
+merge
+1+αδ
+
++ 2ε − (1 + δ) ·
+tk
+merge
+1+αδ
+= (1 + δ) · t∗ + (1 + δ) · 2 ·
+ 
+tk
+merge −
+tk
+merge
+1+αδ
+
++ 3ε + λ · drop(X, s∗)
+= (1 + δ) · t∗ + 2 · 1+δ
+1+αδ · αδ · tk
+merge + 3ε + λ · drop(X, s∗)
+Lem.5.6
+≤ (1 + δ) · t∗ + 2 · 1+δ
+1+αδ · αδ · 1+βδ
+1−βδ · dS + 3ε + λ · drop(X, s∗)
+(3)
+≤ (1 + δ) · t∗ + 2 · 1+δ
+1+αδ · αδ · 1+βδ
+1−βδ · dS + 3ε′ · dS + λ · drop(X, s∗)
+≤ (1 + δ) · t∗ + 2λ · dS + λ · drop(X, s∗)
+(26)
+≤ (1 + δ) · t∗ + λ · drop(X ∗, s∗),
+where in the second-last inequality we used the values of the constants given in Table 1.
+Finally, we prove (24). Recall that c(K) ≤ (1 + δ) ·
+tk
+merge
+1+αδ +
+  1
+1+γ − µ
+
+· drop(X, s∗) by the induction
+hypothesis. Using again c(P ∗
+[u1,w∗]) ≤ ε + c(P ∗
+[u2,w∗]), we can conclude (24) as follows:
+c(K∗) ≤ c(K) + ε + c(P ∗
+[u2,w∗]) + c(P )
+≤ (1 + δ) ·
+tk
+merge
+1+αδ +
+  1
+1+γ − µ
+
+· drop(X, s∗) + ε + c(P ∗
+[u2,w∗]) + c(P )
+(22)
+≤ (1 + δ) ·
+tk
+merge
+1+αδ +
+  1
+1+γ − µ
+
+· drop(X, s∗) + ε + c(P ∗
+[u2,w∗]) + (1 +βδ) · min{t∗, dS}
+Lem.5.19
+≤ (1 + δ) ·
+tk
+merge
+1+αδ +
+  1
+1+γ − µ
+
+· drop(X, s∗) + ε
++ (1 + δ) · t∗ + (1 + δ) · 2 ·
+ 
+tk
+merge −
+tk
+merge
+1+αδ
+
++ 2ε − (1 + δ) ·
+tk
+merge
+1+αδ
++ (1 + βδ) · min{t∗, dS}
+≤ (1 + δ) · t∗ +
+  1
+1+γ − µ
+
+· drop(X, s∗) + 3ε + (1 + βδ) · dS + (1 + δ) · 2 ·
+ 
+tk
+merge −
+tk
+merge
+1+αδ
+
+= (1 + δ) · t∗ +
+  1
+1+γ − µ
+
+· drop(X, s∗) + 3ε + (1 + βδ) · dS + 2αδ · 1+δ
+1+αδ · tk
+merge
+Lem.5.6
+≤ (1 + δ) · t∗ +
+  1
+1+γ − µ
+
+· drop(X, s∗) + 3ε + (1 + βδ) · dS + 2αδ · 1+δ
+1+αδ · 1+βδ
+1−βδ · dS
+(3)
+≤ (1 + δ) · t∗ +
+  1
+1+γ − µ
+
+· drop(X, s∗) + 3ε′ · dS + (1 + βδ) · dS + 2αδ · 1+δ
+1+αδ · 1+βδ
+1−βδ · dS
+≤ (1 + δ) · t∗ +
+  1
+1+γ − µ
+
+· drop(X, s∗) +
+  1
+1+γ − µ
+
+· 2dS
+(26)
+≤ (1 + δ) · t∗ +
+  1
+1+γ − µ
+
+· drop(X ∗, s∗),
+37
+
+===== PAGE 39 =====
+
+where in the second-last inequality we again plugged in the constants shown in Table 1 and in the last
+inequality we used 1
+1+γ − µ ≥ 0.
+This completes the proof of Lemma 4.11 and hence also of Lemma 3.2 and Theorem 1.1.
+A Necessity of non-laminar dual solutions
+A solution y of (Dual-BCR) has laminar support if the support L := {U : yU > 0} of y is a laminar family,
+i.e., for all sets A, B ∈ L we have A ⊆ B, B ⊆ A, or A ∩ B = ∅.
+In this section we provide a family of instances of the Steiner tree problem where the maximum value of
+a solution to (Dual-BCR) with laminar support is arbitrarily close to 1
+2opt, where opt denotes the minimum
+cost of a Steiner tree. This shows that if for some fixed constantρ > 0 (independent of the specific instance),
+we want to find a Steiner tree T and a solution y to (Dual-BCR) with c(T ) ≤ (2 − ρ) ·P
+∅̸=U ⊆V \{r} yU ,
+we cannot restrict ourselves to dual solutions y with laminar support.
+We consider the family of instances illustrated in Figure 13.
+r
+Figure 13: Illustration of a family of Steiner tree instances, where the graph G is a cycle with n vertices, out of which
+k are terminals (shown as squares). In the depicted example, n = 20 and k = 5. We choose n to be divisible by k and
+every n
+k th vertex along the cycle is a terminal. Every edge has cost one.
+We have an instance for every integer k ≥ 2 and every integer n ≥ k that is an integer multiple of k.
+The cost of an optimum Steiner tree for such an instance is opt = k−1
+k · n. We show that for k and n
+k large
+enough the maximum value of a solution to (Dual-BCR) with laminar support gets arbitrarily close to1
+2opt.
+Lemma A.1. Let y be a solution to (Dual-BCR) with laminar support. Then y has value
+X
+∅̸=U ⊆V \{r}
+yU ≤ n
+2 + k.
+Proof. Let L := {U : yU > 0} denote the support of y. By assumption, L is a laminar family.
+We first show that we may assume that every element of L is a set of consecutive vertices of the cycle
+G. If this is not the case, consider a minimal element U of L violating this condition. Then we can write the
+cut δ+(U) as the disjoint union of cuts δ+(U1), . . . , δ+(Up), where each set Ui ⊆ V \ {r} is a nonempty
+set of consecutive vertices of the cycleG and p ≥ 2. Then decreasing the value of yU to zero and increasing
+yU1 by the same amount, we maintain a solution to (Dual-BCR) of the same value. Moreover, we maintain
+laminarity of the support of y by the minimal choice of U. Hence, we may assume that every element of L
+is a set of consecutive vertices of G.
+38
+
+===== PAGE 40 =====
+
+Let LR := {U ∩ R : U ∈ L} . Then LR is a laminar family because L is a laminar family. Because
+LR is a laminar family of subsets of R, it has at most 2k elements. For each set X ∈ L R, the family
+{U ∈ L : U ∩ R = X} is a chain. We write UX to denote the maximal element of this chain. Now
+consider an edge e = {v, w} of G, where the contribution of y to each of (v, w) and (w, v) is positive, i.e,P
+U :(v,w)∈δ+(U ) yU > 0 andP
+U :(w,v)∈δ+(U ) yU > 0. Then e ∈ δ(UX) for two disjoint sets X ∈ L R.
+Because δ(U) contains exactly two edges (in G) for every set U ∈ L and |LR| ≤ 2k, this implies that there
+are at most 2k edges {v, w} with this property. We conclude
+X
+{v,w}∈E
+
+ X
+U :(v,w)∈δ+(U )
+yU +
+X
+U :(w,v)∈δ+(U )
+yU
+
+ ≤ n + 2k.
+Because every cut δ+(U) with U ∈ L has exactly two elements (in − →E ), this implies that the value of y is at
+most n
+2 + k.
+Lemma A.1 implies that on the instances from Figure 13, every solution y to (Dual-BCR) with laminar
+support has value at most n
+2 + k = ( 1
+2 − k
+n) · n. For k and n
+k being large enough, the ratio of this value
+( 1
+2 − k
+n) · n and the cost opt = k−1
+k · n of an optimum Steiner tree becomes arbitrarily close to 1
+2.
+Of course, for this particular family of instances a simple preprocessing could eliminate the Steiner
+nodes of degree 2. However, we might be given only the metric closure of the cycle G, or the graph G
+might have some additional edges that have high enough cost such that they do not change the cost of an
+optimum Steiner tree. Then considering dual solutions with laminar support is still not sufficient and the
+simple preprocessing eliminating degree-2 Steiner nodes does not help anymore.
+Acknowledgment
+We thank the Banff International Research Station and the organizers of the BIRS workshop “Approximation
+Algorithms and the Hardness of Approximation” in September 2023, during which fruitful discussions
+related to this work have taken place.
+References
+[ABHK11] Aaron Archer, Mohammad Hossein Bateni, MohammadTaghi Hajiaghayi, and Howard J.
+Karloff. Improved approximation algorithms for prize-collecting Steiner tree and TSP. SIAM
+J. Comput., 40(2):309–332, 2011.
+[AGH+24a] Ali Ahmadi, Iman Gholami, MohammadTaghi Hajiaghayi, Peyman Jabbarzade, and Moham-
+mad Mahdavi. 2-approximation for prize-collecting Steiner forest. In Proceedings of the 2024
+ACM-SIAM Symposium on Discrete Algorithms, (SODA), pages 669–693, 2024.
+[AGH+24b] Ali Ahmadi, Iman Gholami, MohammadTaghi Hajiaghayi, Peyman Jabbarzade, and Moham-
+mad Mahdavi. Prize-collecting Steiner tree: A 1.79 approximation. In Proceedings of the 56th
+Annual ACM Symposium on Theory of Computing, (STOC), pages 1641–1652, 2024.
+[AKR95] Ajit Agrawal, Philip N. Klein, and R. Ravi. When trees collide: An approximation algorithm
+for the generalized Steiner problem on networks. SIAM J. Comput., 24(3):440–456, 1995.
+39
+
+===== PAGE 41 =====
+
+[BD95] Al Borchers and Ding-Zhu Du. The k-Steiner ratio in graphs. In Proceedings of the 27th
+Annual ACM Symposium on Theory of Computing (STOC), pages 641–649, 1995.
+[BGA23] Jaroslaw Byrka, Fabrizio Grandoni, and Afrouz Jabal Ameli. Breaching the 2-approximation
+barrier for connectivity augmentation: A reduction to Steiner tree. SIAM J. Comput. ,
+52(3):718–739, 2023.
+[BGRS13] Jaroslaw Byrka, Fabrizio Grandoni, Thomas Rothvoß, and Laura Sanit `a. Steiner tree approxi-
+mation via iterative randomized rounding. J. ACM, 60(1):6:1–6:33, 2013.
+[BGSW93] Daniel Bienstock, Michel X. Goemans, David Simchi-Levi, and David P. Williamson. A note
+on the prize collecting traveling salesman problem. Math. Program., 59:413–420, 1993.
+[CC08] Miroslav Chleb ´ık and Janka Chleb´ıkov´a. The Steiner tree problem on graphs: Inapproxima-
+bility results. Theor. Comput. Sci., 406(3):207–214, 2008.
+[CCC+99] Moses Charikar, Chandra Chekuri, To-Yat Cheung, Zuo Dai, Ashish Goel, Sudipto Guha, and
+Ming Li. Approximation algorithms for directed Steiner problems. J. Algorithms, 33(1):73–
+91, 1999.
+[CDV11] Deeparnab Chakrabarty, Nikhil R. Devanur, and Vijay V . Vazirani. New geometry-inspired
+relaxations and algorithms for the metric Steiner tree problem. Math. Program., 130(1):1–32,
+2011.
+[CKP10] Deeparnab Chakrabarty, Jochen K ¨onemann, and David Pritchard. Hypergraphic LP relax-
+ations for Steiner trees. In Proceedings of the 14th International Conference on Integer Pro-
+gramming and Combinatorial Optimization, (IPCO), pages 383–396, 2010.
+[CTZ21] Federica Cecchetto, Vera Traub, and Rico Zenklusen. Bridging the gap between tree and con-
+nectivity augmentation: unified and stronger approaches. In Proceedings of the 53rd Annual
+ACM Symposium on Theory of Computing (STOC), pages 370–383, 2021.
+[DW71] Stuart E. Dreyfus and Robert A. Wagner. The Steiner problem in graphs. Networks, 1(3):195–
+207, 1971.
+[Edm67] Jack Edmonds. Optimum branchings. Journal of Research of the National Bureau of Stan-
+dards, B71:233–240, 1967.
+[FKOS16] Andreas Emil Feldmann, Jochen K ¨onemann, Neil Olver, and Laura Sanit`a. On the equivalence
+of the bidirected and hypergraphic relaxations for Steiner tree.Math. Program., 160(1-2):379–
+406, 2016.
+[FV20] Bartosz Filipecki and Mathieu Van Vyve. Stronger path-based extended formulation for the
+Steiner tree problem. Networks, 75(1):3–17, 2020.
+[GAT22] Fabrizio Grandoni, Afrouz Jabal Ameli, and Vera Traub. Breaching the 2-approximation bar-
+rier for the forest augmentation problem. In Proceedings of the 54th Annual ACM Symposium
+on Theory of Computing (STOC), pages 1598–1611, 2022.
+40
+
+===== PAGE 42 =====
+
+[GLL19] Fabrizio Grandoni, Bundit Laekhanukit, and Shi Li. O(log2 k / log log k)-approximation
+algorithm for directed Steiner tree: a tight quasi-polynomial-time algorithm. In Proceedings
+of the 51st Annual ACM Symposium on Theory of Computing (STOC), pages 253–264, 2019.
+[GM93] Michel X. Goemans and Young-Soo Myung. A catalog of Steiner tree formulations. Networks,
+23(1):19–28, 1993.
+[GORZ12] Michel X. Goemans, Neil Olver, Thomas Rothvoß, and Rico Zenklusen. Matroids and integral-
+ity gaps for hypergraphic Steiner tree relaxations. InProceedings of the 44th ACM Symposium
+on Theory of Computing Conference (STOC), pages 1161–1176, 2012.
+[GW95] Michel X. Goemans and David P. Williamson. A general approximation technique for con-
+strained forest problems. SIAM J. Comput., 24(2):296–317, 1995.
+[HDJAS23] Dylan Hyatt-Denesik, Afrouz Jabal Ameli, and Laura Sanit `a. Finding Almost Tight Witness
+Trees. In 50th International Colloquium on Automata, Languages, and Programming (ICALP
+2023), pages 79:1–79:16, 2023.
+[HJ06] Mohammad Taghi Hajiaghayi and Kamal Jain. The prize-collecting generalized Steiner tree
+problem via a new approach of primal-dual schema. In Proceedings of the 17th Annual ACM-
+SIAM Symposium on Discrete Algorithms (SODA), pages 631–640, 2006.
+[Jai01] Kamal Jain. A factor 2 approximation algorithm for the generalized Steiner network problem.
+Combinatorica, 21(1):39–60, 2001.
+[KOP+17] Jochen K ¨onemann, Neil Olver, Kanstantsin Pashkovich, R. Ravi, Chaitanya Swamy, and Jens
+Vygen. On the integrality gap of the prize-collecting Steiner forest LP. In Proceedings of the
+International Conference on Approximation, Randomization, and Combinatorial Optimization
+(APPROX/RANDOM), pages 17:1–17:13, 2017.
+[KZ97] Marek Karpinski and Alexander Zelikovsky. New approximation algorithms for the Steiner
+tree problems. J. Comb. Optim., 1(1):47–65, 1997.
+[LL22] Shi Li and Bundit Laekhanukit. Polynomial integrality gap of flow LP for directed Steiner
+tree. In Proceedings of the 2022 ACM-SIAM Symposium on Discrete Algorithms (SODA) ,
+pages 3230–3236, 2022.
+[Meh88] Kurt Mehlhorn. A faster approximation algorithm for the Steiner problem in graphs. Inf.
+Process. Lett., 27(3):125–128, 1988.
+[PS00] Hans J ¨urgen Pr¨omel and Angelika Steger. A new approximation algorithm for the Steiner tree
+problem with performance ratio 5/3. J. Algorithms, 36(1):89–101, 2000.
+[RV99] Sridhar Rajagopalan and Vijay V . Vazirani. On the bidirected cut relaxation for the metric
+Steiner tree problem. In Proceedings of the Tenth Annual ACM-SIAM Symposium on Discrete
+Algorithms (SODA), pages 742–751, 1999.
+[RZ05] Gabriel Robins and Alexander Zelikovsky. Tighter bounds for graph Steiner tree approxima-
+tion. SIAM J. Discret. Math., 19(1):122–134, 2005.
+41
+
+===== PAGE 43 =====
+
+[TZ21] Vera Traub and Rico Zenklusen. A better-than-2 approximation for weighted tree augmen-
+tation. In Proceedings of the 62nd IEEE Annual Symposium on Foundations of Computer
+Science (FOCS), pages 1–12, 2021.
+[TZ22] Vera Traub and Rico Zenklusen. Local search for weighted tree augmentation and Steiner
+tree. In Proceedings of the 2022 ACM-SIAM Symposium on Discrete Algorithms (SODA) ,
+pages 3253–3272, 2022.
+[TZ23] Vera Traub and Rico Zenklusen. A (1.5+ ε)-approximation algorithm for weighted connectivity
+augmentation. In Proceedings of the 55th Annual ACM Symposium on Theory of Computing
+(STOC), pages 1820–1833, 2023.
+[Vic20] Robert Vicari. Simplex based Steiner tree instances yield large integrality gaps for the bidi-
+rected cut relaxation. CoRR, abs/2002.07912, 2020.
+[Zel93] Alexander Zelikovsky. An 11/6-approximation algorithm for the network Steiner problem.
+Algorithmica, 9(5):463–470, 1993.
+[Zel96] A. Zelikovsky. Better approximation bounds for the network and Euclidean Steiner tree prob-
+lems. Technical report, University of Virginia, 1996. CS-96-06.
+[ZK02] Leonid Zosin and Samir Khuller. On directed steiner trees. In Proceedings of the Thirteenth
+Annual ACM-SIAM Symposium on Discrete Algorithms (SODA), pages 59–63, 2002.
+42

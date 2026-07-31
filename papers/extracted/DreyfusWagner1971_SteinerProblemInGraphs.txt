@@ -1,0 +1,593 @@
+﻿SOURCE: DreyfusWagner1971_SteinerProblemInGraphs.pdf
+PAGES: 13
+EXTRACTOR: pypdf 6.10.0 (Unicode text), pdfplumber fallback
+
+
+===== PAGE 1 =====
+
+The Steiner Problem in Graphs 
+S. E. Dreyfus 
+Department of Industrial Engineering and Operations Research 
+University of California 
+Berkeley, California 
+R. A. Wagner 
+Computer Science Department 
+Cornell University 
+Ithaca, New York 
+ABSTRACT 
+An algorithm for solving the Steiner problem on a finite 
+undirected graph is presented. 
+set of graph arcs of minimum total length needed to connect a 
+specified set of k graph nodes. If the entire graph contains 
+n nodes, the algorithm requires time proportional to 
+ThiB algorithm computes the 
+3 The the requirement above includes the term n /2, which can 
+be eliminated if the set of shortest paths connecting each 
+pair of nodes in the graph is available. 
+1. THE STEINER PROBLEM IN A GRAPH 
+Let a graph G be given as a pair (N,A), where N is a set 
+of nodes, and A is a set of undirected arcs connecting nodes 
+of N. With each arc a c A is associated a positive number 1.1 , 
+called the length of a. 
+The problem we consider is that of computing a subset S of A 
+such that : 
+Suppose a subset Y of N is also given. 
+(1) all members of Y are connected by paths composed only 
+of arcs in S; 
+and 
+(2) IsI = c Is1 is a minimum. 
+We call this problem the Steiner Problem on Y in graph G. 
+SES 
+G is assumed to be connected. S is called the Steiner path 
+connecting Y in GI or, where G is evident, just the SteineP 
+path connecting Y. If Y consists of just one node, the Steiner 
+Networks, 1: 195-207 
+@ 1972 by John Wiley L Sons, Inc. 195 
+
+===== PAGE 2 =====
+
+196 DREYFUS AND WAGNER 
+Path consists of no arcs and has length zero. 
+The original Steiner problem (rather than the problem on 
+a graph which we are studying) is an old problem in geometry. 
+In its usual formulation, the Steiner problem requires finding 
+the set-of lines of minimum total length which connect a given 
+set of points Y. For properties of its solution, see Reference 
+[ll. Usually both lines and points are assumed to lie in the 
+same Euclidean plane. Nothing in the formulation of the prob- 
+lem requires that the lines drawn intersect only on points in 
+Y; on the contrary, "interior" points of intersection, called 
+Steiner points, can frequently reduce the total length of line. 
+For example, given the three points y 
+nected, the lines shown in Figure 1 
+y2 and y to be con- 1' 3 
+Fig. 1 
+with constructed point S used as a point of intersection, pro- 
+duces a total line-length smaller than that of say, Figure 2. 
+y2 
+Fig. 2 
+The present investigation attempts to study this problem 
+in a space where length-measurement is not Euclidean and where 
+paths must consist of elements of a specified set A of arcs. 
+Specifically, we allow lengths to be assigned to arcs (point- 
+to-point distances) arbitrarily. Such lengths need not even 
+satisfy the triangle inequality. For example, Figure 3 shows 
+a perfectly valid assignment of lengths to arcs. 
+Fig. 3 
+In this graph, a shorter distance is traversed by going from 
+a to c and thence to b, than by going directly from a to b. 
+
+===== PAGE 3 =====
+
+THE STEINER PROBLEM IN GRAPHS 197 
+One of the easily proven facts about a Steiner path S is 
+that S must be a tree. That is, S must contain no cycles. For 
+if a cycle exists, then there are two different paths available 
+for connecting some node of Y to the rest. One can eliminate 
+some arc of one of these paths without destroying the connecting 
+property of S. 
+tion that IS1 is minimal. 
+But this reduces IS1 , contradicting the assump- 
+NOW, consider Figure 4, showing a typical solution S to a 
+Steiner problem on Y c N in G = ",A). 
+q 
+r 
+s 
+Fig. 4 
+Here, Y = {q,r,s,t). 
+is connected, in this solution, by a branch of the solution tree 
+to a junction node p (which need not be an element of Y). 
+Clearly the path connecting q and p is the shortest path, else 
+S would not be the minimal solution. Also note that each of the 
+other branches of S touching p represents the solution of a 
+Steiner problem connecting fewer nodes than the number of the 
+set Y. 
+{p,r}. 
+smaller parts the optimal decomposition property. It can be 
+stated as follows. 
+Let S be any Steiner tree connecting Y, where YC N is a 
+subset of the nodes of graph G = (N,A) , and let q be any node 
+of Y. If Y contains at least 3 members then there exists a 
+node p E N and a subset D of Y such that: 
+Note that any node belonging to Y, say q, 
+(p,s,t) cannot be connected by a shorter path, nor can 
+If they could, again S would not be the solution. 
+We call the above "division" of the problem by p into three 
+D 
+S 
+S 
+S connects (p) U (Y - D - {q)) . 
+S1, S and S are all Steiner paths connecting Furthermore, 
+their respective sets. 
+is a proper subset of Y - {q), and D is nonempty. 
+consists of 3 disjoint subsets, S1, s2 ,and S 
+connects {p,q), S2 connects {p) U D, while 
+3' 
+1 
+3 
+2 3 
+
+===== PAGE 4 =====
+
+198 DREXE'US AND WAGNER 
+Three "degenerate" situations are shown below (in all cases 
+Y = {q,r,s,t}). Consider Figure 5. 
+9 r S t 
+O==Q==O-=O 
+Fig. 5 
+Here p is node r. Then D = {s,t), S is the Steiner path con- 
+necting {r,s,t} and S 
+or conversely. In Figure 6, 
+2 
+connects {r) and hence contains no arcs, 3 
+r t 
+Fig. 6 
+p is node q, D = {r), S is the Steiner path connecting {q,r} 
+and S is the Steiner path connecting {q,s,t], or conversely. 3 
+In Figure 7, 
+2 
+r 
+b 
+t 
+Fig. 7 
+D can be {r), Is), {t), {r,s), {r,t) or {s,t). Ignoring switch- 
+ing of D and Y - D - {q), there are 3 different decompositions 
+which satisfy the principle above. 
+tion of the type described above, covering all degenerate cases, 
+appears in Appendix A.) 
+(A general proof of the existence of an optimal decomposi- 
+2. A SOLUTION ALGORITHM 
+Our algorithm exploits the optimal decomposition property. 
+A straightforward application of the property would entail 
+choosing q E Y (any q will do), then searching for the optimal 
+choice of p. In turn, an optimal choice of p requires that an 
+optimal choice of the subset D C Y be made, and that the Steiner 
+trees S and S connecting D U {p) and (Y - D - {q)) U (p) be 2 3 
+
+===== PAGE 5 =====
+
+THE STEINER PROBLEM IN GRAPHS 199 
+known. Thus, the original problem could be solved recursively. 
+However, we could also build up the desired solution by means 
+of the following llYll - 1 steps (where llY1 denotes the number of 
+elements in the set Y). 
+1. Remove one node, q, from Y. Call the set Y - Iq) 
+set C. 
+2. Solve Steiner problems connecting each set of 2 
+nodes of C and 1 node n E N. (n can be a member 
+of C, or it can even be node q itself). 
+3. Use this result to solve Steher problems connect- 
+ing each set of 3 nodes of C and 1 node n E. N. 
+IlYll - 2. 
+IIYII - 1. 
+Solve Steiner problems connecting each set of 
+#yll - 2 nodes of C and 1 node n E N. 
+Solve the Steiner problem connecting q and set C. 
+Given a subset D of C, and n E N, each step in the solution 
+above involves two searches: Search 1 locates the intermediate 
+node, p E N; Search 2 finds the optimal proper subset E of D so 
+that the lengths of the Steiner paths connecting (p} (J E and 
+(p) 
+possible such total length. 
+The efficiency of this procedure stems from the fact that 
+only optimal solutions for the relevant subsets are ever con- 
+sidered. Nonoptimal solutions to smaller subproblems are dis- 
+posed of at the time that subproblem is solved. The optimal 
+solution is retained, for use in solving later subproblems, and 
+the smaller subproblem is never solved again. Straightforward 
+enumeration of all possible solutions to the entire problem 
+would unnecessarily consider nonoptimal subsolutions many times. 
+This building up of larger optimal solutions from optimal solu- 
+tions of all possible smaller problems is the fundamental tech- 
+nique in the general methodology called dynamic programming. 
+Let us discuss in some detail the procedure whereby the 
+Steiner solution for a given subset D consisting of a certain 
+j (2 2) nodes of C and one node, m E N, is found. Here again 
+we avoid some unnecessary calculation by first solving all 
+possible smaller problems of a certain form. First we associate 
+with each node k E N a number S (D) which is found by (1) k breaking D into two proper subsets E and F, and adding the 
+Steiner distance for the set consisting of the members of E and 
+node k to the Steiner distance for the set consisting of the 
+nodes in F and node k, and (2) minimizing this sum over all 
+(D - El, plus the distance from n to p add to the smallest 
+
+===== PAGE 6 =====
+
+200 DREYFUS AND WAGNER 
+distinct choices of sets E and F. (The number S (D) is not 
+necessarily the minimum Steiner distance for the set composed 
+of the elements of D and node k since no saving due to 
+coalescing the subsolutions at a node other than k is con- 
+sidered.) Having done this for given D and all k, to solve 
+the Steiner problem for m and D, we let dmk denote the length 
+of the shortest path from m to k and we minimize dmk + Sk(D) 
+over all nodes k B N. Let S(m,D) denote the Steiner path for 
+nodes {m U D). Since S (D) does not depend on the choice of 
+node m, knowledge of S (D) for all k E N allows easy computa- 
+tion of Steiner solutions for any m E N, all, of course, for 
+given D. The computation is repeated, then, for all choices 
+of the set D. 
+Since shortest paths between pairs of general nodes are 
+used repeatedly in the above calculations, we begin the whole 
+procedure by first computing the length of the shortest paths 
+between all pairs of nodes in the graph, Reference 121. 
+kngth of the Steiner tree, but not the actual tree. 
+termine the tree, there are two "pure" strategies available 
+(and several hybrids). 
+record the value of k that minimized d + S (D) and the sets 
+E and F that generated S (D). 
+duces the optimal decomposition, with m connected to k by 
+shortest path, while E and F, respectively, are joined to k 
+by Steiner trees. 
+can be stored and the minimizing value of k and associated set 
+E and F can be recomputed as needed in the reconstruction of 
+the Steiner tree. In either case, as is typical in dynamic 
+programming procedures, the Steiner tree is constructed (after 
+the optimal length has been determined) by processing sets in 
+the reverse order of that of the length-determination algorithm. 
+The first method of tree-construction involves less computation 
+while the second uses less computer storage. Since tree- 
+construction by method two requires at most l/nth the computa- 
+tion time of the length-generation, we recommend, and use, it. 
+k 
+k 
+k 
+So far we have described a procedure for generating the 
+To de- 
+For each choice of m and D one can 
+mkk 
+Then k is the node which pro- k 
+Or, on the other hand, the values of Sk(D) 
+3. NUMERICAL ILLUSTRATION OF THE PROCEDURE! 
+Let llNI[ = 7, llYll = 4, Y = {1,2,3,41, and the matrix A of 
+
+===== PAGE 7 =====
+
+THE STEINER PROBLEM IN GRAPHS 201 
+direct distances (a = a is the length of the arc (i,j) be- 
+tween nodes i and j) be 
+ij ji 
+1234567 
+1 
+2 
+3 
+4 A= 
+5 
+6 
+7 
+x222112 
+2x22212 
+22x2221 
+222x121 
+1221x21 
+11222x1 
+221111x 
+- First we compute the matrix D of shortest lengths (dij = dji - 
+length of the shortest path between nodes i and j) by the method 
+of Reference [2]. Clearly, by our choice of data, matrix D is 
+identical with matrix A. We now remove one node, say node 1, 
+from Y. Let C = {2,3,4). 
+Let D = {2,3}. Then S1(D) = d + d13 = 4, S2(D) = 2, 12 
+S (D) = 2, S (D) = 4, S (D) = 4, S6(D) = 3, S7(D) = 3. 
+s(m,D) denote the Steiner solution for nodes Cm U D), we have 
+Letting 3 4 5 
+S(1,D) = min (d + S (D) = 4 (with several different trees lk k k 
+yielding the result). S(2,D) = 2, S(3,D) = 2, S(4,D) = 4, 
+S(5,D) = 4, S(6,D) = 3, S(7,D) =3. 
+Now let D = (2,4). Then S (D) = 4, S (D) = 2, S3(D) = 4, 
+S (D) = 2, S (D) = 3, S (D) = 3, S (D) = 3. Hence S(1,D) = 4, 
+S(2,D) = 2, S(3,D) = 4, S(4,D) = 2, S(5,D) = 3, S(6,D) = 3, 
+S(7,D) = 3. 
+1 2 
+4 5 6 7 
+Finally, let D = {3,4). Then S1(D) = 4, S (D) = 4, 2 
+S (D) = 2, S4(D) = 2, S (D) = 3, S (D) = 4, S (D) = 2. 
+S(1,D) = 4, S(2,D) = 4, S(3,D) = 2, S(4,D) = 2, S(5,D) = 3, 
+S(6,D) = 3, S(7,D) = 2. 
+We are now ready for step lbll - 1, since step 2 = step 
+Let E = (21 and F = (3,41. 
+Hence 3 5 6 7 
+IIY~~ - 2. 
+S(1,F) = 2 + 4 = 6. 
+S (D 1 E,F) = 2 + 4 = 6. 
+Then S (D I E,F) = 2 + 4 = 6. 
+choices of E and F of S (D I E,F) = 6. 
+Let D = (2,3,4). 
+Then S1(D I E,F) = S(1,E) t 
+Finally, let E = {4}, F = (2,3}. 
+Hence S (D) = minimum over all 
+Now let E = (31, F = (2,4). Then 
+1 
+1 1 
+1 
+
+===== PAGE 8 =====
+
+202 DREYE'US ANDWAGNER 
+Letting E = {2} and F = (3,4), S2(D 1 E,F) = 4. Letting 
+E = (3) and F = (2,4), S2(D I E,F) = 4. 
+F = {2,3}, S (D 1 E,F) = 4. 
+Letting E = (4) and 
+Hence S (D) = 4. 2 2 
+Similarly, S (D) = min (4,4,4) = 4. S (D) = min (4,4,4) = 
+S7(D) = 5 6 
+3 4 
+4. S (D) = min (5,5,5) = 5. 5 (D) = min (4,5,5) = 4. 
+min (4,4,4) = 4. 
+Hence S(l,D? = min (dlk + S (D)) = 5, which is the minimal k k 
+IS!. 
+yielded the minimum in the abve minimization, node 1 is to be 
+connected to node 6 by shortest path, which in this case is the 
+arc connecting nodes 1 and 6. Now S (D) resulted when E = (2) 
+and F = {3,4). Hence the shortest path from 6 to 2 is part of 
+the solution tree. This is the arc between 2 and 6. Finally, 
+node 6 must be connected to nodes 3 and 4 by Steiner path. Re- 
+ferring to S(6,D) above for D = {3,4) we see S(6,D) = 3 and the 
+value 3 was obtained when k = 7 yielded min (d 
+Hence node 6 must be connected to node 7 by shortest path (the 
+arc connecting 6 and 7 in this case) and node 7 must be con- 
+nected to nodes 3 and 4 by shortest paths (the arcs between 
+7 and 3 and 7 and 4 in this case). Hence the solution tree 
+consists of the arcs (l,6), (2,6) , (6,7), (7,3) and (7,4). The 
+sum of these arc-lengths is indeed 5, checking with our computed 
+value of S(1,D) for D = {2,3,4). 
+tion property, if node 1 is taken as node q, then node 6 is node 
+p and node 2 can constitute set D. Then set S consists of'the 
+arc (1,6) , set S consists of .(2,6) and S consists of (6,7), 
+(7,3) and (7,4). 
+To reconstruct the solution, we note that since k = 6 
+6 
++ Sk(D) . 
+k 6k 
+With reference to the statement of the optimal decomposi- 
+1 
+2 3 
+4. THE ALGORITHM 
+The details of the algorithm described and illustrated 
+above are best understood when expressed in precedural form. 
+Below is the algorithm, expressed in a modified form of Algol. 
+i to j, i,j E N. Choose q E Y, and define C = Y - (9). Also, 
+let A[1] denote the first element of the (ordered) set A and 
+A SB mean that A is a subset of B but not B itself. 
+Let D(i,j) = length of the shortest path in G from 
+
+===== PAGE 9 =====
+
+TRE STEINER PROBLEM IN GRAPHS 203 
+AZgorith A: (Computes the length of the Steiner tree connect- 
+ing Y, and assigns this length to variable "v") : 
+COUNT 
+(1) for each t E C do 
+(2) for each J E N do 
+(3) S[(tf,Jl f D(t,J); 
+(4) 
+(5) 
+(6) for each I E N do 
+(7) S[D,I] 4 QJ ; 
+(8) for each J E N do begin 
+for m = 2 to IlCII - 1 do 
+for each D such that D CC A IlDll = m do begin 
+(9) u4m; 
+(10) for each E such that D[1] E E .. E . D do 9 
+(11) u 4 min (u,S[E,J] + S[D - E,JI); 
+(12) for each I E N do 
+(13) S[D,I] f min (S[D,Il ,D(I,J) + u); 
+(14) end; end; 
+(15) v f OJ ; 
+(16) for each J E N do begin 
+(17) u f m ; 
+2'"'-' - 1 (18) for each E such that C[11 E E A E $ C do 
+(19) u f min (u,S[E,JI + S[C - E,JI); 
+1 (20) v f min (v,D(q,J) + u); end. 
+Here, we have solved all subproblems involving subsets 
+of c of size j, before solving any subproblem involving a 
+subset of C of size j + 1. But it is unnecessary to consider 
+the subsets of C in precisely this order. For example, suppose 
+C = (d,e,f,g,h,i}, and we wish to find the Steiner path con- 
+necting node m and {d,e,f,g). We need solutions for all sets 
+D U {p}, where DC {d,e,f,g) and p E N, but for no subsets of 
+C involving h or i. The program that we have written to imple- 
+ment Algorithm A actually processes subsets in an order dif- 
+ferent from that given in Algorithm A, to use efficient methods 
+of enumerating subsets. But the philosophy is the same, as is 
+the number of elementary comparison -and - addition opera- 
+tions. No vast saving of time can be expected from this 
+reordering of subset choice -- only a linear improvement factor 
+due to reduced bookkeeping effort. 
+
+===== PAGE 10 =====
+
+204 DREYE'US AND WAGNER 
+5. ENUMERATION OF THE NUMBER OF 
+OPERATIONS REQUIRED BY ALGORI"4 A 
+Most of the time required by Algorithm A is spent executing 
+"elementary" statements of the form 
+a + min (a,b + c). 
+(Although the "bookkeeping" needed to compute successive sets, 
+such as E in line 10, appears complicated, in actuality, its 
+cost can be reduced to the execution of only 2 or 3 computer 
+instructions per loop iteration. 
+iteration is roughly the same as that needed for execution of 
+the elementary statement above.) 
+the number of repetitions that control statements call for. 
+Thus, for each value of m, statement 5 calls for 
+tions or repetitions of the statements (6 through 13) under its 
+control. 
+The the-cost of one such 
+The formulae presented in the column labelled "courrt" give 
+) itera- 
+llcll -1 
+Statement 11 is executed 1 (":ll) llNll (2m-l - 1) = s 11 times; 
+m= 2 
+Statement 20, 
+Each is an elementary statement. 
+IINII = s~~ times. 
+Since 
+; ($2i = (1 + 2)n = 3n 
+i=O 
+we obtain S + S13 + S19 + S20 = S as: 11 
+Letting k = IlCII + 1 = llYII = number of nodes to be connected, and 
+n = IINI( = number of nodes in the graph, 
+S=n(2 k-l - k - 1) + n(3 k-l - 2k + 3)/2. 
+
+===== PAGE 11 =====
+
+THE STEINER PROBLEM IN GRAPHS 205 
+To this must be added T, the number of elementary statements 
+needed to compute D(i,j) = the length of the shortest path be- 
+tween each pair of nodes in N. By the method of Reference [2], 
+exploiting symmetry, T = n /2. 
+On a modern computer, each elementary statement should 
+require about 10 seconds. For a problem of size n = 100, 
+k = 10, we estimate that about 7 x 10 operations would be 
+needed, requiring about 70 seconds. Our program was compiled 
+by PL/I rather inefficiently and requires about 6 times this 
+estimated time, tending to confirm the above estimate for an 
+efficient machine language program. 
+that if 2 is small relative to n (e.g., n = 200, k = 61, the 
+solution of the all-pairs shortest path problem is much more 
+time-consuming than the solution of the Steiner problem, given 
+the all-pairs shortest path result. 
+3 
+-5 
+6 
+It is interesting to note 
+k 
+APPENDIX A PROOF OF THE OPTIMAL DECOMPOSITION PROPERTY 
+The optimal decomposition property states, roughly, that 
+any Steiner path connecting all nodes in the set Y can be de- 
+composed into precisely 3 disjoint sets of arcs. 
+pieces touch a particular node, p. One piece joins p with q, 
+a previously chosen node of Y. The others join p with the re- 
+maining members of Y, grouped into two disjoint nonempty sub- 
+sets, D and Y - D - (9). Furthermore, all these pieces of the 
+original Steiner path are themselves Steiner paths connecting, 
+respectively: (p,q), {p) U D and {p) U (Y - D - cq)). 
+paths at any node along that path produces Steiner subpaths, 
+rather than some longer connecting path. The remaining problem 
+is the existence of an appropriate node to decompose the Steiner 
+path into the three pieces we have characterized above. 
+this latter result, we add the additional hypothesis that Y 
+contain at least 3 nodes. Note that the Steiner path connecting 
+2 nodes is easily computable. It is just the shortest direct 
+graph distance (minimal tree) between the two given nodes. 
+proving both propositions: 
+All these 
+We will establish, first that a decomposition of Steiner 
+For 
+First we insert some definitions useful in stating and 
+Let x be any node on a Steiner tree S connecting the 
+nodes in Y. 
+Let B(x) be the set of arcs of S which touch x. 
+If C CiB(x), let Y (x) be that subset of Y which is 
+reachable from x along paths in S whose first arc be- 
+longs to C. 
+C 
+
+===== PAGE 12 =====
+
+206 DREYFUS AND WAGNER 
+Theorem I: 
+be any node touching an arc of S. 
+of S involved in connecting the nodes of Yc : Yc(x) u 4x1 form 
+a Steiner tree connecting the nodes of Yc. 
+PROOF: Node x decomposes the path S into two parts, joined at 
+x. One portion of S, S 
+the remaining arcs of S. 
+Only if there were a set of arcs P # S which connected the 
+nodes in Y 
+necting Y 
+in S by P, making IS I = IS,] + ]PI < IS21 + lS1l = ISl. 
+this would contradict the hypothesis that S was the shortest 
+path connecting the nodes of Y. We have thus shown that Steiner 
+trees can be viewed as collections of subtrees joined at their 
+roots; we now want to show the existence of a particular kind of 
+sub-Steiner-tree collection in any Steiner tree. 
+Optimal Decomposition Theorem: 
+necting Y, where Y C N is a subset of the nodes of graph G = (N,A), 
+and let q be any node of Y. 
+then there exists a node p E N and a subset D of Y such that: 
+Let S be any Steiner tree connecting Y, and let x 
+Let C C B(x). Then the arcs 
+connects the nodes in Y - let S2 be 
+The length of S = IS1 = IS I + ]S21. 
+1' C' 
+1 
+1 
+not be a Steiner tree con- and lPl < lSll, would S 
+But if such a P existed, then S1 could be replaced 
+C' 1 
+1 C' 
+But 
+Let S be any Steiner tree con- 
+If Y contains at least three members 
+D 
+S 
+SI 
+Sg 
+Furthermore, SI, S2, and S3 are all Steiner paths connecting 
+their respective sets. 
+Case I: Suppose IIB(q)ll >- 2. Then q itself is a suitable choice 
+of p; for q is connected to itself by a shortest path (of length 
+zero), and D can be chosen as Y (9) , for a E B(q). a 
+Case 2: Suppose IIB(q)ll = 1. Then two subcases arise; either 
+(a): the branch of S touching q divides before reaching another 
+x E Y, or (b) : it does not. 
+In Case a, there is a node k such that llB(k)ll > 2, and 
+k is connected to q by a path r in S which doesn't pass through 
+any nodes of Y. Suppose r leaves k along arc b, b E B(k). 
+is a proper subset of Y - (q), and D is nonempty. 
+consists of 3 disjoint subsets, Sl, S2, and S3. 
+connects {p,q), S2 connects (p) U D, t)hile 
+connects (p) U (Y - D - (9)). 
+
+===== PAGE 13 =====
+
+THE STEINER PROBLEM IN GRAPHS 207 
+Since IIB(k)ll > 2, 1IB(k) - {b}II > 1, so D = Y 
+and Y - D - (q) are nonempty and connected as required. 
+c E B(k) - {b) 
+C1 
+In Case b, there is some node k E Y such that k is 
+connected to q by a path r passing through no other node of Y. 
+Since IIYII >_ 3, IIY - (k) - {q}II >- 1. 
+since r fails to touch at least one y E Y. This node k is a 
+suitable choice for p: Choose D = {k). 
+Therefore, llB(k)II 2 2, 
+q 0- .. 
+REFERENCES 
+1. Gilbert, E. N. and H. 0. Pollak, "Steiner Minimal Trees," 
+SIAM Journal for Applied Mathematics, Volume 16, NO. 1, 
+pp. 1-29, (1968). 
+2. Floyd, R. W., "Algorithm 97, Shortest Path," Communications 
+of the ACM, Volume 5, p. 345, (1962). 
+This research has been partially supported by the National 
+Science Foundation under Grant GP-15473 with the University 
+of California. 
+Also, the RAND Corporation, which through the U.S. Air Force 
+under the Project RAND, supported the authors during their 
+initial research on this problem. 
+in part is permitted for any purposes of the United States 
+Government. 
+Reproduction in whole or 
+Paper received May 11, 1971. 

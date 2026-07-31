@@ -1,0 +1,791 @@
+﻿SOURCE: GoemansMyung1993_CatalogOfSteinerTreeFormulations.pdf
+PAGES: 10
+EXTRACTOR: pypdf 6.10.0 (Unicode text), pdfplumber fallback
+
+
+===== PAGE 1 =====
+
+A Catalog of Steiner Tree Formulations 
+Michel X. Goemansf 
+Department of Mathematics, Room 2-372, Massachusetts Institute of Technology, 
+Cambridge, Massachusetts 02139 
+Young-soo Myungt 
+Department of Business Administration, Dan kook University, Cheonan, 
+Chungnam 330, South Korea 
+We present some existing and some new formulations for the Steiner tree and Steiner arborescence 
+problems. We show the equivalence of many of these formulations. In particular, we establish the 
+equivalence between the classical bidirected dicut relaxation and two vertex weighted undirected 
+relaxations. The motivation behind this study is a characterization of the feasible region of the dicut 
+relaxation in the natural space corresponding to the Steiner tree problem. 0 7993 by John Wiley & 
+Sons, Inc. 
+INTRODUCTION 
+We refer to undirected graphs as graphs and to di- 
+rected graphs as digraphs. In a graph G = (V, E), the 
+elements of E are called edges and the edge e between 
+the vertices i and j is denoted by {i, j} or {j, i}. In a 
+digraph D = (V, A), the elements of A are called arcs 
+and the arc a between i and j is denoted by (i, j). (i, j) 
+and (j, i) do not represent the same arc. From any 
+graph G = (V, E), we can obtain a bidirected graph DG 
+= (V, A) by replacing every edge of E by two arcs in 
+opposite direction, i.e., A = {(i, j) : {i, j} E E}. 
+Given a graph G = (V, E) and a set T C V of termi- 
+nals, a Steiner tree is a tree spanning T. We do not 
+require its leaves to be terminals. Let 1 be a cost func- 
+tion defined on the edge set E. The Steiner tree prob- 
+lem is the problem of finding a Steiner tree of minimum 
+*Supported by Air Force contract AFOSR-89-0271 and DARPA 
+ton leave at the Operations Research Center, MIT. Partial Sup- 
+contract DARPA-89-J- 1988. 
+port from the Yonam Foundation. 
+cost, where the cost of a tree is the sum of the costs of 
+its edges. Given a digraph D = (V, A) and a root vertex 
+r, a set of arcs is called an r-arborescence of D if it 
+forms a (not necessarily spanning) tree directed away 
+from the root r. For a set T of terminals and a specified 
+root vertex r E T, we define a Steiner arborescence as 
+an r-arborescence spanning T. The Steiner arbores- 
+cence problem is the problem of finding a minimum- 
+cost Steiner arborescence. Let T, = T\{r} and V, = 
+V\{r}, 
+The Steiner tree and Steiner arborescence problems 
+have extensively been studied in the literature. Two 
+recent surveys on these Steiner problems have sum- 
+marized formulations and solution methods [20, 291. 
+Maculan [20] emphasizes exact algorithms and integer 
+programming formulations, whereas Winter [29] con- 
+siders exact algorithms, heuristics, and polynomially 
+solvable special cases. 
+We associate to any Steiner tree an incidence vec- 
+tor x such that xe = 1 if edge e E E is part of the Steiner 
+tree and 0 otherwise. Let 9, denote the convex hull of 
+incidence vectors of Steiner trees in a graph G. 9, is 
+called the Steiner tree polytope. Similarly, the inci- 
+NETWORKS, Vol. 23 (1993) 19-28 
+0 1993 by John Wiley 8 Sons, Inc. CCC 0028-3045/93/01019-10 
+19 
+
+===== PAGE 2 =====
+
+20 GOEMANSANDMYUNG 
+dence vector w of a Steiner arborescence B is defined 
+by w, = 1 if a E B and 0 otherwise. The Steiner arbo- 
+rescence polytope, denoted by 9,,,, is the convex hull 
+of incidence vectors of Steiner arborescences. 
+We shall describe linear programming (LP) relaxa- 
+tions of the Steiner tree and Steiner arborescence 
+problems. An LP relaxation for the Steiner tree prob- 
+lem is a linear program of the form 
+Minimize( z = lex,: x E R,) , 
+where R, is a polyhedral region with 9, c R,. More 
+generally, we allow this definition to include extended 
+relaxations of the form 
+Minimize[ z = 2, lex,: (x, s) E R-1, 
+where 9, is contained within the projection proj.(R,,) 
+of R,., onto the x variables defined as proj,(R,,) = 
+{x : (x, s) E R,, for some s}. We regard two relaxations 
+as equivalent for a class 3 of cost functions 1 : E + R if 
+their optimal values are equal for any 1 E Y. Of course, 
+this does not necessarily imply that their feasible re- 
+gions are equal. However, if two relaxations, defined 
+by R,,s and R:, , are equivalent for all cost functions of 
+x, then proj.(R,,) = proj,(R:,) and vice versa. In this 
+case, we say that R,,s and R:, are extended descriptions 
+of R = proj,(R,,s) = proj,(R;,). These concepts are 
+defined analogously for the Steiner arborescence prob- 
+lem. 
+The most classical relaxation for the Steiner arbo- 
+rescence problem is the dicut relaxation introduced by 
+Wong [30]. This relaxation can also be used for the 
+Steiner tree problem since any instance of the problem 
+can be equivalently formulated as a bidirected Steiner 
+arborescence problem. Chopra and Rao [6] showed 
+that this approach leads to better relaxations than do 
+simple undirected relaxations for the Steiner tree prob- 
+lem. As a result, there has been little emphasis on 
+undirected relaxations in recent years. In this paper, 
+we show that undirected relaxations can be as tight as 
+bidirected ones, provided that we introduce some aux- 
+iliary variables. In particular, by considering vertex 
+variables that either keep track of the vertices spanned 
+or the degrees of the vertices in the Steiner tree, we 
+obtain two undirected relaxations that are equivalent 
+to the bidirected dicut relaxation. These relaxations 
+are valid only for nonnegative cost functions. We also 
+introduce tighter bounded analogs to these relaxations 
+that appear to be equivalent. 
+The paper is organized as follows: In Section 1, we 
+review classical formulations for the Steiner tree and 
+Steiner arborescence problems and we consider the 
+use of bidirected relaxations for the Steiner tree prob- 
+lem. In Section 2, we introduce two simple extended 
+undirected relaxations involving vertex variables and 
+we prove their equivalence to the bidirected dicut re- 
+laxation. Bounded analogs to these relaxations are 
+presented in Section 3. Finally, in Section 4, we show 
+that the polyhedra defined in Section 2 are the domi- 
+nants of their bounded analogs of Section 4. This im- 
+plies that all relaxations defined in this paper are 
+equivalent for all nonnegative cost functions. In Sec- 
+tion 4, we also prove that the choice of the root vertex 
+is unimportant when bidirecting an undirected in- 
+stance. 
+1. A REVIEW OF CLASSICAL INTEGER 
+PROGRAMMING FORMULATIONS 
+Given a graph G = (V, E) and a set S of vertices, 6(S) 
+represents the set of edges in E with exactly one end- 
+point in S, whereas E(S) represents the set of edges in 
+E with both endpoints in S. The corresponding notions 
+for a digraph D = (V,A) are as follows: For a set S c 
+V, 6-G) denotes the set of arcs {(i, j) E A : i $Z S, j E 
+S}, 6+(S) = 6-(V\S) and A(S) = {(i, j) : i E S, j E S}. 
+For simplicity, we write 6-G) [resp., 6+(i) or S(i)] in- 
+stead of 6-({i}) [resp., S+({i}) or S({i})]. If x is defined 
+on the elements of a set M (typically M is an edge set 
+E, an arc set A, or a vertex set V), then we denote 
+M by x(N). The only exceptions are 
+a(.), 6-(.), a+(.), E(,), and A(.), which were defined 
+previously. 
+xi for N 
+1 .l. Classical Formulations for the Steiner 
+Tree Problem 
+A Steiner tree can be seen as a minimall subgraph 
+having a path between any pair of terminals. In fact, 
+we can even restrict our attention to pairs containing a 
+specified vertex r E T. This vertex r plays the role of 
+root for the Steiner tree. This definition of Steiner 
+trees in terms of minimal subgraphs can be used to 
+formulate the Steiner tree problem as an integer pro- 
+gram when all cost coefficients are nonnegative. For 
+this purpose, we introduce some flow variables and 
+consider the following program [3]: 
+Minimize PEE lrxe 
+(1P:f) subject to: 
+*With respect to inclusion. 
+
+===== PAGE 3 =====
+
+CATALOG OF STEINER TREE FORMULATIONS 21 
+where 
+and k E T, 1 
+1 i=r 
+S,f = {(x, f): fk(6+(i)) - fk(s-(i)) = 
+k fu I x, 
+ff 2 0 
+[ o i E V\{k, r}J 
+e = {i, j} E E and k E T, 
+a E A and k E T,}, 
+and D = (V, A) is the bidirected graph obtained from 
+G = (V, E) by bidirecting every edge of E. The con- 
+straints (I) imply the existence of a unit flow from r to 
+k, and if x, is integral, this means that there exists a 
+path from r to k in the subgraph {e E E: x, 2 I}. 
+Using the max-flow min-cut theorem, the projection 
+S, of S,f onto the x variables can be characterized as 
+S, = {x: x(S(S)) 2 1 r 4 S and S fl T # 0 (3) 
+e E E} x, 2 0 
+and S, 19,. For a set S with r $Z Sand S fl T # 0, the 
+set of edges of the form S(S) constitutes a so-called 
+Steiner cut, and, as a result, the inequalities (3) are 
+known as Steiner cut inequalities. (IP,"f) can thus be 
+reformulated by the classical cut formulation [ 11: 
+Minimize 2 Irx, 
+PEE 
+UP,") subject to: 
+Moreover, the fact that S, = proj,(S,f) implies that the 
+linear programming (LP) relaxations of (Pj) and (IP,") 
+obtained by relaxing the integrality constraints on all 
+x,'s are equivalent. Notice that (ZP;) is a natural for- 
+mulation for the Steiner tree problem that has expo- 
+nential size, whereas (ZPtf) is an extended formulation 
+that is compact (namely, it has a polynomial number of 
+constraints and a polynomial number of variables). 
+Therefore, the value of their LP relaxations (LP,") and 
+(LPj) can be computed in polynomial time either us- 
+ing an interior-point algorithm on the polynomial-sized 
+formulation (LP:f) or the ellipsoid algorithm on (LP,") 
+since the separation problem over the Steiner cut in- 
+equalities can be solved in polynomial time as a se- 
+quence of (TI - 1 maximum flow problems (one for 
+each k E T,). 
+Goemans and Bertsimas [14] show that, if the cost 
+function satisfies the triangle inequality, the linear pro- 
+gram (LP,") can be simplified considerably without af- 
+fecting its optimal value. As a result of their study, the 
+value of (LP;) can be computed a la Held and Karp 
+[I51 by solving a sequence of minimum spanning tree 
+problems with Lagrangean costs [ 141. 
+In some cases, S, is integral, i.e., it is equal to its 
+integer hull inr-hull(S,) defined as the convex hull 
+conu(S, n ZIEl) of its integer points. For example, this 
+happens when IT1 = 2 or when G is acyclic. The case 
+JTI = 2 corresponds to the shortest path problem in an 
+undirected graph with no negative cycles. However, 
+even for the spanning tree problem on a cycle (T = V 
+and G is a cycle), S, is not equal to int-huU(S,). It 
+would be natural to expect a complete characterization 
+for this very simple case. Although (LP:) appears to 
+be a fairly loose relaxation, its value has been shown 
+to be within a factor of 1/(2 - 2/ITI) of the optimal 
+value of the Steiner tree problem [14]. 
+The Steiner tree problem on a graph G = (V, E) can 
+be transformed into a Steiner arborescence problem by 
+considering the digraph DG = (V, A) obtained by bi- 
+directing every edge of G, choosing arbitrarily a root 
+vertex r E T and defining the cost of the arc (i, j) E A 
+by cij = I, where e = {i, j}. This approach leads to 
+much better formulations for the Steiner tree problem. 
+For this reason, undirected relaxations have recently 
+been given much less attention than have bidirected 
+relaxations. 
+1.2. Classical Formulations for the Stelner 
+Arborescence Problem 
+The Steiner arborescence problem can be formulated 
+in a similar way as is the Steiner tree problem. A 
+Steiner arborescence can be seen as a minimal digraph 
+having directed paths between the root rand any other 
+terminal. Therefore, when the cost function is non- 
+negative, the Steiner arborescence problem can be for- 
+mulated by the following integer program [30], known 
+as the multicommodity flow formulation: 
+Minimize caw, 
+oE.4 
+(ZP,,,,) subject to: 
+
+===== PAGE 4 =====
+
+22 GOEMANS AND MYUNG 
+where 
+and k E T, 
+1 i=r 
+Qwj = {Cw, f ): f k(6+(i)) - f L(6-(i)) = 
+u E A and k E T, 
+a E A and k E T,}. 
+Since no Steiner arborescence contains any arc incom- 
+ing to the root, we shall assume that A has no such arc. 
+Equivalently, we could assume that w, = 0 for 
+a E 6-(r). This assumption is made throughout the 
+paper and turns out to be useful when dealing with 
+bidirected graphs. 
+Again, by the max-flow min-cut theorem, the pro- 
+jection of Qw,onto the H’ variables can be expressed as 
+[20]: 
+Qw = {w: w(6-(S)) 2 1 r $Z S and S n T # 0 (4) 
+with P,, C Q,,,. The inequalities (4) are known as 
+Steiner dicut inequalities. This leads to the classical 
+dicut formulation for the Steiner arborescence prob- 
+lem: 
+Minimize cowo 
+uEA 
+Relaxing the integrality on w, we obtain the linear 
+programming relaxations (LP,f) and (LP,,,). These LP 
+relaxations are equivalent and, by the same argument 
+as for the Steiner tree relaxations, their common opti- 
+mal value can be computed in polynomial time. Wong 
+[301 proposed a dual ascent method to obtain good 
+approximations on this optimal value. 
+The polyhedron Qw is equal to its integer hull when 
+IT1 = 2, when T = V [lo] or when the underlying graph 
+is series-parallel ([26], see also [13, 17, 281 for a slight 
+generalization). The case T = V corresponds to the 
+minimum-cost arborescence problem. 
+Tighter relaxations for the Steiner arborescence 
+problem have been proposed. Chopra and Rao [7] de- 
+rived classes of facet-defining valid inequalities that 
+can be used to strengthen Qw . Myung [24] also derived 
+a class of facet-defining inequalities with 0-1 coeffi- 
+cients for the set covering formulation of the problem. 
+Liu [18] gave a formulation for the Steiner arbores- 
+cence problem based on an extended complete charac- 
+terization of its polyhedron when (TI = 3. 
+1.3. The Bldlrected Case 
+As we have previously mentioned, the Steiner tree 
+problem is equivalent to the bidirected Steiner arbo- 
+rescence problem. Therefore, any formulation or re- 
+laxation for the Steiner arborescence problem can be 
+used for the Steiner tree problem. This gives formula- 
+tions not in the space of the edge variables x but in the 
+space of the arc variables w (and possibly some addi- 
+tional variables). To obtain a formulation in the natural 
+set of variables, we need to use the linear transforma- 
+tion x, = wy + wji for all e = {i, j} and eliminate the w 
+variables, i.e., project onto the x variables. In particu- 
+lar, for Q,,, we first define Qxw = {(x. w) : w E Q,,, and 
+xe = wy + w,, for all e = {i, j} E E} and then consider 
+Qx = projx(Qrw). Clearly, CPx Qx and Qx S,, since, 
+forx E Qx, we have x(6(S)) = w(6-(S)) + w(6+(S)) 2 
+I by (4) and (5). Furthermore, from the results for Q,,,, 
+we know that Qx = int-hull(Q,) if IT1 = 2, T = V, or C 
+is series-parallel. 
+Little is known about Qx. Although Qx seems to 
+depend on the choice of the root vertex r, we shall 
+prove at the end of this paper that, in fact, it is inde- 
+pendent of r. To the best of our knowledge, this fact, 
+although believed by many authors, has not been es- 
+tablished before. On the other hand, a complete de- 
+scription of Qx by linear inequalities is unknown. Cho- 
+pra and Rao [6] described some of the linear 
+inequalities defining Qx, namely, the class of Steiner 
+partition inequalities and the class of odd hole inequal- 
+ities. Goemans 1121 obtained many more such inequali- 
+ties and showed that Qx has a very rich and compli- 
+cated structure. There is therefore no hope of 
+obtaining a simple description of Qx by linear inequali- 
+ties. This has motivated many researchers to focus 
+their attention on bidirected formulations. Our main 
+goal in this paper is to show that simple undirecred 
+formulations can be as tight as bidirected formulations 
+provided that auxiliary variables are allowed. For this 
+purpose, we shall present three simple extended de- 
+scriptions of ex. Two of them are new and presented 
+in the next section. The last one is obtained by “un- 
+directizing” Qw/. 
+
+===== PAGE 5 =====
+
+CATALOG OF STEINER TREE FORMULATIONS 23 
+For this purpose, consider 
+1 and k E T, 
+1 i=r 
+QX/ = {(x, f): fk(6+(i)) - fk(6-(i)) = 
+o i E ~\{k, r}J 
+(6) e = {i, j} E E and h, k E T, 
+a E A and k E T,}. 
+The difference between Qxf and S,, resides in the con- 
+straints (6). These constraints couple the flow corre- 
+sponding to two commodities on arcs of opposite di- 
+rection. This technique to strengthen rnulticommodity 
+flow formulations has been used by Martin [21] and 
+Balakrishnan et al. [2]. 
+Qd precisely constitutes an extended description 
+of ex. 
+Proposition 1. Qx/ = {(x, f ): There exists (w, f) E Qw, 
+with x, = wii + wjifor all e = {i, j} E E}. 
+Proof. If (w, f) E Q, and x, = wii + w,i for all e = 
+{i, j} E E, then (x, f) E QX,since, by (2), ft, + f$s wii 
++ wji = x, for e = {i, j} E E. 
+On the other hand, assume that (x, f) E ex,. By (6), 
+maxh f 2 + maxk fj. I x, for e = {i, j} E E. Hence, we 
+can choose w such that maxh f 1 5 wii and x, = wg + w,i 
+for all e = {i, j} E E [e.g., take wg = f(x, + rnaxh f 3 - 
+maxk fj.11. Clearly, (w, f) E Qwf. w 
+Since Qx is integral when IT1 = 2, T = V, or when G 
+is series-parallel,g Qx, gives a compact description of 
+the dominant of the Steiner tree polytope for these 
+cases. In particular, when T = V, we have a compact 
+extended description of the dominant of the spanning 
+tree polytope by a system of linear inequalities.'' A 
+description of this dominant in the space of the x vari- 
+ables is given by Fulkerson (91 (see also [4]): 
+x, 2 0 e E E} 
+where (Vl, . . . , Vk) is any partition of V and 
+6(VI, . . . , Vk) denotes the set of edges whose end- 
+points belong to different members of the partition. 
+Whether a linear program can be expressed in com- 
+pact way is an important question (see [31]). Two gen- 
+eral techniques have been proposed to derive compact 
+'However editself is not integral [21]. 
+llln fact, Martin [21] showed that if we add the constraint x(E) = 
+IVI - I to Q,,, we obtain an extended description of the spanning 
+tree polytope. This is a slightly weaker result. 
+descriptions. In [22], Martin derives polynomial-sized 
+formulations from separation algorithms. Most of the 
+compact formulations presented in this paper can be 
+obtained in this way. In particular, Martin gave an- 
+other compact description of the spanning tree poly- 
+tope. The other technique is based upon dynamic pro- 
+gramming algorithms for the associated combinatorial 
+optimization problems [23]. For example, a compact 
+extended description of the Steiner tree polytope for 
+series-parallel graphs can be obtained from a dynamic 
+programming algorithm based upon the decomposition 
+of these graphs [23]. 
+2. TWO OTHER EXTENDED 
+FORMULATIONS FOR 9, 
+In this section, we show that simple descriptions of QX 
+can be obtained by introducing some vertex variables. 
+We present two such descriptions. 
+The first description is obtained by keeping track of 
+which vertices are spanned by the Steiner tree. Con- 
+sider additional variables yi for i E N = V\T (N is the 
+set of Steiner vertices) with the meaning that yi = 1 if 
+vertex i is spanned by the Steiner tree and 0 otherwise. 
+If we know which vertices are spanned by the Steiner 
+tree, then we can use Edrnonds' complete description 
+[8] of the spanning tree polytope to obtain a (partial) 
+description of the Steiner tree polytope: 
+x(E(S)) 5 y(N fl S) + IT fl SI - 1 S fl T f 8 (8) 
+x, z 0 e E E (10) 
+Yk 1 k E N} (11) 
+where S - k = S\{k}. Constraints (8) and (9) are called 
+generalized subtour elimination constraints. These 
+constraints together with (7) and (10) enforce that, 
+whenever yk E (0, 1) for all k E N, x is a convex 
+
+===== PAGE 6 =====
+
+24 GOEMANSANDMYUNG 
+combination of incidence vectors of trees spanning T 
+U {k E N: Yk = 1). 
+Relaxations based on Piy or on similar polyhedra 
+have been considered by Lucena [I91 and Goemans 
+[12]. The separation problem for the constraints (8) 
+and (9) can be solved by a sequence of IVI minimum 
+cut problems (see [271 or Section 111.3.7. in [251). 
+Therefore, optimizing over Pi, can be done in polyno- 
+mial time. Piy is integral when T = V [8] or when G is 
+series-parallel [ 121. 
+To relate this polytope to Q,, we consider a relaxa- 
+tion of Ply. It involves the same root vertex r as used 
+in the definition of Q, (although we shall show later on 
+that Q, is independent of r). Let 
+In the next theorem, we show that PI, constitutes 
+an extended description of Qx. 
+Theorem 2. proj,(P,,) = Q,. 
+Proof Let P, denote proj,(PxY). We first show that 
+Qx C P,. Let x E Q, and w E Qw be such that x, = wii 
++ wji for e = {i, j} E E. Define yi = w(6-(i)) for i E V, 
+and y, = 1. We claim that (x, y) E Pry, implying that x 
+E P,. First, (x, y) satisfies (12) since x(E) = w(A) = 
+CiEv, w(6-(i)) = y(V,). To show that (x, y) satisfies (13) 
+for S fl T f 0, we consider two cases. If r $E S, then 
+If r E S, then 
+5 y(S\{r}) = y(S) - 1 
+Finally, it is obvious that (x, y) satisfies (14), (IS), and 
+(16). 
+To show that P, C Q,, consider an (x, y) E Pxy . We 
+would like to prove the existence of a vector w E Qw 
+with x, = wii + wji for all {i, j} E E. Given (x, y) E Pry, 
+define 
+Py = {w: w" + wji = x, e = (i, j} E E 
+w(6-(i)) = yi i E V, 
+where, as usually, DG = (V, A) denotes the bidirected 
+graph corresponding to G = (V, E) in which the arcs 
+incoming to r have been removed. 
+Claim 1. P";' Q,,,. 
+gativity constraints (5). 
+We have 
+Let w E PZ. By definition, w satisfies all nonne- 
+Consider now a set S such that r @ S and S n T # 0. 
+w(~-(S)) = C ~(6-(i)) - w(A(S)) 
+IES 
+proving that w also satisfies (4). 0 
+Claim 2. PCy # 0. 
+PY can be interpreted as the set of feasible flows w 
+in a transportation network (N, L). In this network, 
+the set N of nodes consists of E and V,, the set L of 
+
+===== PAGE 7 =====
+
+CATALOG OF STEINER TREE FORMULATIONS 25 
+arcs is {(e, j) : e = {i, j} E E}, the supply at node e E E 
+is x,, the demand at node i E Vr is yi and wii denotes 
+the flow on the arc (e, j), where e = {i, j}. Although the 
+arcs in L are uncapacitated, we can view this transpor- 
+tation problem as a capacitated transportation problem 
+on a complete bipartite network with capacities either 
+zero or infinity. Such a transportation problem is feasi- 
+ble if€, for any set M of nodes with no arc in L leaving 
+M, the total supply in M is less or equal to the total 
+demand in M, This version of the max-flow min-cut 
+theorem follows from Gale's characterization [I 11 of 
+the feasible capacitated transportation networks. In 
+our case, the set M of nodes must satisfy (M n E) C 
+E((M n V,) U {r}) and the condition on the supplies 
+and demands is x(M n E) 5 y(M n Vr). This latter 
+condition is clearly satisfied for any such M since 
+x(M n E) 5 x(E((M n V,) U {r})) 
+(13) 
+5 y((M rl Vr) U {r}) - 1 = y(M rl Vr). 
+Therefore, P? is nonempty. 0 
+This completes the proof of the theorem. 
+The other description is obtained by introducing 
+vertex variables zi(i E V) whose values are functions 
+of the degree di of vertex i in the Steiner tree. Consider 
+the polyhedron 
+x, = 0 e E E}. (20) 
+The variables zk for k E T can be easily eliminated 
+from this formulation since, from (18) for S = {k} and 
+(19), we derive that zk = 2 - x(6(k)) for k E T. If x is 
+the incidence vector of a Steiner tree whose degree at 
+vertex i is d;, then (x, z) E R:, for z; = 0 if dj = 0 (vertex 
+i is not spanned) and z; = 2 - d; if di 2 1. To verify that 
+(x, z) satisfies (18), it suffices to realize that x(6(S)) + 
+z(S) is equal to twice the number of connected compo- 
+nents of the forest induced by the vertices in S 
+spanned by the Steiner tree. 
+To relate R:, to Q,. we consider a relaxation of R:, 
+involving the root vertex r: 
+that P, = R,, where P, = proj,(P,,) and R, = 
+ProjSR,,). 
+We first show that P, C R,. Let (x, y) E P,, and 
+define z; = 2yi - x(6(i)) for i E V. We claim that (2", z) 
+E R,, . First, (x, z) satisfies z( V) = 2y( V) - 2x(E)(L) 2y, 
+(la, - 2 and, hence, (21) holds. For a set S with S n T # 0, 
+we have 
+x(6(S)) + z(S) = x(6(S)) + 2Y(S) - x(6(S)) 
+- 2X(E(S))(2 2. 
+Thus, (x, z) satisfies (22). Since (23) and (24) are also 
+satisfied, (x, z) E R,,. 
+To show that R, C_ P,, consider an (x, z) E R,, and 
+define y; = $(x(S(i)) + ti) for i E V. We claim that (x, y) 
+E P,,. (12) holds since 
+xe 2 0 e E E}. (24) (x, y) satisfies also (13): 
+Juenger and Pulleyblank [16] showed that R,, con- 
+stitutes an extended description of the dominant of the 
+spanning tree polytope when T = V. 
+Y(S) - 1 = tx@(S)) + x(E(S)) + 4z(S) 
+(22) 
+- 1 1 x(E(S)). 
+Theorem 3. proj,(R,,) = Q,. Moreover, (15) follows from (22) for S = {k} and (16) 
+follows from (23). Therefore, (x, y) E P,. This com- 
+Proof. Using Theorem 2, we shall instead show pletes the proof of the theorem. 8 
+
+===== PAGE 8 =====
+
+26 GOEMANS AND MYUNG 
+From this relationship between R,; and Pg, a poly- 
+nomial time separation algorithm for the constraints 
+(22) can be easily derived. 
+We have presented four extended descriptions of 
+Q,, namely, Q,,, Qxf, P,, and Rxz. The latter two have 
+the advantage of requiring just [ VI additional variables 
+and this makes them more attractive to be used in a 
+cutting plane algorithm. 
+Let (x, y) E Ph. Define zi = 2yi - x(6(i)) for i E V, 
+where, by convention, yi = 1 if i E T. We already know 
+that (x. z) satisfies (21)-(24), i.e., (17), (18) for 
+S n T # 0, and (20). (18) fork E S C N also holds since 
+3. TIGHTER RELAXATIONS 
+= x(6(k)). 
+Both Qx and Qw are of blocking type, i.e., their reces- 
+sion cones (or characteristic cones) consist of all non- 
+negative vectors. As a result, all relaxations men- 
+tioned in the previous sections are useful only for 
+nonnegative cost functions. In this section, we are in- 
+terested in bounded analogs to Qx and Q,,,. More pre- 
+cisely, we shall describe polyhedra Q: and Qk., which 
+are, respectively, contained within Qx and Qh, and 
+whose integer members are the incidence vectors of 
+Steiner trees and Steiner arborescences [i.e., in- 
+t-hull(Q;) = 9, and int-hull(QL) = 9J. 
+Qi is at least as complex as Q,. We should therefore 
+not expect a simple description of it in the space of the 
+x variables. However, as for Q,, we derive simple ex- 
+tended descriptions of Q:. Two of these descriptions 
+appear to be the polyhedra Ph and R:, introduced in 
+the previous section. 
+Theorem 4. proj,(P:,) = projx(R;z). 
+Theorem 3. Let Pi = proj,(P:,) and R: = proj,(R;z). 
+Proof. The proof is almost identical to the proof of 
+QL, = {w: w(6-(S)) 2 I 
+Moreover, from (ll), (x, z) satisfies (19) and, hence, 
+belongs to R:, . 
+On the other hand, consider an (x, z) E R;; and 
+define yi = B(x(S(i)) + zi) for i E V. We already know 
+that (x, y) satisfies (l2)-(16). From (19), Yk 5 1 and, 
+hence, (x, y) satisfies (1 1) and yk = 1 for k E T. To 
+show that (x, y) E Ph (where y is restricted to its 
+components in N), we simply need to check (9) for 
+kESLN: 
+Motivated by the results of Section 2, we would like 
+to characterize proj,(P:,) or proj,(R:,) in the space of 
+the w variables. In the following Theorem 5, we show 
+that, in this space, this polytope takes an especially 
+attractive form: 
+re Sand S n T f 0 (25) 
+w(6-(k)) I 1 
+w, z 0 
+k E V, 
+u E A}. 
+Constraints (26) can be interpreted as saying that the 
+maximum flow from r to kin the network with capacity 
+w, on arc a E A has value precisely w(S-(k)). More- 
+over, constraints (27) imply that this value is at most l. 
+Optimizing over Q; can be done in polynomial time 
+since the separation problem over (25) and (26) can be 
+solved by a sequence of [ VI - I maximum flow prob- 
+lems. When the underlying path graph is series-paral- 
+lel, Q$ is precisely the Steiner arborescence polytope 
+9,,, [13]. 
+Theorem 5. Pi = Q:, where Pi = prujx(P:,) and Q: = 
+{x : x, = wij + wji for all e = {i, j} E E for some w E 
+QL>. 
+Proof. The proof is very similar to the proof of The- 
+orem 2 and is therefore just outlined. First, we con- 
+sider a vector w E Q; and we let x, = wij + wji for e = 
+{i, j} E E. Define yi = w(6-(i)) for i E N. It is easy to 
+verify that (x, y) E Ply. This proves that Q: C P:. 
+Q:, we consider an (x, y) E Piv To show that P: 
+
+===== PAGE 9 =====
+
+CATALOG OF STEINER TREE FORMULATIONS 27 
+and we define 
+PLfY = {w: w,, + w,, = x, e = {i, j} E E 
+i E N 
+i E T, 
+a E A}. 
+w(6-(i)) = yi 
+w(6-(i)) = 1 
+w, = 0 
+By the same technique as in the proof of Theorem 2, it 
+can be shown that PZY E Q: and that P:"Y # 0. This 
+completes the proof of the theorem. rn 
+Since P& (or Riz) is independent of the vertex r, so 
+is Q:. Without extended undirected descriptions of 
+Q:, this might have been difficult to prove because Q; 
+clearly depends on the vertex r. 
+For the Steiner tree problem, we have seen that the 
+introduction of vertex variables y improves the formu- 
+lation. This is typically not the case for Steiner arbo- 
+rescence formulations since Yk can be easily eliminated 
+as it must be equal to w(6-(k)). For example, introduc- 
+ing vertex variables y in Q:., we obtain 
+This formulation for the vertex weighted Steiner arbo- 
+rescence problem is considered in Chopra and Gorres 
+[5]. By the same argument as in Theorem 5, we have 
+the Piy = {(x, y) : x, = wij + w,; for all e = {i, j} E E and 
+some (w, y) E Q;,}. This contradicts the belief (see, 
+e.g., [5]) that vertex weighted bidirected relaxations 
+are tighter than their undirected counterparts. 
+4. 9, IS THE DOMINANT OF 9: 
+Although Qw # Q;, it appears that Qw and QL lead to 
+relaxations that are equivalent for all nonnegative cost 
+functions. This follows from the following theorem: 
+Theorem 6. Qw is equal to the dominant dom(QL) of 
+QL, where dom(QJ = {w: w L w' with w' E Q,,}. 
+Proof. If w' E Q,, and w 2 w', then, clearly, w E 
+Qw. This proves that dom(QL) 
+To prove that Qw C dom(QL), we show that the 
+minimal members in Qw belong to Q;. Consider a w E 
+Qw such that W $i Qw for all W I w, W f w. Clearly, w 
+satisfies (25) and (28). 
+Qw. 
+Suppose that w violates the inequality (26) for some 
+S and k. As it will be useful later, we do not assume 
+that S C N. Among all such inequalities, choose the 
+one for which IS1 is minimal. If w, = 0 for all a E 
+(6-(k)\6-(S)), then w(6-(k)) = w(6-(S)) and this is a 
+contradiction. Let a = (i, k) E (6-(k)\6-(S)) (i.e., i E 
+S) with w, > 0. Since w, cannot be decreased without 
+violating one of the constraints defining Qw, there ex- 
+ists R with I @ R, R fl T # 0, a € 6-(R), and w(6-(R)) 
+= 1. By submodularity of w(6(.)), we have w(6-(S)) + 
+w(6-(R)) L w(6-(S U R)) + w(6-(S n R)). Since r $? (S 
+U R) and (S U R) n T # 0, (4) says that w(6-(S U R)) 
+I 1 = w(6-(R)). Therefore, w(6-(S)) I w(6-(S rl R)). 
+This implies that w also violates (26) for S fl R and k. 
+Since i E S\R, we have IS fl RI C IS1 and this contra- 
+dicts the minimality of S. 
+Suppose now that w violates the inequality (27) fork 
+E V,. Let a = (i, k) E 6-(k) with w, > 0. Since w, 
+cannot be decreased, there exists S with r $4 S, S fl T 
+f 0, a E 6-(S) and w(6-(S)) = 1. Hence, w(6-(S)) C 
+w(6-(k)). By the above argument, this gives a contra- 
+diction. 
+Corollary 7. Qx = dom(Q:). 
+Theorem 6 and Corollary 7 imply that most of the 
+relaxations considered in this paper are equivalent for 
+all nonnegative cost functions. 
+Corollary 8. The LP relaxations obtained by optimiz- 
+ing over the following polyhedra are all equivalent for 
+all nonnegative cost functions: 
+From Corollary 7 and the fact that Q: is indepen- 
+dent of r, we obtain the following previously men- 
+tioned result: 
+Theorem 9. Qx is independent of the root r. 
+Many thanks to Laurence Wolsey and Bill Pulleyblank 
+for describing relaxations closely related to Piv and R;:. 
+REFERENCES 
+Y. P. Aneja, An integer linear programming approach 
+to the Steiner problem in graphs. Networks 10 (1980) 
+A. Balakrishnan, T. L. Magnanti, and R. T. Wong, A 
+dual-ascent procedure for large-scale uncapacitated 
+network design. Operations Res. 37 (1989) 716-740. 
+J. E. Beasley, An algorithm for the Steiner problem in 
+graphs. Networks 14 (1984) 147-159. 
+167- 178. 
+
+===== PAGE 10 =====
+
+GOEMANS AND MYUNG 
+S. Chopra, On the spanning tree polyhedron. Working 
+Paper, New York University (1988). 
+S. Chopra and E. Gorres, On the node weighted 
+Steiner tree problem. Working Paper, New York Uni- 
+versity (1990). 
+S. Chopraand M. R. Rao, The Steiner tree problem. I: 
+Formulations, compositions and extensions of facets. 
+Working Paper, New York University (1988). 
+S. Chopra and M. R. Rao, The Steiner tree problem. 
+11: Properties and classes of facets. Working Paper, 
+New York University (1988). 
+J. Edmonds, Submodular functions, matroids and cer- 
+tain polyhedra, Combinatorial Structures and Their 
+Applications (R. Guy et al., Eds.). Gordon and 
+Breach, New York (1970). 
+D. R. Fulkerson, Blocking and anti-blocking pairs of 
+polyhedra. Math. Programming 1 (1971) 168-194. 
+D. R. Fulkerson, Packing rooted directed cuts in a 
+weighted directed graph. Math. Programming 6 (1974) 
+1-13. 
+D. Gale, A theorem of flows in networks. Pacific J. 
+Moth. 7 (1957) 1073-1082. 
+M. X. Goemans, The Steiner tree polytope and related 
+polyhedra. Working Paper (1991). 
+M. X. Goemans, Arborescence polytopes for series- 
+parallel graphs. Working Paper (1991), to appear in 
+Discrete Applied Mathemutics. 
+M. X. Goemans and D. Bertsimas, Survivable net- 
+works, linear programming relaxations and the parsi- 
+monious property. Working Paper OR 216-90, MIT 
+(1990), to appear in Math. Programming. 
+M. Held and R. M. Karp, The traveling-salesman 
+problem and minimum spanning trees: Part 11. Math. 
+Programming l(1971) 6-25. 
+M. Juenger and W. R. Pulleyblank, private communi- 
+cation with W. R. Pulleyblank (1991). 
+W. Liu, Extended formulations and polyhedral projec- 
+tions. PhD Thesis, Department of Combinatorics and 
+Optimization, University of Waterloo (1988). 
+W. Liu, A lower bound for the Steiner tree problem in 
+directed graphs. Networks 20 (1990) 765-778. 
+A. Lucena, Tight bounds for the Steiner problem in 
+graphs. Working Paper (1991). 
+N. Maculan, “The Steiner problem in graphs. Ann. 
+Discrete Math. 31 (1987) 185-212. 
+R. K. Martin, A sharp polynomial size linear program- 
+ming formulation of the minimum spanning tree prob- 
+lem. Working Paper, University of Chicago (1986). 
+R. K. Martin, Using separation algorithms to generate 
+mixed integer model reformulations. Working Paper, 
+University of Chicago (1988). 
+R. K. Martin, R. L. Rardin, and B. A. Campbell, Poly- 
+hedral characterization of discrete dynamic program- 
+ming. Operations Res. 38 (1990) 127-138. 
+Y.-s. Myung, Valid inequalities and facets for the 
+Steiner problem in a directed graph. Working Paper 
+(1991). 
+G. Nemhauser and L. A. Wolsey, Integer and combi- 
+natorial optimization. Wiley, New York (1988). 
+A. Prodon, T. M. Liebling, and H. Groflin, Steiner’s 
+problem on 2-trees. Research Report RO 85031s. 
+Ecole Polytechnique de Lausanne (1985). 
+J. M. W. Rhys, A selection problem of shared fixed 
+costs and network flows. Management Sci. 17 (1970) 
+M. Schaffers, Network flow design 111. Polyhedral 
+characterization of the single source fixed costs prob- 
+lem on series-parallel graphs. CORE Discussion Pa- 
+per, Universitt Catholique de Louvain (1991). 
+P. Winter, Steiner problem in networks: A survey. 
+Networks 17 (1987) 129-167. 
+R. T. Wong, A dual ascent approach for Steiner tree 
+problems on a directed graph. Math. Progrumming 28 
+M. Yannakakis, Expressing combinatorial optimiza- 
+tion problems by linear programs. Working Paper, 
+AT&T Bell Laboratories (1988). 
+200-207. 
+(1984) 271-287. 
+Received July 1991 
+Accepted June 1992 

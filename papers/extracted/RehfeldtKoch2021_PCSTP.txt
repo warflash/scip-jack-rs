@@ -1,0 +1,962 @@
+﻿SOURCE: RehfeldtKoch2021_PCSTP.pdf
+PAGES: 20
+EXTRACTOR: pypdf 6.10.0 (Unicode text), pdfplumber fallback
+
+
+===== PAGE 1 =====
+
+arXiv:1811.09068v1  [math.OC]  22 Nov 2018
+T akustr. 7
+14195 Berlin
+Germany
+Zuse Institute Berlin
+DANIEL REHFELDT , T HORSTEN KOCH
+Reduction-based exact solution of
+prize-collecting Steiner tree problems
+ZIB Report 18-55 (November 2018)
+
+===== PAGE 2 =====
+
+Zuse Institute Berlin
+Takustr. 7
+D-14195 Berlin
+Telefon: +49 30-84185-0
+Telefax: +49 30-84185-125
+e-mail: bibliothek@zib.de
+URL: http://www.zib.de
+ZIB-Report (Print) ISSN 1438-0064
+ZIB-Report (Internet) ISSN 2192-7782
+
+===== PAGE 3 =====
+
+Reduction-based exact solution of prize-collecting Stein er
+tree problems
+Daniel Rehfeldt ∗† · Thorsten Koch
+Abstract
+The prize-collecting Steiner tree problem (PCSTP) is a well -known generalization of the
+classical Steiner tree problem in graphs, with a large numbe r of practical applications. It
+attracted particular interest during the latest (11th) DIM ACS Challenge and since then a
+number of PCSTP solvers have been introduced in the literatu re, some of which drastically
+improved on the best results achieved at the Challenge. The f ollowing article aims to further
+advance the state of the art. It introduces new techniques an d algorithms for PCSTP,
+involving various forms of reductions of PCSTP instances to equivalent problems—which for
+example allows to decrease the problem size or to obtain a bet ter IP formulation. Several
+of the new techniques and algorithms provably dominate prev ious approaches. Further
+theoretical properties of the new components, such as their complexity, are discussed, and
+their profound interaction is described. Finally, the new d evelopments also translate into
+a strong computational performance: the resulting exact so lver outperforms all previous
+approaches—both in terms of run-time and solvability—and c an solve formerly intractable
+benchmark instances from the 11th DIMACS Challenge to optim ality.
+1 Introduction
+The Steiner tree problem in graphs (SPG) is one of the fundamental (N P-hard) combinatorial op-
+timization problems [19]. A well-known generalization is the prize-collect ing Steiner tree problem
+(PCSTP), stated as follows: Given an undirected graph G = (V, E ), edge-weights c : E → Q>0,
+and node-weights (or prizes) p : V → Q≥ 0, a tree S = (V (S), E (S)) ⊆ G is required such that
+C(S) :=
+∑
+e∈ E(S)
+c(e) +
+∑
+v∈ V \ V (S)
+p(v) (1)
+is minimized. By setting suﬃciently high node weights for its terminals, e ach SPG instance can
+be reduced to a PCSTP. However, while the number of real-world app lications of the classical
+Steiner tree problem in graphs is limited [13], the PCSTP entails many pra ctical applications,
+which can be found in various areas, for instance in the design of tele communication networks [24],
+electricity planning [6], computational biology [17], or geophysics [31].
+The PCSTP has been extensively discussed in the literature, see e.g. [5, 7, 18, 23]. More-
+over, many exact and heuristic solving approaches have been sugg ested. The problem attracted
+particular interest in the wake of the 11th DIMACS Challenge [1] in Dec ember 2014—dedicated
+to Steiner tree problems—where the PCSTP categories could boast the most participants by
+far. Furthermore, in the last two years a number of solvers for th e PCSTP have been described
+∗TU Berlin, 10623 Berlin, Germany
+†Zuse Institute Berlin, 14195 Berlin, Germany, koch@zib.de , rehfeldt@zib.de
+2
+
+===== PAGE 4 =====
+
+in the literature [3, 11, 12, 13, 22, 25, 32], some of which, in particula r [22], could drastically
+improve on the best results achieved at the DIMACS Challenge—being able to not only solve
+many instances orders of magnitude faster, but also to solve a num ber of instances for the ﬁrst
+time to optimality. Exact approaches for PCSTP are usually based on branch-and-bound or
+branch-and-cut [11, 13], include specialized (primal and sometimes d ual) heuristics [20, 22], and
+make use of various preprocessing methods to reduce the problem size [23, 29].
+This article introduces new techniques and algorithms for solving PCS TP, most of which are
+based on, or result in reductions of the PCSTP to equivalent problem s—these problems can be
+PCSTPs itself, but can also be from diﬀerent problem classes. The re ductions can for example
+decrease the problem size or allow to obtain a stronger IP formulatio n. Moreover, several of the
+new methods provably dominate previous approaches. While some of the techniques require to
+solve N P-hard subproblems (not yet described in the literature), the unde rlying concepts allow
+to design empirically eﬃcient heuristics. Practically also the integratio n of the new methods into
+an exact solver will be described and computational experiments on a large number of benchmark
+instances will be presented—along with a comparison with a state-of -the-art solver. What sets the
+new techniques apart from other approaches for combinatorial o ptimization problems is the deep
+and intricate interaction of the individual components combined with their wide applicability
+within a branch-and-cut framework—from preprocessing and pro bing to IP formulation and
+separation to heuristics, domain propagation and branching. While in teraction between solution
+techniques and multiple usability has been described in state-of-the -art solvers for problems such
+as the traveling salesman problem [4] or (even more pronounced) th e SPG [26], we are not
+aware of any other approach for which such a broad impact on the o verall solving procedure and
+profound interrelation can be achieved by such a, comparatively, s mall number of techniques.
+We would also like to point out that the newly developed software has b een integrated into the
+academic Steiner tree framework SCIP-Jack [13] and will be made publicly available as part of
+its next major release.
+Finally, while it will be shown that one set of methods is also directly applic able for the
+SPG, one can furthermore extend several of the presented tec hniques and algorithms to related
+combinatorial optimization problems such as the node-weighted Ste iner tree, or the maximum-
+weight connected subgraph problem.
+1.1 Preliminaries and notation
+Throughout this article it will be presupposed that a PCSTP instance IP C = (V, E, c, p ) is given
+such that ( V, E ) is connected; otherwise one can optimize each connected compon ent separately.
+For a graph G we denote its vertices by V (G) and its edges by E(G); similarly, for a ﬁnite walk
+W we denote the set of vertices and the set of edges it contains by V (W ) and E(W ). We call
+Tp := {t1, t 2, ..., t s} := {v ∈ V |p(v) > 0} the set of potential terminals [22].
+By d(vi, v j ) we denote the distance of a shortest path (with respect to c) between vertices
+vi, v j ∈ V . Similarly, d
+(vi, v j) is deﬁned as the distance between vi and vj in the graph induced
+by V \ (Tp \ {vi, v j}) [29]. To each vertex vi ∈ V \ T , the k d -nearest potential terminals
+will be denoted by vi,1, v i,2, ..., v i,k (ties are broken arbitrarily). Moreover, for any function
+x : M ↦→ Q with M ﬁnite, and any M ′ ⊆ M deﬁne x(M ′) := ∑
+i∈ M ′ x(i). For U ⊆ V
+deﬁne δ(U ) := {{u, v } ∈ E | u ∈ U, v ∈ V \ U }; for a directed graph D = ( V, A ) deﬁne
+δ+(U ) := {(u, v ) ∈ A |u ∈ U, v ∈ V \U } and δ− (U ) := δ+(V \U ). We also write δG or δ+
+D, δ −
+D
+to distinguish the underlying graph. For an IP formulation F we denote the optimal objective
+value and the set of feasible points of its LP relaxation by vLP (F ) and PLP (F ), respectively.
+3
+
+===== PAGE 5 =====
+
+2 Reductions within the problem class
+The reductions described in the following aim to reduce a given instanc e to a smaller one of the
+same problem class. Several articles have addressed such techniq ues for the PCSTP, e.g. [22, 23,
+29, 33], but most are dominated by the methods described in the follo wing. The new methods
+will not only be employed for classical preprocessing, but also throu ghout the entire solving
+process, e.g. for domain propagation or within heuristics.
+2.1 Taking short walks
+The following approach uses a new, walk-based, distance function. It generalizes the bottle-
+neck distance concept that was the central theme of [33]. Let vi, v j ∈ V . A ﬁnite walk
+W = ( vi1 , e i1, v i2 , e i2 , ..., e ir , v ir ) with vi1 = vi and vir = vj will be called prize-constrained
+(vi, v j)-walk if no v ∈ Tp ∪ { vi, v j} is contained more than once in W . For any k, l ∈ N with
+1 ≤ k ≤ l ≤ r deﬁne the subwalk W (vik , v il ) := ( vik , e ik , v ik+1 , e ik+1, ..., e il, v il ); note that
+W (vik , v il) is again a prize-constrained walk. Furthermore, deﬁne the prize-collecting cost of W
+as
+cpc(W ) :=
+∑
+e∈ E(W )
+c(e) −
+∑
+v∈ V (W )\{ vi,vj }
+p(v). (2)
+Thereupon, deﬁne the prize-constrained length of W as
+lpc(W ) := max {cpc(W (vik , v il )) |1 ≤ k ≤ l ≤ r, v ik , v il ∈ Tp ∪ { vi, v j}}. (3)
+Intuitively, lpc(W ) provides the cost of the least proﬁtable subwalk of W . This measure will
+in the following be useful to bound the cost of connecting two disjoin t trees that contain the
+ﬁrst and the last vertex of W , respectively. Finally, we denote the set of all prize-constrained
+(vi, v j)-walks by Wpc(vi, v j) and deﬁne the prize-constrained distance between vi and vj as
+dpc(vi, v j) := min {lpc(W ′) |W ′ ∈ W pc(vi, v j)}. (4)
+Note that dpc(vi, v j) = dpc(vj, v i) for any vi, v j ∈ V . By using the prize-constrained distance
+one can formulate a reduction criterion that dominates the special distance test from [33]—it
+identiﬁes (and allows to delete) all edges found by [33] and can (and u sually does) identify
+further ones:
+Proposition 1. Let {vi, v j} ∈ E. If
+c({vi, v j}) > d pc(vi, v j) (5)
+is satisﬁed, then {vi, v j} cannot be contained in any optimal solution.
+Proof. Let S be a tree with {vi, v j} ∈ E(S). Further, let W = ( vi1 , e i1 , ..., e ir , v ir ) be a prize-
+constrained ( vi, v j)-walk with lpc(W ) = dpc(vi, v j ). Remove {vi, v j} from S to obtain two new
+trees. Of these two trees denote the one that contains vi by Si and the other (containing vj) by Sj.
+Deﬁne b := min{k ∈ { 1, ..., r } | vik ∈ V (Sj)} and a := max{k ∈ { 1, ..., b } | vik ∈ V (Si)}. Further,
+deﬁne x := max {k ∈ { 1, ..., a } | vik ∈ Tp ∪ { vi}} and y := min {k ∈ { b, ..., r } | vik ∈ Tp ∪ { vj}}.
+By deﬁnition, x ≤ a < b ≤ y and furthermore:
+cpc(W (via , v ib )) ≤ cpc(W (vix , v iy )). (6)
+4
+
+===== PAGE 6 =====
+
+Reconnect Si and Sj by W (via , v ib )), which yields a new connected subgraph S′. If S′ is not
+a tree, make it one by removing redundant edges, without removing any node (which can only
+decrease C(S′)). For this tree it holds that:
+C(S′) ≤ C(S) + cpc(W (via , v ib )) − c({vi, v j})
+(6)
+≤ C(S) + cpc(W (vix , v iy )) − c({vi, v j})
+≤ C(S) + lpc(W ) − c({vi, v j})
+= C(S) + dpc(vi, v j) − c({vi, v j })
+(5)
+< C (S).
+Because of C(S′) < C (S) no optimal solution can contain {vi, v j}.
+Since computing the Steiner bottleneck distance is already N P-hard [33], it does not come
+as a surprise that the same holds for dpc (which can be shown in the same way). However,
+the deﬁnition of dpc allows to design a simple algorithm for ﬁnding upper bounds that yields
+empirically strong results. The method is an extension of Dijkstra’s a lgorithm [8] (with priority
+queue), and is run from both endpoints of an edge e = {vi, v j} that one attempts to delete. We
+sketch the procedure for endpoint vi: Let dist(v) be the distance value of Dijkstra’s algorithm for
+each v ∈ V , initialized with dist(v) := ∞ for all v ∈ V \ {vi} and dist(vi) := 0. Start Dijkstra’s
+algorithm from vi, but apply the following modiﬁcations: First, do not update vertex vl from
+vertex vk if dist(vk) + c({vk, v l}) ≥ c(e). Second, for t ∈ Tp \ {vi} set dist(t) (as computed by
+Dijkstra) to max {dist(t) − p(t), 0} before inserting t into the priority queue or when updating t
+(if it already is in the priority queue). Third, all v ∈ V \(Tp ∪ { vi, v j}) can be reinserted into the
+priority queue after they have been removed. Fourth, exit if vj is visited. If dist(vj ) < c(e), we
+can remove e. Bounds on the number of visited edges are set to limit the run time. N ote that
+both Proposition 1 and the heuristic can be extended to the case of equality.
+By using the prize-constrained distance, further reduction test s from the literature can be
+strengthened, such as Non-Terminal of Degree k [33]; a related walk-based concept introduced in
+Section 3 allows to strengthen additional methods such as Nearest Vertex [29], or Short Links [29].
+2.2 Using bounds
+Bound-based reductions techniques identify edges and vertices f or elimination by examining
+whether they induce a lower bound that exceeds a given upper boun d [10, 26]. For the subse-
+quent reduction techniques of this type we introduce the following c oncept: a terminal-regions
+decomposition of IP C is a partition H =
+{
+Ht ⊆ V | Tp ∩ Ht = {t}
+}
+of V such that for each
+t ∈ Tp the subgraph induced by Ht is connected. Deﬁne for all t ∈ Tp
+rpc
+H (t) := min
+{
+p(t), min{d(t, v ) |v / ∈ Ht}
+}
+. (7)
+The terminal-regions decomposition concept generalizes the Voron oi decomposition for the PC-
+STP introduced in [29] and can easily be extended to SPG by using min {d(t, v ) |v / ∈ Ht} instead
+of rpc
+H (t)—which generalizes the SPG Voronoi concept [26]. In [28] we introdu ced a related con-
+cept for the maximum-weight connected subgraph problem. For ea se of presentation assume
+rpc
+H (ti) ≤ rpc
+H (tj) for 1 ≤ i < j ≤ s.
+5
+
+===== PAGE 7 =====
+
+Proposition 2. Let vi ∈ V \Tp. If there is an optimal solution S such that vi ∈ V (S), then a
+lower bound on C(S) is deﬁned by
+d(vi, v i,1) + d(vi, v i,2) +
+s− 2∑
+k=1
+rpc
+H (tk). (8)
+The proposition can be proven similarly to the Voronoi decomposition results [29], see Ap-
+pendix B.1. Each vertex vi ∈ V \Tp with the property that the aﬃliated lower bound (8) exceeds
+a known upper bound can be eliminated. Moreover, if a solution S corresponding to the upper
+bound is given and vi /∈ V (S), one can also eliminate vi if the lower bound stated in Proposition 2
+is equal to C(S). A result similar to Proposition 2 can be formulated for edges of an o ptimal
+solution. Finally, the following proposition allows to pseudo-eliminate [10] vertices, i.e., to delete
+a vertex and connect all its adjacent vertices by new edges.
+Proposition 3. Let vi ∈ V \Tp. If there is an optimal solution S such that δS(vi) ≥ 3, then a
+lower bound on C(S) is deﬁned by
+d
+(vi, v i,1) + d(vi, v i,2) + d(vi, v i,3) +
+s− 3∑
+k=1
+rpc
+H (tk). (9)
+To eﬃciently apply Proposition 2, one would like to maximize (8)—and for Proposition 3 to
+maximize (9). However, as shown in Appendix B.2, one obtains
+Proposition 4. Given a vi ∈ V \Tp, ﬁnding a terminal-regions decomposition that maximizes (8)
+is N P-hard. The same holds for (9).
+Thus, to compute a terminal-regions decomposition a heuristic appr oach will be used; still,
+the ﬂexibility of the terminal regions concept allows to design a heuris tic that computes bounds
+that are at least as good as those provided by the Voronoi decomp osition method [29], and
+empirically often better—allowing for signiﬁcantly stronger graph re ductions.
+Figure 1 depicts a PCSTP, a corresponding Voronoi decomposition a s described in [29]—
+which is in fact a particular terminal-regions decomposition—and an alt ernative terminal-regions
+decomposition, found by our heuristic. The second terminal-region s decomposition yields a
+stronger lower bound than the Voronoi decomposition. For the ﬁlle d vertex the lower bounds
+are 10 and 11, respectively (10 is also the optimal solution value for t he instance).
+3 Changing the problem class
+A cornerstone of the reduction approach described in this section is the Steiner arborescence
+problem (SAP ), which is deﬁned as follows: Given a directed graph D = ( V, A ), costs c : A →
+Q≥ 0, a set T ⊆ V of terminals and a root r ∈ T , a directed tree (arborescence) S ⊆ D of
+minimum cost ∑
+a∈ A(S) c(a) is required such that for all t ∈ T the tree S contains a directed
+path from r to t. Associating with each a ∈ A a variable x(a) that indicates whether a is
+contained in a solution ( x(a) = 1) or not ( x(a) = 0), one can state the well-known directed cut
+(DCut ) formulation [34] for an SAP ( V, A, T, c, r ):
+F ormulation 1. Directed cut (DCut)
+min cT x (10)
+x(δ− (U )) ≥ 1 for all U ⊂ V, r / ∈ U, U ∩ T ̸= ∅, (11)
+x(a) ∈ { 0, 1} for all a ∈ A. (12)
+6
+
+===== PAGE 8 =====
+
+3
+3
+3
+3
+2
+3
+1
+3
+1
+(a) PCSTP instance (b) Voronoi decomposition
+(c) terminal-regions decomposition
+Figure 1: Illustration of a PCSTP instance (a), a Voronoi decompos ition (b), and a second
+terminal-regions decomposition (c). Potential terminals are drawn as squares. All potential
+terminals have a prize of 5. If an upper bound less than 11 is known, t he ﬁlled vertex in (c) can
+be deleted by means of the terminal-regions decomposition depicted in (c), but not by means of
+the Voronoi decomposition, unless also an optimal solution tree is giv en.
+In [34] also a dual-ascent algorithm for DCut was introduced that allows to quickly compute
+empirically strong lower bounds. Dual-ascent is one of the reasons it has proven advantageous to
+transform undirected problems such as the SPG to SAP [21, 26] an d use DCut , but furthermore
+such transformations can provide stronger LP relaxations, both theoretically and practically [10,
+16]. For the PCSTP such a transformation can be stated as follows [2 7]:
+T ransformation 1 (PCSTP to SAP) .
+Input: PCSTP (V, E, c, p )
+Output: SAP (V ′, A ′, T ′, c ′, r ′)
+1. Set V ′ := V , A′ := {(v, w ) ∈ V ′ × V ′ | {v, w } ∈ E}, and c′ : A′ → Q≥ 0 with c′(a) :=
+c({v, w }) for a = (v, w ) ∈ A′; deﬁne M := ∑
+t∈ Tp p(t).
+2. Add vertices r′ and v′
+0 to V ′.
+3. For each i ∈ { 1, ..., s }:
+(a) add arc (r′, t i) of weight M to A′;
+(b) add node t′
+i to V ′;
+7
+
+===== PAGE 9 =====
+
+(c) add arcs (ti, v ′
+0) and (ti, t ′
+i) to A′, both being of weight 0;
+(d) add arc (v′
+0, t ′
+i) of weight p(ti) to A′.
+4. Deﬁne set of terminals T ′ := {t′
+1, ..., t ′
+s} ∪ { r′}.
+5. Return (V ′, A ′, T ′, c ′, r ′).
+The underlying idea of the transformation is to add a new terminal t′
+i for each original
+potential terminal ti and provide additional arcs that allow to connect t′
+i from any original
+potential terminal tj with cost p(tj). Note that one can use a, similar, simpliﬁed transformation
+if one adds an additional constraint to the resulting SAP [13]. Howeve r, besides providing a
+“pure” SAP, Transformation 1 allows to directly apply dual-ascent. The following results still
+hold if Transformation 1 is replaced by the simpler version.
+Each optimal solution to the SAP obtained from Transformation 1 ca n be transformed to an
+optimal solution to the original PCSTP. For IP C = (V, E, c, p ) one can therefore deﬁne the follow-
+ing formulation, which uses the SAP ( V ′, A ′, T ′, c ′, r ′) obtained from applying Transformation 1
+on IP C:
+F ormulation 2. Transformed prize-collecting cut (PrizeCut)
+min c′T x − M (13)
+x satisﬁes (11), (12) (14)
+y({vi, v j }) = x((vi, v j) + x((vj , v i)) for all {vi, v j} ∈ E (15)
+y(e) ∈ { 0, 1} for all e ∈ E. (16)
+The y variables correspond to the solution to IP C; note that removing them does not change
+the optimal solution value, neither that of the LP relaxation. To avo id adding an artiﬁcial root
+(which entails big M constants and symmetry) in the transformation to SAP, one can a ttempt to
+identify vertices that are part of all optimal solutions. To this end, let vi, v j ∈ V , and let W be a
+prize-constrained ( vi, v j)-walk (as deﬁned in Section 2). Deﬁne the left-rooted prize-constrained
+length of W as:
+l−
+pc(W ) := max {cpc(W (vi, v ik )) |vik ∈ V (W ) ∩ (T ∪ { vj})}. (17)
+Furthermore, deﬁne the left-rooted prize-constrained (vi, v j)-distance as:
+d−
+pc(vi, v j) := min {l−
+pc(W ′) |W ′ ∈ W pc(vi, v j)}. (18)
+Note that in general d−
+pc is not symmetric. Deﬁnition (18) gives rise to
+Proposition 5. Let vi, v j ∈ V . If
+p(vi) > d −
+pc(vi, v j) (19)
+is satisﬁed, then every optimal solution that contains vj also contains vi.
+Proof. Let S be a tree with vj ∈ V (S) and vi /∈ V (S). Further, let W = ( vi1 , e i1 , ..., e ir , v ir ) be
+a prize-constrained ( vi, v j)-walk with l−
+pc(W ) = d−
+pc(vi, v j) and deﬁne a := min {k ∈ { 1, ..., r } |
+vik ∈ V (S)} and b := min{k ∈ { a, a + 1, ..., r } | vik ∈ Tp ∪ { vj}}. Note that
+cpc(W (vi, v ia )) ≤ cpc(W (vi, v ib )). (20)
+8
+
+===== PAGE 10 =====
+
+Add the subgraph corresponding to W (vi, v ia ) to S, which yields a new connected subgraph S′.
+If S′ is not a tree, make it one by removing redundant edges, without rem oving any node (which
+can only decrease C(S′)). It holds that:
+C(S′) ≤ C(S) + cpc(W (vi, v ia )) − p(vi)
+(20)
+≤ C(S) + cpc(W (vi, v ib )) − p(vi)
+≤ C(S) + l−
+pc(W ) − p(vi)
+= C(S) + d−
+pc(vi, v j) − p(vi)
+(5)
+< C (S).
+The relation C(S′) < C (S) implicates that an optimal solution that contains vj also contains
+vi.
+As for dpc, computing d−
+pc is N P-hard. However, one can devise a simple algorithm for
+ﬁnding upper bounds similar to the one for dpc: Let t0 ∈ Tp. The following adaptation of
+Dijkstra’s algorithm provides a set of vertices ¯Tt0 such that d−
+pc(t0, v ) < p (t0) for all v ∈ ¯Tt0.
+Initialize dist(v) := ∞ for all v ∈ V \ {t0}, and dist(t0) := 0. Start Dijkstra’s algorithm
+from t0, but apply the following modiﬁcations: First, do not update vertex vj from vertex vi if
+dist(vi) + c({vi, v j}) ≥ p(t0). Second, for t ∈ Tp \ {t0} set dist(t) (as computed by Dijkstra) to
+dist(t) − p(t) before inserting t into the priority queue or when updating t (if it already is in the
+priority queue). Third, all v ∈ V \Tp can be reinserted into the priority queue after they have
+been removed. Finally, deﬁne ¯Tt0 := {v ∈ V |dist(v) < p(t0)}.
+By using LP information, this heuristic can be combined with Transfor mation 1 to obtain a
+criterion for potential terminals to be part of all optimal solutions. First, note that if a separation
+algorithm or dual-ascent is applied, one obtains reduced costs for a n LP relaxation of DCut that
+contains only a subset of constraints (11). Second, observe tha t given an SAP I ′ obtained from
+IP C with corresponding optimal solutions S′ and S, for ti ∈ Tp it holds that ti ∈ V (S) if and
+only if ( v′
+0, t ′
+i) /∈ A′(S′). As a consequence one obtains
+Proposition 6. Consider (V ′, A ′, T ′, c ′, r ′) obtained by applying Transformation 1 on IP C. Let
+˜U ⊆ { U ⊂ V ′ |r′ /∈ U, U ∩ T ′ ̸= ∅} and let ˜L be the objective value and ˜c the reduced costs of an
+optimal solution to the LP:
+min c′T x − M (21)
+x(δ− (U )) ≥ 1 for all U ∈ ˜U , (22)
+x(a) ∈ [0, 1] for all a ∈ A′. (23)
+Moreover, let U be an upper bound on the cost of an optimal solution to IP C. Finally, let ti ∈ Tp
+and let ¯Ti ⊆ Tp such that V (S) ∩ ¯Ti ̸= ∅ ⇒ ti ∈ V (S) for each optimal solution S to IP C. If
+∑
+j|tj ∈ ¯Ti
+˜c((v′
+0, t ′
+j)) + ˜L > U (24)
+holds, then ti is part of all optimal solutions to IP C.
+If a ti ∈ Tp has been shown to be part of all optimal solutions, by building ¯Ti with Propo-
+sition 5 and using (24), Proposition 5 can again be applied—to directly id entify further tj ∈ Tp
+that are part of all optimal solutions by using the condition p(tj) > d −
+pc(tj, t i). Identifying such
+9
+
+===== PAGE 11 =====
+
+ﬁxed terminals can considerably improve the strength of the techniques described in Section 2,
+which usually leads to further graph reductions and the ﬁxing of add itional terminals. More-
+over, in this case the PCSTP can be reduced to a rooted prize-collecting Steiner tree problem
+(RPCSTP)1, which incorporates the additional condition that a non-empty set Tf ⊆ V of ﬁxed
+terminals needs to be part of all feasible solutions. Assuming Tp \Tf = {t1, ..., t z}, we introduce
+the following simple transformation:
+T ransformation 2 (RPCSTP to SAP) .
+Input: RPCSTP (V, E, T f , c, p ) and tp, t q ∈ Tf
+Output: SAP (V ′, A ′, T ′, c ′, r ′)
+1. Set V ′ := V , A′ := {(v, w ) ∈ V ′ × V ′ | {v, w } ∈ E}, c′ := c, r′ := tq.
+2. For each i ∈ { 1, ..., z }:
+(a) add node t′
+i to V ′,
+(b) add arc (ti, t ′
+i) of weight 0 to A′,
+(c) add arc (tp, t ′
+i) of weight p(ti) to A′.
+3. Deﬁne set of terminals T ′ := {t′
+1, ..., t ′
+z} ∪ Tf .
+4. Return (V ′, A ′, T ′, c ′, r ′).
+A comparison of Transformation 1 and Transformation 2 is illustrate d in Figure 2.
+p=2.5p=7
+1.10.6
+1.5
+(a) PCSTP instance
+r′
+M M
+00
+00
+7 2.5
+1.10.6
+1.5
+(b) SAP instance obtained
+from Transformation 1
+r′ 02.5
+1.10.6
+1.5
+(c) SAP instance obtained
+from Transformation 2
+Figure 2: Illustration of a PCSTP instance (left) and the equivalent S AP obtained by Transfor-
+mation 1 (middle). Given the information that the potential terminal with weight p = 7 is part
+of at least one optimal solution, Transformation 2 yields the SAP dep icted on the right. The
+terminals of the SAPs are drawn as squares and the (two) potentia l terminals for the PCSTP
+are enlarged.
+For an RPCSTP (V, E, T f , c, p, r ) we deﬁne the transformed rooted prize-collecting cut (P rizeRCut )
+formulation, similar to P rizeCut, based on the SAP instance ( V ′, A ′, T ′, c ′, r ′) obtained from
+Transformation 2:
+F ormulation 3. Transformed rooted prize-collecting cut (PrizeRCut)
+min{c′T x |x satisﬁes (11), (12), (x, y ) satisﬁes (15), y satisﬁes (16)}. (25)
+1Note that in the literature it is more common to denote only pr oblems with exactly one ﬁxed terminal as
+rooted prize-collecting Steiner tree problem.
+10
+
+===== PAGE 12 =====
+
+By P rizeRCut (IRP C, t p, t q) we denote the P rizeRCut formulation for an RPCSTP IRP C
+when using (ﬁxed) terminals tp, t q in Transformation 2. One may wonder whether the choice of
+tp and tq aﬀects vLP (P rizeRCut (IRP C, t p, t q)); in fact, it does not, and even more:
+Proposition 7. Let IRP C be an RPCSTP and let tp, t q, t ˜p, t ˜q be any of its ﬁxed terminals. Deﬁne
+R(ti, t j) := PLP (P rizeRCut (IRP C, t i, t j)). It holds that:
+projy(R(tp, t q)) = projy(R(t ˜p, t ˜q)). (26)
+Proof. Let ( V, E, T f , c, p ) be the RPCSTP IRP C and denote the SAP resulting from applying
+Transformation 2 on ( IRP C, t p, t q) by ( V ′, A ′, T ′, c ′, t q). Set D = (V ′, A ′). Furthermore, let x, y
+be a feasible solution to the LP relaxation of P rizeRCut (IRP C, t p, t q)—so (x, y ) ∈ R(tp, t q). For
+ease of presentation, we will use the notation xij instead of x((vi, v j)) for an arc ( vi, v j). The
+proposition will be proved in two steps: ﬁrst by ﬁxing tq and changing tp, and second by ﬁxing
+tp and changing tq. Note that due to symmetry reasons in both cases it is suﬃcient to s how that
+one projection is contained in the other.
+1) projy(R(tp, t q)) = projy(R(t ˜p, t q)) Let ˜I˜p = ( ˜V , ˜A, ˜T , ˜c, t q) be the SAP resulting from ap-
+plying Transformation 2 on ( IRP C, t ˜p, t q), and set ˜D := ( ˜V , ˜A); note that ˜V = V ′ and ˜T = T ′.
+Deﬁne ˜x ∈ [0, 1] ˜A by ˜x((t ˜p, t ′
+i)) := x((tp, t ′
+i)) for i = 1, ..., z (with the notation from Transforma-
+tion 2) and by ˜xij := xij for all remaining arcs. Suppose that there is a U ⊂ ˜V with tq /∈ U and
+U ∩ ˜T ̸= ∅ such that ˜x(δ−
+˜D(U )) < 1. From x(δ−
+D(U )) ≥ 1 and the construction of ˜x it follows that
+t ˜p ∈ U —otherwise ˜x(δ−
+˜D(U )) ≥ x(δ−
+D(U )). For U z := U \ {t′
+1, ..., t ′
+z} one obtains
+x(δ−
+D(U z)) = ˜x(δ−
+˜D(U z)) ≤ ˜x(δ−
+˜D(U )) < 1. (27)
+Because of tq /∈ U z and U z ∩ ˜T ⊇ { t ˜p} ̸= ∅, one obtains a contradiction from (27). Therefore, ˜ x
+satisﬁes (11) for the SAP ˜I˜p. Furthermore, ˜y deﬁned by ˜y({vi, v j}) := ˜xij + ˜xji for all {vi, v j} ∈ E
+satisﬁes ˜y = y.
+2) projy(R(tp, t q)) = projy(R(tp, t ˜q)) Deﬁne the SAP ˜I˜q := ( V ′, A ′, T ′, c ′, t ˜q) (the result of
+transforming ( IRP C, t p, t ˜q)). As there is only one underlying directed graph (namely D), in the
+following we write δ− instead of δ−
+D. Let f be a 1-unit ﬂow from tq to t˜q such that fij ≤ xij for
+all ( vi, v j) ∈ A′. Deﬁne ˜x by ˜xij := xij + fji − fij for all ( vi, v j) ∈ A′. Let U ⊂ V ′ such that
+t˜q /∈ U and U ∩ T ′ ̸= ∅. If tq /∈ U , then f (δ− (U )) = f (δ+(U )) and so ˜x(δ− (U )) = x(δ− (U )) ≥ 1.
+On the other hand, if tq ∈ U , then f (δ+(U )) = f (δ− (U )) + 1, so
+˜x(δ− (U )) ≥ x(δ− (U )) + 1 ≥ 1. (28)
+Consequently, ˜x satisﬁes (11) for the SAP ˜I˜q. From xij + xji ≤ 1 for all ( vi, v j) ∈ A′, it follows
+that ˜x ∈ [0, 1]A′
+, and for the corresponding ˜ y one veriﬁes ˜y = y.
+Consequently, if only the y variables are of interest, we write P rizeRCut (IRP C) instead
+of P rizeRCut (IRP C, t p, t q). For the (heuristic) dual-ascent algorithm the choice of tp and tq
+still matters, as it can change both lower bound and reduced costs . Therefore, we repeat the
+dual-ascent reduction techniques [29] on several SAPs resulting f rom diﬀerent choices of tp and
+tq.
+From the deﬁnitions of Transformation 1 and 2 one can acknowledge that switching from
+P rizeCut to P rizeRCut (if possible) does not deteriorate (and can improve) the tightness of
+the LP relaxation; due to its importance we formally state this obser vation:
+11
+
+===== PAGE 13 =====
+
+Lemma 1. For IP C = (V, E, c, p ) let T0 ⊆ Tp such that T0 ⊆ V (S) for at least one optimal solu-
+tion S to IP C. Let IT0 := (V, E, T 0, c, p ) be an RP CST P . With RT0 := PLP (P rizeRCut (IT0)),
+R := PLP (P rizeCut(IP C)) it holds that
+projy(RT0 ) ⊆ projy(R). (29)
+Proposition 8. With T0 and IT0 deﬁned as in Lemma 1 the inequality
+vLP (P rizeCut(IP C)) ≤ vLP (P rizeRCut (IT0)) (30)
+holds and can be strict.
+A proof of Proposition 8 is given in Appendix B.3.
+Finally, by combining the reductions to RPCSTP and SAP with the reduc tions techniques
+described in Section 2, it is sometimes possible to either eliminate or ﬁx e ach potential terminal.
+Hence the instance becomes an SPG, which allows to apply a number of further algorithmic
+techniques [13, 26].
+4 Reduction-based exact solving
+This section describes how the new algorithms are integrated within a branch-and-cut framework.
+Also, the performance of the resulting solver is discussed.
+4.1 Interleaving the components within branch-and-cut
+The exact solver described in this article is realized within the branch- and-cut based Steiner tree
+framework SCIP-Jack [13]. SCIP-Jack already includes reduction techniques for PCSTP [29]
+(in the sense of Section 2), but almost all of them have been replace d by new methods intro-
+duced in this article. Furthermore, we use the reduction technique s for domain propagation,
+translating the deletion of edges and the ﬁxing of potential termina ls into variable ﬁxings in
+the IP. Additionally, we employ a technique similar to the probing [30] ap proach for general
+MIPs: Instead of setting binary variables to 0 or 1, we ﬁx or delete p otential terminals. By using
+the left-rooted prize-constrained distance, in each case it is ofte n possible to either ﬁx or delete
+additional potential terminals—which usually allows for further grap h reductions.
+SCIP-Jack also includes several (generic) primal heuristics that can be applied for PCSTP.
+Most compute new solutions on newly built subgraphs (e.g. by merging feasible solutions). For
+these heuristics the new reduction techniques can often increase the solution quality. In turn,
+an improved upper bound can allow for further graph reductions (e .g. by the terminal-regions
+composition) or to ﬁx additional terminals (by means of Proposition 6 ). Additionally, we have
+implemented a new primal heuristic that starts with a single (potentia l or ﬁxed) terminal and
+connects other terminals ti to the current subtree S if min v∈ V (S) d−
+pc(ti, v ) ≤ p(ti) (only upper
+bounds on d−
+pc are used). A similar approach has been implemented as a local search heuristic.
+Also the LP kernel interacts with the remaining components: By mea ns of the prize-constrained
+distances and upper bounds provided by the heuristics it is usually po ssible to switch to the
+P rizeRCut formulation. In turn, the reduced costs and lower bound provided by an improved
+LP solution can be used to reduce the problem size [29]—which can eve n enable further prize-
+constrained walk based reductions. Moreover, besides the separ ation of (11), already imple-
+mented in SCIP-Jack, we also separate constraints for T ransRCut of the form
+x(δ− (vj )) + x((tp, t ′
+i)) ≤ 1 ti ∈ Tp \Tf , v j ∈ { v ∈ V |d−
+pc(ti, v ) < p(ti)}.
+12
+
+===== PAGE 14 =====
+
+The constraints represent the implication that v ∈ V (S) ⇒ t ∈ V (S) for any optimal solution S
+if d−
+pc(t, v ) < p(t). Corresponding constraints are separated for T ransCut.
+Finally, branching is performed on vertices—by rendering vertex vi to branch on a ﬁxed
+terminal (and transforming the problem to RPCSTP if not already do ne) in one branch-and-
+bound child node and removing it in the other. As in probing, the implicat ions from the left-
+rooted prize-constrained distance often allow further graph cha nges. Throughout the solving
+process, we switch to the SPG solver of SCIP-Jack [13] if all potential terminals could be ﬁxed.
+4.2 Computational results
+To the best of our knowledge, the three strongest exact algorith ms for PCSTP are from [11, 13,
+22]. While no solver dominates on all benchmark test sets, the branc h-and-bound solver from [22]
+is competitive on almost all, and on several ones orders of magnitude faster—it is even faster
+than state-of-the-art heuristic methods [12]. Thus it will in the follo wing be used for comparison.
+Table 1: Details on PCSTP tests sets.
+Name Instances |V | | E| Status Description
+JMP 34 100 - 400 315 - 1576 solved Sparse instances of varying s tructure,
+introduced in [18].
+Cologne1 14 741 - 751 6332 - 6343 solved
+
+
+
+Instances derived from the design of ﬁber
+optic networks for German cities [24] .
+Cologne2 15 1801 - 1810 16719 - 16794 solved
+CRR 80 500 - 1000 25000 solved Mostly sparse instances, based on
+C and D test sets of the SteinLib [24].
+E 40 2500 3125 - 62500 solved Mostly sparse instances origina lly for
+SPG, introduced in [24].
+ACTMOD 8 2034 - 5226 3335 - 93394 solved Real-world instances derived from
+integrative biological network analysis [9].
+HANDBI 14 158400 315808 unsolved
+
+
+
+Images of hand-written text derived
+from a signal processing problem [1].HANDBD 14 169800 338551 unsolved
+PUCNU 18 64 - 4096 192 - 28512 unsolved Hard instances derived from the PUC set
+for SPG. From 11th DIMACS Challenge.
+H 14 64 - 4096 192 - 24576 unsolved Hard instances based on hype rcubes.
+From 11th DIMACS Challenge.
+The computational experiments were performed on Intel Xeon CP Us E3-1245 with 3.40 GHz
+and 32 GB RAM. For our approach CPLEX 12.7.1 2 is employed as underlying LP solver—
+[22] does not use an LP solver. Furthermore, only single-thread mo de was used (as [22] does
+not support multiple threads. For the following experiments 11 benc hmark test sets from the
+literature and the 11th DIMACS Challenge are used, as detailed in Tab le 1.
+Table 2 provides aggregated results of the experiments with a time lim it of one hour. The
+ﬁrst column shows the test set considered in the current row. Colu mns two and three show the
+shifted geometric mean [2] (with shift 1) of the run time taken by the respective solvers. The
+next two columns provide the maximum run time, the last two columns t he number of solved
+instances.
+The new solver is on each test set faster than or as fast as [22], bot h in terms of the maximum
+and average run time. While both solvers can solve all instances from JMP, CRR, Cologne1,
+Cologne2, and ACTMOD to optimality, on all remaining test sets excep t HANDBD the new
+approach solves more instances than [22]. Moreover, it solves all ins tances solved by [22], and
+the primal-dual gap on each instance that cannot be solved by eithe r solver is smaller than
+2http://www-01.ibm.com/software/commerce/optimization/cplex-optimizer/
+13
+
+===== PAGE 15 =====
+
+Table 2: Computational comparison of the solver described in [22], de noted by [22], and the
+solver described in this article, denoted by new.
+mean time [s] max. time [s] # solved
+Test set # [22] new [22] new [22] new
+JMP 34 0.0 0.0 0.0 0.0 34 34
+Cologne1 14 0.0 0.0 0.1 0.0 14 14
+Cologne2 15 0.1 0.1 0.2 0.1 15 15
+CRR 80 0.1 0.1 5.7 1.1 80 80
+ACTMOD 8 0.9 0.3 3.5 1.5 8 8
+E 40 1.8 0.2 >3600 34.5 37 40
+HANDBI 14 36.5 14.9 >3600 >3600 12 13
+HANDBD 14 34.1 17.9 >3600 >3600 13 13
+I640 100 8.7 6.1 >3600 >3600 90 91
+PUCNU 18 278.9 80.2 >3600 >3600 7 11
+H 14 488.7 477.4 >3600 >3600 4 5
+that of [22]—usually by a factor of more than 2. Furthermore, the n ew solver improves the
+best known upper bounds for more than a third of the previously un solved instances from the
+DIMACS Challenge, with two being solved to optimality, as detailed in A.
+5 Acknowledgements
+This work was supported by the BMWi project Realisierung von Beschleunigungsstrategien der
+anwendungsorientierten Mathematik und Informatik f¨ ur op timierende Energiesystemmodelle -
+BEAM-ME (fund number 03ET4023DE). The work for this article has been con ducted within
+the Research Campus Modal funded by the German Federal Ministr y of Education and Research
+(fund number 05M14ZAM).
+References
+[1] 11th DIMACS Challenge. http://dimacs11.zib.de/. Accessed: November 10. 2018.
+[2] Tobias Achterberg. Constraint Integer Programming . PhD thesis, Technische Universit¨ at
+Berlin, 2007.
+[3] Murodzhon Akhmedov, Ivo Kwee, and Roberto Montemanni. A div ide and conquer
+matheuristic algorithm for the prize-collecting steiner tree problem . Computers & Oper-
+ations Research, 70:18 – 25, 2016.
+[4] David L. Applegate, Robert E. Bixby, Vaek Chvatl, and William J. Coo k. The Traveling
+Salesman Problem: A Computational Study . Princeton University Press, 2006.
+[5] Daniel Bienstock, Michel X. Goemans, David Simchi-Levi, and David P. Williamson. A
+note on the prize collecting traveling salesman problem. Math. Program., 59:413–420, 1993.
+[6] Gizem Bolukbasi and Ayse Selin Kocaman. A prize collecting steiner t ree approach to least
+cost evaluation of grid and oﬀ-grid electriﬁcation systems. Energy, 160:536 – 543, 2018.
+[7] S. A. Canuto, M. G. C. Resende, and C. C. Ribeiro. Local search with perturbations for
+the prize-collecting Steiner tree problem in graphs. Networks, 2001.
+14
+
+===== PAGE 16 =====
+
+[8] E. W. Dijkstra. A note on two problems in connexion with graphs. Numer. Math., 1(1):269–
+271, December 1959.
+[9] Marcus T. Dittrich, Gunnar W. Klau, Andreas Rosenwald, Thomas Dandekar, and Tobias
+M¨ uller. Identifying functional modules in protein-protein interaction networks: an integrated
+exact approach. In ISMB, pages 223–231, 2008.
+[10] C. Duin. Steiner Problems in Graphs . PhD thesis, University of Amsterdam, 1993.
+[11] Matteo Fischetti, Markus Leitner, Ivana Ljubi´ c, Martin Luip ersbeck, Michele Monaci, Max
+Resch, Domenico Salvagnin, and Markus Sinnl. Thinning out steiner tr ees: a node-based
+model for uniform edge costs. Mathematical Programming Computation , 9(2):203–229, Jun
+2017.
+[12] Zhang-Hua Fu and Jin-Kao Hao. Knowledge-guided local search for the prize-collecting
+steiner tree problem in graphs. Knowl.-Based Syst. , 128:78–92, 2017.
+[13] Gerald Gamrath, Thorsten Koch, Stephen Maher, Daniel Rehf eldt, and Yuji Shinano. SCIP-
+Jack - A solver for STP and variants with parallelization extensions. Mathematical Program-
+ming Computation , 9(2):231 – 296, 2017.
+[14] Michael R. Garey and David S. Johnson. Computers and Intractability: A Guide to the
+Theory of NP-Completeness . W. H. Freeman & Co., New York, NY, USA, 1979.
+[15] Ambros Gleixner, Michael Bastubbe, Leon Eiﬂer, Tristan Gally, G erald Gamrath,
+Robert Lion Gottwald, Gregor Hendel, Christopher Hojny, Thorst en Koch, Marco E.
+L¨ ubbecke, Stephen J. Maher, Matthias Miltenberger, Benjamin M ¨ uller, Marc E. Pfetsch,
+Christian Puchert, Daniel Rehfeldt, Franziska Schl¨ osser, Christ oph Schubert, Felipe Ser-
+rano, Yuji Shinano, Jan Merlin Viernickel, Matthias Walter, Fabian We gscheider, Jonas T.
+Witt, and Jakob Witzig. The scip optimization suite 6.0. Technical Repo rt 18-26, ZIB,
+Takustr. 7, 14195 Berlin, 2018.
+[16] Michel X. Goemans and Young-Soo Myung. A catalog of Steiner t ree formulations. Networks,
+23(1):19–28, 1993.
+[17] Trey Ideker, Owen Ozier, Benno Schwikowski, and Andrew F. Sie gel. Discovering regulatory
+and signalling circuits in molecular interaction networks. In ISMB, pages 233–240, 2002.
+[18] David S. Johnson, Maria Minkoﬀ, and Steven Phillips. The Prize Colle cting Steiner Tree
+Problem: Theory and Practice. In Proceedings of the Eleventh Annual ACM-SIAM Sym-
+posium on Discrete Algorithms , SODA ’00, pages 760–769, Philadelphia, PA, USA, 2000.
+Society for Industrial and Applied Mathematics.
+[19] R. Karp. Reducibility among combinatorial problems. In R. Miller an d J. Thatcher, editors,
+Complexity of Computer Computations , pages 85–103. Plenum Press, 1972.
+[20] Gunnar W. Klau, Ivana Ljubi´ c, Andreas Moser, Petra Mutze l, Philipp Neuner, Ulrich Pfer-
+schy, G¨ unther Raidl, and Ren´ e Weiskircher. Combining a memetic algorithm with integer
+programming to solve the prize-collecting steiner tree problem. In K alyanmoy Deb, editor,
+Genetic and Evolutionary Computation – GECCO 2004 , pages 1304–1315, Berlin, Heidel-
+berg, 2004. Springer Berlin Heidelberg.
+[21] Thorsten Koch and Alexander Martin. Solving Steiner tree prob lems in graphs to optimality.
+Networks, 32:207–232, 1998.
+15
+
+===== PAGE 17 =====
+
+[22] Markus Leitner, Ivana Ljubic, Martin Luipersbeck, and Marku s Sinnl. A dual ascent-based
+branch-and-bound framework for the prize-collecting steiner tr ee and related problems. IN-
+FORMS Journal on Computing , 30(2):402–420, 2018.
+[23] Ivana Ljubic, Ren Weiskircher, Ulrich Pferschy, Gunnar W. Klau , Petra Mutzel, and Matteo
+Fischetti. An Algorithmic Framework for the Exact Solution of the Pr ize-Collecting Steiner
+Tree Problem. Mathematical Programming, 105(2-3):427–449, 2006.
+[24] Ivana Ljubi. Exact and Memetic Algorithms for Two Network Design Problem s. PhD thesis,
+Vienna University of Technology, 2004.
+[25] Yi-Fei Ming, Si-Bo Chen, Yong-Quan Chen, and Zhang-Hua Fu. A fast vertex-swap oper-
+ator for the prize-collecting steiner tree problem. In Yong Shi, Hao huan Fu, Yingjie Tian,
+Valeria V. Krzhizhanovskaya, Michael Harold Lees, Jack Dongarra , and Peter M. A. Sloot,
+editors, Computational Science – ICCS 2018 , pages 553–560, Cham, 2018. Springer Inter-
+national Publishing.
+[26] Tobias Polzin and Siavash Vahdati Daneshmand. Improved algor ithms for the steiner prob-
+lem in networks. Discrete Appl. Math. , 112(1-3):263–300, September 2001.
+[27] Daniel Rehfeldt and Thorsten Koch. Transformations for the Prize-Collecting Steiner Tree
+Problem and the Maximum-Weight Connected Subgraph Problem to SA P. Journal of Com-
+putational Mathematics , 36(3):459 – 468, 2018.
+[28] Daniel Rehfeldt and Thorsten Koch. Combining NP-Hard Reduct ion Techniques and Strong
+Heuristics in an Exact Algorithm for the Maximum-Weight Connected S ubgraph Problem.
+SIAM Journal on Optimization , in press.
+[29] Daniel Rehfeldt, Thorsten Koch, and Stephen Maher. Reduct ion Techniques for the Prize
+Collecting Steiner Tree Problem and the Maximum-Weight Connected S ubgraph Problem.
+Networks, in press.
+[30] M. W. P. Savelsbergh. Preprocessing and probing techniques f or mixed integer programming
+problems. ORSA Journal on Computing , 6(4):445–454, 1994.
+[31] L. Schmidt, C. Hegde, P. Indyk, L. Lu, X. Chi, and D. Hohl. Seism ic feature extraction
+using steiner tree methods. In 2015 IEEE International Conference on Acoustics, Speech
+and Signal Processing (ICASSP) , pages 1647–1651, April 2015.
+[32] Yahui Sun. Classical, prize-collecting and node-weighted Steiner tr ee problems in graphs .
+PhD thesis, 2018.
+[33] Eduardo Uchoa. Reduction Tests for the Prize-collecting Stein er Problem. Oper. Res. Lett. ,
+34(4):437–444, July 2006.
+[34] R.T. Wong. A dual ascent approach for Steiner tree problems o n a directed graph. Mathe-
+matical Programming, 28:271287, 1984.
+16
+
+===== PAGE 18 =====
+
+Table 3: Improvements on unsolved DIMACS instances.
+Name gap [%] new UB previous UB
+cc7-3nu opt 270 271
+cc10-2nu opt 167 168
+cc11-2nu 1.2 304 305
+cc12-2nu 1.0 565 568
+hc9p2 1.4 30230 30242
+hc10p 1.4 59778 59866
+hc10p2 1.5 59807 59930
+hc11p 1.6 118729 119191
+hc11p2 1.8 118979 119236
+i640-341 0.5 29691 29700
+i640-344 0.6 29910 29921
+A Results for unsolved DIMACS instances
+Using an extended time limit of four hours, we could improve or even so lve more than one third
+of the (previously) unsolved PCSTP instances from the 11th DIMAC S Challenge. All improved
+instances are listed in Table 3, with the ﬁrst column giving the name of t he instance, the second
+its primal-dual gap, the third the improved found bound, and the fo urth the previously best
+known one. 3
+B Further proofs
+B.1 Proof of Proposition 2
+Proof. Initially, deﬁne b : V → Tp such that v ∈ Hb(v) for all v ∈ V . Assume that there exists
+an optimal solution S such that vi ∈ V (S). Denote the (unique) path in S between vi and any
+tj ∈ V (S) ∩ Tp by Qj and the set of all such paths by Q. First, note that |Q| ≥ 2, because if
+Q just contained one path, say Ql, the single-vertex tree {tl} would be of smaller cost than S.
+Second, if a vertex vk is contained in two distinct paths in Q, the subpaths of these two paths
+between vi and vk coincide. Otherwise there would need to be a cycle in S. Additionally, there
+are at least two paths in Q having only the vertex vi in common. Otherwise, due to the precedent
+observation, all paths would have one edge {vi, v ′
+i} in common, which could be discarded to yield
+a tree of smaller cost than C(S).
+Let Qk ∈ Q and Ql ∈ Q be two distinct paths with V (Qk) ∩ V (Ql) = {vi} such that
+|{{vx, v y} ∈ E(Qk) ∪ E(Ql) |b(vx) ̸= b(vy)}| (31)
+is minimized. Deﬁne Q− := Q \ {Qk, Q l}. For all Qr ∈ Q − , denote by Q′
+r the subpath of Qr
+between tr and the ﬁrst vertex not in Htr . Suppose that Qk has an edge e ∈ E(S) in common
+with a Q′
+r: Consequently, Ql cannot have any edge in common with Qr, because this would
+require a cycle in S. Furthermore, Qk and Qr have to contain a joint subpath including vi and e.
+But this would imply that Qk contained at least one additional edge {vx, v y} with b(vx) ̸= b(vy).
+Thus, Qr would have initially been selected instead of Qk.
+Following the same line of argumentation, one validates that Ql has no edge in common with
+3The solution of the instance cc7-3nu is already noted in the report [15], but is based on technique s described
+in this article (which have not been published before).
+17
+
+===== PAGE 19 =====
+
+any Q′
+r. Conclusively, the paths Qk, Ql and all Q′
+r are edge-disjoint. Thus one obtains:
+C(S) =
+∑
+e∈ E(S)
+c(e) +
+∑
+v∈ V \ V (S)
+p(v)
+≥
+( ∑
+Qr ∈Q −
+c(E(Q′
+r))
+)
++ c(E(Qk)) + c(E(Ql)) +
+∑
+v∈ V \ V (S)
+p(v)
+≥
+s− 2∑
+q=1
+rpc
+H (tq) + c(E(Qk)) + c(E(Ql))
+≥
+s− 2∑
+q=1
+rpc
+H (tq) + d
+(vi, v i,1) + d(vi, v i,2),
+which proves the proposition.
+B.2 Proof of Proposition 4
+We will show the N P-hardness already for the SPG variant of the terminal-regions dec omposition
+(which implies the N P-hardness for PCSTP). For an SPG ( V, E, T, c ) deﬁne the terminal-regions
+decomposition as a partition H =
+{
+Ht ⊆ V | T ∩ Ht = {t}
+}
+of V such that for each t ∈ T the
+subgraph induced by Ht is connected. Deﬁne for all t ∈ T
+rH (t) := min {d(t, v ) |v / ∈ Ht}. (32)
+Note that this deﬁnition is just a special case of the PCSTP version ( for PCSTP instances with
+suﬃciently high vertex weights). First, the decision variant of the t erminal-regions decomposition
+problem is stated. Let α ∈ N0 and let G0 = ( V0, E 0) be an undirected, connected graph with
+costs c : E → N. Furthermore, set T0 := {v ∈ V0 |p(v) > 0}, and assume that α < |T0|. For each
+terminal-regions decomposition H0 of G0 deﬁne T ′
+0 ⊊ T0 such that |T ′
+0|= α and rH0 (t′) ≥ rH0 (t)
+for all t′ ∈ T ′
+0 and t ∈ T0 \T ′
+0. Let CH0 := ∑
+t∈ T0\ T ′
+0
+rH0 (t). We now deﬁne the α terminal-regions
+decomposition problem as follows: Given a k ∈ N, is there a terminal-regions decomposition
+H0 such that CH0 ≥ k? The next lemma forthwith establishes the N P-hardness of ﬁnding a
+terminal-regions decomposition that maximizes (8), or (9)—which co rresponds to α = 2 and
+α = 3, respectively.
+Lemma 2. For each α ∈ N0 the α terminal-regions decomposition problem is N P-complete.
+Proof. Given a terminal-regions decomposition H0 it can be tested in polynomial time whether
+CH0 ≥ k. Consequently, the terminal-regions decomposition problem is in N P.
+In the remainder it will be shown that the ( N P-complete [14]) independent set problem can be
+reduced to the terminal-regions decomposition problem. To this end , let Gind = (Vind, E ind) be
+an undirected, connected graph and k ∈ N. The problem is to determine whether an independent
+set in Gind of cardinality at least k exists. To establish the reduction, construct a graph G0 from
+Gind as follows. Initially, set G0 = ( V0, E 0) := Gind. Next, extend G0 by replacing each edge
+el = {vi, v j} ∈ E0 with a vertex v′
+l and the two edges {vi, v ′
+l} and {vj, v ′
+l}. Deﬁne edge weights
+c0(e) = 1 for all e ∈ E0 (which includes the newly added edges). If α > 0, choose an arbitrary
+vi ∈ V0 ∩ Vind and add for j = 1, ..., α vertices t(j)
+i to both V0 and T0. Finally, add for j = 1, ..., α
+edges {vi, t (j)
+i } with c0({vi, t (j)
+i }) = 2 to E0.
+First, one observes that the size |V0|+ |E0| of the new graph G0 is a polynomial in the
+size |Vind|+ |Eind| of Gind. Next, rH0 (vi) = 2 holds for a vertex vi ∈ G0 ∩ Gind if and only
+18
+
+===== PAGE 20 =====
+
+if Hvi contains all (newly inserted) adjacent vertices of vi in G0. Moreover, in any terminal-
+regions decomposition H0 for ( G0, c 0), it holds that rH0 (t(j)
+i ) = 2 for j = 1 , ..., α . Hence, there
+is an independent set in Gind of cardinality at least k if and only if there is a terminal-regions
+decomposition H0 for ( V0, E 0, T 0, c 0) such that
+CH0 ≥ | Vind|+ k
+This proves the proposition.
+B.3 Proof of Proposition 8
+Proof. First it follows from the construction of Transformation 1 and 2 tha t each optimal so-
+lution x0, y 0 to the LP relaxation of T ransRCut(IT0) can be transformed to a solution x, y
+to the LP relaxation of T ransCut(IP C) without changing the objective value: By setting
+x((vi, v j)) := x0((vi, v j)) and x((vj , v i)) := x0((vj, v i)) for all {vi, v j} ∈ E, x((r′, t 0)) := 1
+for any t0 ∈ T0, x((ti, t ′
+i)) := 1 for all ti ∈ T0, and by setting the remaining x((vi, v j)) accord-
+ingly. Thus vLP (P rizeCut(IP C)) ≤ vLP (P rizeRCut (IT0)). To see that the inequality can be
+strict, consider the following wheel instance (which is well-known to h ave an integrality gap for
+DCut on SPG):
+v0
+v1v2
+v3
+v4 v5
+v6
+1
+1
+1
+2
+2
+2
+2
+2
+2
+Set p(v0) = p(v1) = p(v3) = p(v5) = 4, p(v2) = p(v6) = 0, and p(v4) = ǫ with 0 < ǫ < 1. Let
+T0 := {v0, v 1, v 3, v 4, v 5}. Let I be the PCSTP and IT0 the corresponding RPCSTP. It holds that
+vLP (T ransCut(I)) = 7 . 5 + ǫ
+2 < 8 = vLP (T ransRCut(IT0 )). Part of the solution corresponding
+to vLP (T ransCut(I)) is shown below (with numbers next to the arcs denoting the x values), the
+remaining x and y are set accordingly (e.g., x((r′, v 1)) = 1).
+v0
+v1v2
+v3
+v4 v5
+v6
+0.5
+0.5
+0.5
+0.5
+0.5
+0.5
+0.5
+0.5
+0.5
+19

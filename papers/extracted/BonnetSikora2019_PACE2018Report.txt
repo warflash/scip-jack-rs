@@ -1,0 +1,757 @@
+﻿SOURCE: BonnetSikora2019_PACE2018Report.pdf
+PAGES: 16
+EXTRACTOR: pypdf 6.10.0 (Unicode text), pdfplumber fallback
+
+
+===== PAGE 1 =====
+
+The PACE 2018 Parameterized Algorithms and
+Computational Experiments Challenge: The Third
+Iteration
+Édouard Bonnet
+Univ Lyon, CNRS, ENS de Lyon, Université Claude Bernard Lyon 1, LIP UMR5668, France
+edouard.bonnet@dauphine.fr
+Florian Sikora
+Université Paris-Dauphine, PSL University, CNRS, LAMSADE, 75016, Paris, France
+ﬂorian.sikora@dauphine.fr
+Abstract
+The Program Committee of the Third Parameterized Algorithms and Computational Experi-
+ments challenge (PACE 2018) reports on the third iteration of the PACE challenge. This year,
+all three tracks were dedicated to solve theSteiner Tree problem, in which, given an edge-
+weighted graph and a subset of its vertices calledterminals, one has to ﬁnd a minimum-weight
+subgraph which spans all the terminals. In Track A, the number of terminals was limited. In
+Track B, a tree-decomposition of the graph was provided in the input, and the treewidth was lim-
+ited. Finally, Track C welcomed heuristics. Over 80 participants on 40 teams from 16 countries
+submitted their implementations to the competition.
+2012 ACM Subject ClassiﬁcationTheory of computation→ Fixed parameter tractability
+Keywords and phrasesSteiner tree problem, contest, implementation challenge, FPT
+Digital Object Identiﬁer10.4230/LIPIcs.IPEC.2018.26
+Funding Partially supported by the LABEX MILYON (ANR-10- LABX-0070) of Université
+de Lyon, within the program “Investissements d’Avenir” (ANR-11-IDEX-0007) operated by the
+French National Research Agency (ANR) and project “ESIGMA” (ANR-17-CE23-0010).
+Acknowledgements The PACE challenge was supported by Networks [35], an NWO Gravitation
+project of the University of Amsterdam, Eindhoven University of Technology, Leiden University,
+and the Center for Mathematics and Computer Science (CWI), bydata-experts.de, and by
+Freunde der Saarbrücker Informatik(FdSI). The prize money (3750e) and travel grants (1000e
+for Daniel Rehfeldt who presented SCIP-Jack during the award ceremony) were given through
+the generosity of Networks [35] anddata-experts.de. We are grateful to Szymon Wasik and
+Jan Badura for the fruitful collaboration and for hosting the competition atoptil.io.
+1 Introduction
+The Parameterized Algorithms and Computational Experiments Challenge (PACE) was
+conceived in Fall 2015 to deepen the relationship between parameterized algorithms and
+practice. It aims to:
+1. Bridge the divide between the theory of algorithm design and analysis, and the practice
+of algorithm engineering.
+2. Inspire new theoretical developments.
+© É. Bonnet, F. Sikora;
+licensed under Creative Commons License CC-BY
+13th International Symposium on Parameterized and Exact Computation (IPEC 2018).
+Editors: Christophe Paul and Michał Pilipczuk; Article No.26; pp.26:1–26:16
+Leibniz International Proceedings in Informatics
+Schloss Dagstuhl – Leibniz-Zentrum für Informatik, Dagstuhl Publishing, Germany
+
+===== PAGE 2 =====
+
+26:2 PACE 2018
+3. Investigate in how far theoretical algorithms from parameterized complexity and related
+ﬁelds are competitive in practice.
+4. Produce universally accessible libraries of implementations and repositories of benchmark
+instances.
+5. Encourage the dissemination of these ﬁndings in scientiﬁc papers.
+The ﬁrst iteration of PACE was held at IPEC 2016 [13]. Since then, PACE has been mentioned
+as an inspiration in many papers [1, 3, 21, 22, 25, 31, 33, 41, 42]. Hisao Tamaki’s companion
+theory paper to his winning implementations of PACE 2017 [14] won the best paper award
+at ESA 2017 [40]. Very recent works acknowledging PACE or inspired by the challenge
+include the following papers [5, 7, 32, 20, 4, 17]. At this year’s ESA, it was shown that
+parallelized dynamic programming (DP) on tree decompositions is a competitive approach to
+SAT solving [23]. According to the paper, this was made possible by the excellent programs
+developed for the treewidth tracks of PACE 2016 and 2017. At the same conference, Bannach
+and Brendt provided an eﬃcient and simple interface to DP on tree decompositions [2].
+In this article, we report on the third iteration of PACE. The PACE 2018 challenge was
+announced on November 14, 2017. The ﬁnal version of the submissions was due on May 12,
+2018. We informed the participants of the result on May 14, and announced them to the
+public on August 22nd, during the award ceremony at the International Symposium on
+Parameterized and Exact Computation (IPEC 2018) in Helsinki.
+2 The Steiner Tree Problem: Theory and Practice
+There are many diﬀerent variants of the Steiner Tree problem. They all involve the task to
+interconnect objects calledterminals by using minimum-lengthwires. Here, we focus on the
+main variant in graphs. For a subset of edgesF of an undirected graph, letV (F) denote the
+set of vertices that are endpoints of those edges. A formal deﬁnition of theSteiner Tree
+problem can be stated as follows.
+Input: An undirected graphG with a non-negative weight function on its edges
+w : E(G)→ R+, and a set ofterminals T⊆ V (G).
+Output: A subset of edgesF⊆ E(G) minimizing ∑
+e∈F w(e) such that:
+T⊆ V (F) holds and (V (F), F) is a connected graph.
+We will interchangeably regardF and (V (F), F) as the solution. In words, given an edge-
+weighted graph and a subset of its vertices (theterminals) the task is to ﬁnd a minimum-weight
+subgraph that spans all terminals. As the weights are non-negative, any edge of a cycle in a
+feasible solution can be removed to obtain a solution that is still feasible but has a smaller
+or equal total weight. Hence, there is always a tree among the optimum solutions, which
+explains the second word,Tree, in the problem name. The ﬁrst word,Steiner, refers to the
+19th-century geometer Jakob Steiner.
+We choseSteiner Tree to be the problem of PACE 2018 since it has a wide spectrum
+of real-life applications, including the design of VLSI, optical or wireless communication
+systems, and transportation networks [30]. Furthermore, as a result of the 11th DIMACS
+implementation challenge, there are established benchmarks forSteiner Tree and its
+variants. Finally, as we will see in the next section, this problem has interesting FPT
+algorithms.
+
+===== PAGE 3 =====
+
+É. Bonnet, F. Sikora 26:3
+2.1 Parameterized algorithms
+In what follows, we denote the number of edges of an input graphG by n, its number of
+edges by m, its number of terminals byt, and its treewidth byw. Steiner verticesare the
+non-terminal vertices touched by a solutionF⊆ E(G), and we denote their number bys,
+that is, we haves =|V (F)\ T|. As we will see, there are FPT algorithms forSteiner
+Tree with t as a parameter and withw as a parameter, that is, algorithms running in time
+f(t)nO(1) and g(w)nO(1) for some computable functionsf and g.
+The Dreyfus-Wagner algorithm
+There is a classical algorithm from the 70s designed by Dreyfus and Wagner [16] (henceforth
+DW) with running time O(3tn + 2tn2 + n(n log n + m)). This was later improved to
+O(3tn + 2t(n log n + m)) by Erickson, Monma, and Veinott [19] (henceforth EMV). It works
+by dynamic programming on pairs of disjoint subsets of the set of terminalsT. To keep
+it simple, in a solution(V (F), F), there is a vertex with degree at least3 whose removal
+would disconnect two disjoint sets of terminalsT1, T2⊂ T. One can store a lightest way of
+connecting T1 and T2 for all the pairsT1, T2 in a bottom-up manner. The number of pairs of
+disjoint sets in a universe oft elements is 3t, which explains part of the running time of DM
+and EMV.
+One can wonder if the exponential basis of3 can be decreased. There has been quite a bit
+of work done in that direction, leading to a series of improvements going from3 to 2. However,
+no submission to this year’s PACE challenge have made use of these improvements, for good
+reason: They tend to come with a nasty blow-up in the polynomial factors. For instance,
+there are O(2.5tn15) and O(2.1tn58) time algorithms [24]. If the weights are bounded by
+some constant (and in the variant where the vertices, not the edges, are weighted), there is
+an algorithm with running time roughlyO(2tn2 + nm), based on the so-called fast subset
+convolution [6].
+Treewidth-based algorithms
+Given a tree-decomposition(T ,{Vu}u∈V (T )) of width w of the input graphG (withT , a
+rooted tree and{Vu}, a family of subsets ofV (G) indexed by the nodes ofT ), one can
+solve Steiner Tree in time O∗(ww) by bottom-up dynamic programming on the nodes
+ofT . Indeed, once the subtree ofT at u∈ V (T ) is processed, the information to remember,
+besides the invested budget, is the subset of vertices ofVu touched by a partial solution and
+how these vertices are connected in the partial solution. This information can be represented
+by a partition of a subset ofVu. The number of such objects is bounded byO(ww) since
+|Vu| ⩽ w + 1, hence the size of the DP table and the running time.
+For some time it was an open question ifSteiner Tree and similar problems with a
+connectivity constraint can be solved in time2O(w)nO(1) instead of2O(w log w)nO(1). This was
+ﬁnally resolved in 2011 with the Cut&Count technique of Cygan et al. [12]. In a nutshell, the
+Cut&Count technique starts by addressing the parity version of the problem: how many sets
+of ℓ connected edges spanT, modulo 2? For this, one counts the numberp of pairs (D,C)
+where D is a set of at mostℓ edges spanning T (and D is not required to be connected) and
+C is a cut such that every connected component ofD is fully contained in one side ofC. If
+we restrict a designated terminal to always be on theleft side ofC, the number of possibleC
+for a givenD is 2cc(D)−1, wherecc(D) is the number of connected components ofD. This
+number is 1 ifD is connected and even otherwise. So, the parity ofp is the answer to our
+question. Since computing p does not exhibit a (global) connectivity constraint, it can be
+IPEC 2018
+
+===== PAGE 4 =====
+
+26:4 PACE 2018
+done in time2O(w)nO(1) by standard dynamic programming. Finally, one can distinguish the
+case zero solutionsfrom the casenon-zero even number of solutionsby using the Isolation
+Lemma. This lemma implies that by giving uniformly random integer weights between1 and
+100ℓm to edges, there will be, with high probability, exactly one solution of minimum total
+weight (provided, of course, that there was a solution to begin with). For this total weight,
+we will therefore ﬁnd an odd number of solutions, and may conﬁdently report it.
+One might then ask for a deterministic2O(w)nO(1) time algorithm, which could handle
+weighted instances. The rank-based approach of Bodlaender et al. [8] does exactly that. The
+main idea is that when performing the standardO∗(ww) DP, one does not need to keep
+every partition of a bag. Instead, one can prune the partitions in the following way. IfS is
+the set of partitions of a bag achievable by partial solutions of a certain cost, then one can
+safely restrict attention to a subsetS′⊆S , such that: if there is aΠ1∈S compatible with
+a partition Π∗ generated by a partial solution in the rest of the graph, then there should
+be at least oneΠ2∈S ′ also compatible with Π∗. By compatible, we mean that the two
+partitions would fully connect the common subset of the bag touched by the partial solutions.
+If one represents compatibility by a square matrix inF2 whose rows and columns are indexed
+by the partitions (with a 1 in the entries corresponding to compatible partitions, and a
+0 otherwise), then it can be observed that any single row/column of a linearly dependent
+family of rows/columns can be safely removed. Indeed, for every index of the deleted vector
+containing a 1, there has to be another vector of the family also containing a 1 at this
+position. Then it is proved that the rank of the matrix with all the partitions is2O(w), and
+that Gaussian elimination can be done in the same time without having to explicitly store or
+compute all O∗(ww) permutations. This three-act story is told with the exact balance of
+details and conciseness in the book on parameterized complexity by Cygan et al. [11].
+Known theoretical obstacles
+The Steiner Tree problem parameterized by the numbers of Steiner vertices isW [2]-
+hard [34]. Furthermore it is unlikely that there is an algorithm running in timeO(ns−ε), for
+any ε > 0. Such an algorithm would indeed give, by a simple reduction, an algorithm in
+nk−ε for k-Dominating Set, contradicting the Strong Exponential Time Hypothesis [39].
+Theory also says that one cannot expect very eﬃcient preprocessing: there is no polynomial
+kernel in s + t (the total number of vertices inV (F )) unless the polynomial-time hierarchy
+collapes [15]. Although, in practice, there are dozens of listed reductions rules which can
+sometimes completely solve large real-world instances.
+Approximations
+We hastily touch the approximability status ofSteiner Tree as it might be relevant
+to heuristics. A minimum spanning tree in the subgraph induced by the terminals of
+the metric closure yields an approximation ratio of 2 [27]. There is a 1.39-approximation
+based on a scheme callediterative randomized roundingof an LP-formulation [9], and a
+combinatorial 1.55-approximation [38]. However, Steiner Tree is APX-hard: there is no
+1.01-approximation unless P=NP [10].
+2.2 DIMACS challenge
+In 2014, the 11th (and latest) DIMACS implementation challenge was also dedicated to
+solving Steiner Tree problems, and extensive libraries of instances existed prior to our
+challenge. As we will detail later, we mainly selected our instances from the Steinlib sets.
+
+===== PAGE 5 =====
+
+É. Bonnet, F. Sikora 26:5
+Furthermore, there were already very eﬃcient programs solving Steiner Tree and its variants.
+One successful program during the DIMACS competition, SCIP-Jack, also participated in
+our challenge. SCIP-Jack is a branch-and-cut algorithm based on the free MIP-solver SCIP.
+As such, it provides a natural baseline and comparison for the FPT approaches.
+3 Selection of the instances and rules
+Before we selected the instances, we ﬁrst deﬁned the precise goals of each track. In light of the
+eﬃcient parameterized algorithms described in the previous paragraphs and the objectives of
+PACE, it will not come as a surprise that we decided that Track A would have instances
+where the numbert of terminals is relatively small, while in Track B the treewidthw of the
+graphs would be relatively small.
+Generating artiﬁcial instances for which a careful optimization of the Dreyfus-Wagner
+algorithm (for Track A) or of the rank-based approach for dynamic programming on tree
+decompositions (for Track B) would get a decisive advantage compared to a generic solver
+(ILP, SAT) was not our goal. So, we selected our instances among established benchmarks
+(mainly Steinlib, PUC, GAP, Vienna), which were also used four years ago in the DIMACS
+challenge on Steiner Tree.
+3.1 Track A
+For this track, we picked quite a lot of instances with a VLSI application. They are grid
+graphs with rectangular holes and Manhattan distance weights (in the ALUE, ALUT, DIW,
+DMXA, GAP, MSM, TAQ, and LIN sets). We used randomly generated sparse instances
+meant to be resistant to preprocessing (in the E, I160, I640, PUC sets). We also included
+industrial instances stemming from wire routing problems (in the WRP3 and WRP4 sets),
+and real geographical networks in the form of complete graphs with Euclidean distances (X
+set).
+Among these instance sets, we selected 200 instances: 100 public (given to the contestants)
+and 100 private (used for the evaluation), with 4 to 136 terminals. The median number
+of terminals is 16 and its mean is 19.4, while 1480 is the mean number of vertices, and
+8515, the mean number of edges (see Figure 1). On more than 20 of those instances, top
+implementations of the DIMACS challenge, such as Staynerd, take tens of minutes. We
+sorted the instances by increasing(t, m) in the lexicographic order.
+102 103 104 105
+101
+102
+Edges
+Terminals
+102 103 104 105
+101
+102
+Edges
+Terminals
+Figure 1The distribution (#edges,#terminals) of the public (left) and private (right) instances
+of Track A in log-log plot.
+IPEC 2018
+
+===== PAGE 6 =====
+
+26:6 PACE 2018
+The main rule for Track A and B was that the algorithm (deterministic or randomized)
+should be exact. A sub-optimal output (in the public or private instances) would therefore
+mean disqualiﬁcation. The ﬁnal score is the number of private instances solved on the
+optil.io platform with 30 minutes per instance.
+3.2 Track B
+For this track, we used a lot of rectilinear instances with a low treewidth but a high number
+of terminals (in the ES100FST, ES500FST, ES1000FST sets, where the number between
+ES and FST corresponds to the number of terminals). We also used many instances from
+WRP3 and WRP4 with an intermediate number of terminals (≈50). A tree decomposition of
+almost always minimum width was given with the input. We computed these decompositions
+using the winning implementations of the treewidth track of PACE 2017 by Strasser and by
+Tamaki and his team [14].
+On the 200 instances that we picked, the average number of vertices is 1490, the average
+number of edges is 2847, the average number of terminals is 606, and its median is 100.
+Furthermore the width of the given tree decompositions range from 6 to 47 with a median of
+19.5 (see Figure 2). We sorted the instances by increasing(w, m). The rules were the same
+as in Track A.
+100 1,000 10,000 100,000
+10
+20
+30
+40
+50
+Edges
+Treewidth
+100 1,000 10,000 100,000
+10
+20
+30
+40
+50
+Edges
+Treewidth
+Figure 2The distribution (#edges,treewidth) of the public (left) and private (right) instances of
+Track B in lin-log plot.
+3.3 Track C
+Finally in Track C, dedicated to heuristics, we chose large and diﬃcult instances with many
+terminals and high treewidth. To this end, we used the hardest instances of Steinlib. We
+also added a lot of instances from the Vienna set. These instances were generated from
+real-world telecommunication networks by Ivana Ljubic’s group at the University of Vienna.
+A majority of the selected instances cannot be solved within one hour by the state-of-the-art
+program. In several cases, the actual optimum is unknown.
+The average number of vertices is 27K, the average number of edges is 48K, and the
+average number of terminals is 1114, with a median at 360.5 (see Figure 3). Finally the best
+treewidth upper bound (obtained with the heuristics of previous PACE) on these instances
+is almost always above 40. We sorted the instances by increasing(t, m).
+In track C, the ﬁnal score to maximize is the sum over all the private instances of the ratio
+opt/sol where opt is the optimum (if known) or the best known upper bound (otherwise)
+
+===== PAGE 7 =====
+
+É. Bonnet, F. Sikora 26:7
+103 104 105
+101
+102
+103
+104
+Edges
+Terminals
+103 104 105
+101
+102
+103
+104
+Edges
+Terminals
+Figure 3The distribution (#edges,#terminals) of the public (left) and private (right) instances
+of Track C in log-log plot.
+and sol is the value of the proposed output. Outputting a non-feasible solution would not
+disqualify the submission, but would give a score of 0 on that particular instance.
+4 Participation and results
+This year, we had over 40 teams and 80 participants coming from 16 countries and four
+continents: including Austria, Brazil, Canada, Czechia, Denmark, England, Finland, France,
+Germany, India, Japan, Mexico, the Netherlands, Norway, Poland, and Romania.
+Country Teams Participants
+Austria 2 4
+Brazil 1 3
+Canada 1 1
+Czechia 2 4
+Denmark 1 1
+England 1 1
+Finland 1 1
+France 4 7
+Germany 4 5
+India 6 12
+Japan 4 8
+Mexico 1 4
+Netherlands 2 6
+Norway 2 4
+Poland 2 11
+Romania 1 3
+Total 35 75
+Table 1 Participation per country (based on the initial registration form; more teams and
+participants uploaded their code onoptil.io afterwards).
+The number of teams and participants both doubled compared to PACE 2017. To
+be precise, the above numbers correspond to teams and participants who sent a ﬁnal
+IPEC 2018
+
+===== PAGE 8 =====
+
+26:8 PACE 2018
+implementation to at least one track. If we also count people who uploaded some code on
+the optil.io platform but dropped out of the competition, the number of teams exceeds 50
+and the number of participants exceeds 100. If we count the teams with their multiplicity
+(that is, the number of tracks in which they participated), this number exceeds 75.
+4.1 Track A
+Yoichi Iwata and Takuto Shigemura won this track by solving 95 private instances. Their
+algorithm builds upon the dynamic programming of Erickson-Monma-Veinott (EMV). A
+technical lemma permitted them to prune a lot of entries in the DP table. This happens to
+also solve instances with small treewidth even when the number of terminals is relatively
+large.
+Krzysztof Maziarz and Adam Polak got the second place by preprocessing and improving
+Dreyfus-Wagner (DW) with the heuristic ideas presented by Hougardy et al. [29]. The latter
+consists of running a shortest path algorithm (Dijkstra, A∗, etc.) in the partial solutions in
+order to prune the search space.
+Koch and Rehfeldt took the third place with their program SCIP-Jack which has three
+main components. First, known and new reduction methods simplify the instance. Secondly,
+a set of heuristics provides upper and lower bounds. Finally, a reduction (of many variants)
+to the directed Steiner tree problem is performed and the core of the algorithm is a branch-
+and-cut approach using the MIP-solver SCIP (developed by a superset of this team).
+At the fourth place, albeit still very close to the ﬁrst place, solving 92 instances, Andre
+Schidler, Johannes Fichte, and Markus Hecher used reduction rules presented by Rehfeldt [37],
+including the so-calleddual ascentand the improved DW by Hougardy et al. [29].
+All the other teams implemented some reﬁnements of DW or EMV.
+1st place, 450 e: Yoichi Iwata and Takuto Shigemura (team wata&sigma from Japanese
+National Institute of Informatics and University of Tokyo) solved 95 out of 100 instances
+github.com/wata-orz/steiner_tree
+2nd place, 350 e: Krzysztof Maziarz and Adam Polak (team Jagiellonian from Jagiel-
+lonian University) solved 94 out of 100 instances
+https://bitbucket.org/krismaz/pace2018
+3rd place, 300 e: Thorsten Koch and Daniel Rehfeldt (team reko from Zuse Institute
+Berlin and TU Berlin) solved 93 out of 100 instances
+github.com/dRehfeldt/scipjack/
+4th place, 225 e: Andre Schidler, Johannes Fichte, and Markus Hecher (team TUW
+from TU Vienna) solved 92 out of 100 instances
+github.com/ASchidler/pace17/
+5th place: Krzysztof Kiljan, Dominik Klemba, Marcin Mucha, Wojciech Nadara, Marcin
+Pilipczuk, Mateusz Radecki, and Michał Ziobro (team UWarsaw from University of
+Warsaw and Jagiellonian University) solved 67 out of 100 instances
+https://bitbucket.org/marcin_pilipczuk/pace2018-steiner-tree
+6th place: Suhas Thejaswi (team Noname from Aalto University) solved 66 out of 100
+instances
+github.com/suhastheju/pace-2018-exact
+6th place: Peter Mitura and Ondřej Suchý (team FIT CTU in Prague from the Czech
+Technical University) solved 66 out of 100 instances
+github.com/PMitura/pace2018
+
+===== PAGE 9 =====
+
+É. Bonnet, F. Sikora 26:9
+6th place: Johannes Varga (team johannes from TU Vienna) solved 66 out of 100
+instances
+github.com/josshy/st-tree
+9th place: Saket Saurabh, P. S. Srinivasan, and Prafullkumar Tale (team SSPSPT from
+the Institute Of Mathematical Sciences, HBNI, Chennai and the International Institute
+of Information Technology, Bangalore) solved 48 out of 100 instances
+github.com/pptale/PACE18
+10th place: Sharat Ibrahimpur (team the65thbit from University of Waterloo) solved
+69 out of 100 instances but was incorrect on 1 instance
+github.com/sharat1105/PACE2018
+11th place: S. Vaishali and Rathna Subramanian (team PCCoders from PSG College
+of Technology, Coimbatore) solved 14 out of 100 instances but was incorrect on several
+instances
+github.com/ammuv/PACE-2018-
+12th place: R. Vijayaragunathan, N. S. Narayanaswamy, and Rajesh Pandian M. (team
+Resilience from TCS Lab, Indian Institute of Technology, Madras) solved 9 instances but
+was incorrect on several instances
+github.com/mrprajesh/pace2018
+One can see two well-deﬁned clusters (90-95 and 65-70). The implementation at 10th
+place would have led the second cluster, if not for a small bug that showed only on one
+private instance.
+4.2 Track B
+In this track with low treewidth, the developers of SCIP-Jack, Thorsten Koch and Daniel
+Rehfeldt, took the ﬁrst place by solving 92 of the 100 instances in the private set. They
+do not directly exploit the tree-decomposition given in input, but it is likely that the low
+treewidth indirectly translates into higher eﬃciency of their preprocessing, heuristics, and/or
+branch-and-cut. Otherwise, it is hard to explain how the same program, discarding the
+tree-decomposition, won Track B by solving 15 more instances than the winner of Track A
+(where they ﬁnished third).
+At the second place, Yoichi Iwata and Takuto Shigemura implemented the standard
+O∗(ww) dynamic programming on the tree-decomposition. When the treewidth becomes too
+large, they switch to their improved EMV algorithm. They observe that their algorithm
+for Track A performs well when the treewidth is low since the existence of small separators
+prunes a lot of entries in the DP table.
+Completing the podium, Tom van der Zanden added to the rank-based approach a handful
+of nice observations, crediting some of them to Luuk van der Graaﬀ’s master thesis [28].
+This results in the only program of the competition solving all the instances with treewidth
+at most 15. In particular, this implementation is the only one to solve instance 39 of the
+private set, which has 5K+ vertices, 20K+ edges, 2.4K+ terminals, and treewidth 11.
+1st place, 450 e: Thorsten Koch and Daniel Rehfeldt (team reko from Zuse Institute
+Berlin and TU Berlin) solved 92 out of 100 instances
+github.com/dRehfeldt/scipjack/
+2nd place, 350 e: Yoichi Iwata and Takuto Shigemura (team wata&sigma from the
+Japanese National Institute of Informatics and the University of Tokyo) solved 77 out of
+IPEC 2018
+
+===== PAGE 10 =====
+
+26:10 PACE 2018
+100 instances
+github.com/wata-orz/steiner_tree
+3rd place, 300 e: Tom van der Zanden (team Tom from Utrecht University) solved 58
+out of 100 instances
+github.com/TomvdZanden/SteinerTreeTW
+4th place: Peter Mitura and Ondřej Suchý (team FIT CTU in Prague from the Czech
+Technical University) solved 52 out of 100 instances
+github.com/PMitura/pace2018
+4th place: Yasuaki Kobayashi (team Yasu from Kyoto University) solved 52 out of 100
+instances
+https://bitbucket.org/yasu0207/steiner_tree
+6th place: Akio Fujiyoshi (team CBGﬁnder from Ibaraki University) solved 49 out of
+100 instances
+github.com/akio-fujiyoshi/CBGfinder_for_steiner_tree_problem
+7th place: Krzysztof Kiljan, Dominik Klemba, Marcin Mucha, Wojciech Nadara, Marcin
+Pilipczuk, Mateusz Radecki, and Michał Ziobro (team UWarsaw from University of
+Warsaw and Jagiellonian University) solved 33 out of 100 instances
+https://bitbucket.org/marcin_pilipczuk/pace2018-steiner-tree
+7th place: Dilson Guimarães, Guilherme Gomes, João Gonçalves, and Vinícius dos
+Santos (team lapo from LAPO-UFMG) solved 33 out of 100 instances
+github.com/dilsonguim/pace2018
+The rest of the teams implemented the rank-based approach of Bodlaender et al. [8] as
+the main or secondary component. At the shared fourth place, Peter Mitura and Ondřej
+Suchý (FIT CTU in Prague)’s implementation is the fastest of the competition on average,
+while Yasuaki Kobayashi’s program also switches to a terminal-based approach when the
+treewidth becomes too large. Table 2 summarizes the approach used by all the teams.
+Team score treewidth approach ﬁrst unsolved switching to DW-like criterion to switch
+reko 92 no 26, w= 9 no –
+wata_sigma 77 wwDP 26, w= 9 EMV w >10or (w >8andt <300)
+Tom 58 2O(w)rank-based 54, w= 16 EMV 3t <5w
+FIT CTU in Prague 522O(w)rank-based 39,w= 11 no –
+yasu 52 2O(w)rank-based 13,w= 7 DW w >15
+fujiyoshi 49 2O(w)rank-based 39,w= 11 no –
+UWarsaw 33 2O(w)rank-based 32,w= 10 no –
+lapo 33 2O(w)rank-based 13,w= 7 no –
+Table 2For each team:score is the number of private instances solved,treewidth approach, the
+treewidth-based algorithm used, if any,ﬁrst unsolved, the number of the ﬁrst unsolved private instance
+(we recall that the instances of Track B were sorted lexicographically by increasing(w, e)) and the
+corresponding value of the treewidth,switching to DW-like, if the treewidth approach is substituted
+to a terminal-based algorithm (DW= Dreyfus-Wagner algorithm, EMV= Erickson-Monma-Veinott
+algorithm), andcriterion to switchwhat is the test to switch to such an algorithm.
+Since the instances were edge-weighted, no submission tried to use the Cut&Count
+technique. It would be interesting to compare the speed of the rank-based and the Cut&Count
+techniques on unweighted instances of relatively low treewidth. Another direction would be
+to make Cut&Count work on edge-weighted instances, in practice and/or in theory.
+
+===== PAGE 11 =====
+
+É. Bonnet, F. Sikora 26:11
+4.3 Track C
+This track attracted the most participants. Regarding the instance sizes, it should be observed
+that a naive implementation (without preprocessing) of the 2-approximation algorithm does
+not ﬁnish within the time limit. The contributions use either meta-heuristics (an evolutionary
+algorithmforthewinningteam, iteratedlocal-searchwithnoisingforthethirdteam, simulated
+annealing, etc.), or start from some solution (a spanning tree, an arbitrary feasible solution,
+or a 2-approximation) and then improve it with local search. Radek Hušek and teammates
+(Team Tarken) used a parameterized approximation approach [18].
+1st place, 450 e: Emmanuel Romero Ruiz, Emmanuel Antonio Cuevas, Irwin Enrique
+Villalobos López, and Carlos Segura González (CIMAT Team from the Center for Research
+in Mathematics, Guanajuato) got an average ratio of 99.93/100
+github.com/HeathcliffAC/SteinerTreeProblem
+2nd place, 350 e: Thorsten Koch and Daniel Rehfeldt (team reko from Zuse Institute
+Berlin and TU Berlin) got an average ratio of 99.85/100
+github.com/dRehfeldt/scipjack/
+3rd place, 300 e: Martin Josef Geiger (team MJG from HSU Hamburg) [26] got an
+average ratio of 99.80/100
+https://data.mendeley.com/datasets/yf9vpkgwdr/1
+4th place, 225 e: Radek Hušek, Tomáš Toufar, Dušan Knop, Tomáš Masařík, and
+Eduard Eiben (team CUiB from Charles University, Prague and University of Bergen)
+got an average ratio of 99.72/100
+github.com/goderik01/PACE2018
+5th place: Emmanuel Arrighi and Mateus de Oliveira Oliveira (team Gardeners from
+ENS Cachan and University of Bergen) got an average ratio of 98.93/100
+github.com/SteinerGardeners/TrackC-Version1
+6th place: Krzysztof Kiljan, Dominik Klemba, Marcin Mucha, Wojciech Nadara, Marcin
+Pilipczuk, Mateusz Radecki, and Michał Ziobro (team UWarsaw from University of
+Warsaw and Jagiellonian University) got an average ratio of 98.27/100
+https://bitbucket.org/marcin_pilipczuk/pace2018-steiner-tree
+7th place: Stéphane Grandcolas (team SGLS from LIS Marseille) got an average ratio
+of 97.54/100
+http://www.dil.univ-mrs.fr/~gcolas/sgls.c
+8th place: Max Hort, Marciano Geijselaers, Joshua Scheidt, Pit Schneider, and Tahmina
+Begum (team JMMPT from the Department of Data Science and Knowledge Engineering,
+Maastricht University) got an average ratio of 97.15/100
+github.com/maxhort/Pacechallenge-TrackC/
+9th place: Dimitri Watel and Marc-Antoine Weisser (team DoubleDoubleU from
+SAMOVAR-ENSIIE and LRI-Centrale-Supelec) got an average ratio of 96.92/100
+github.com/mouton5000/PACE2018/
+10th place: R. Vijayaragunathan, N. S. Narayanaswamy, and Rajesh Pandian M. (team
+Resilience from TCS Lab and the Indian Institute of Technology Madras) got an average
+ratio of 94.57/100
+github.com/mrprajesh/pace2018
+11th place: Sharat Ibrahimpur (team the65thbit from University of Waterloo) got an
+average ratio of 94.37/100
+github.com/sharat1105/PACE2018
+IPEC 2018
+
+===== PAGE 12 =====
+
+26:12 PACE 2018
+Team name Cumul. ratio # Best # ⩽ 0.1% # ⩽ 0.5% # ⩽ 1% # ⩽ 2% # ⩽ 3%
+CIMAT Team 99.93 34 49 95 100 100 100
+reko 99.85 78 81 88 93 99 100
+MJG 99.80 24 58 87 95 98 100
+CUiB 99.72 19 48 82 89 97 100
+Table 3For the ﬁrst four teams: their ﬁnal score, how many times they computed the best
+solution, and how many times their solution isx% close to the best solution, on the private set.
+12th place: Saket Saurabh, P. S. Srinivasan, and Prafullkumar Tale (team SSPSPT from
+the Institute Of Mathematical Sciences, HBNI, Chennai and the International Institute
+of Information Technology, Bangalore) got an average ratio of 82.61/100
+github.com/pptale/PACE18
+13th place: Harumi Haraguchi, Hiroshi Arai, Shiyougo Akiyama, and Masaki Kubonoya
+(team Haraguchi laboratory from Ibaraki University) got an average ratio of 80.73/100
+github.com/Harulabo/pace2018
+Eleven more teams participated in this track but did not ﬁnalize their submission by
+sharing a link to their code. Table 3 shows that the second team (reko) was more often the
+one reporting a best solution. However, the ﬁrst team (CIMAT Team) was more consistently
+very close to those best solutions.
+5 PACE organization
+In September 2018, the PACE 2018 Program Committee transferred to the Steering Com-
+mittee. The Steering Committee and the PACE 2018 Program Committee are as follows.
+Steering
+committee:
+Édouard Bonnet ENS Lyon
+Holger Dell Saarland Informatics Campus
+Thore Husfeldt ITU Copenhagen & Lund University
+Bart M. P. Jansen (chair) Eindhoven University of Technology
+Petteri Kaski Aalto University
+Christian Komusiewicz Philipps-Universität Marburg
+Frances A. Rosamond University of Bergen
+Florian Sikora Paris-Dauphine University
+T rack A, B, C: Édouard Bonnet ENS Lyon
+Florian Sikora Paris-Dauphine University
+The Program Committee of PACE 2019 will be chaired by Johannes Fichte (TU Dresden)
+and Markus Hecher (TU Vienna).
+6 Conclusion
+We thank all the participants for their enthusiasm and look forward to the next PACE. We
+are particularly happy that this edition attracted many people outside the parameterized
+complexity community, and wish that this will continue for the future editions.
+We welcome anyone who is interested to add their name to the mailing list on the
+website [36] to receive PACE updates and join the discussion. In particular, plans for
+PACE 2019 will be posted there.
+
+===== PAGE 13 =====
+
+É. Bonnet, F. Sikora 26:13
+References
+1 Michael Abseher, Nysret Musliu, and Stefan Woltran. htd - A free, open-source framework
+for (customized) tree decompositions and beyond. In Domenico Salvagnin and Michele Lom-
+bardi, editors, Proceedings of the 14th International Conference on Integration of AI and
+OR Techniques in Constraint Programming (CPAIOR ’17), volume 10335 ofLecture Notes
+in Computer Science, pages 376–386. Springer, 2017.doi:10.1007/978-3-319-59776-8_
+30.
+2 Max Bannach and Sebastian Berndt. Practical access to dynamic programming on tree
+decompositions. In 26th Annual European Symposium on Algorithms, ESA 2018, August
+20-22, 2018, Helsinki, Finland, pages 6:1–6:13, 2018. URL: https://doi.org/10.4230/
+LIPIcs.ESA.2018.6, doi:10.4230/LIPIcs.ESA.2018.6.
+3 Max Bannach, Sebastian Berndt, and Thorsten Ehlers. Jdrasil: A modular library for com-
+puting tree decompositions. In Costas S. Iliopoulos, Solon P. Pissis, Simon J. Puglisi, and
+Rajeev Raman, editors,Proceedings of the 16th International Symposium on Experimental
+Algorithms (SEA 2017), volume 75 of Leibniz International Proceedings in Informatics
+(LIPIcs), pages 28:1–28:21, Dagstuhl, Germany, 2017. URL:http://drops.dagstuhl.de/
+opus/volltexte/2017/7605, doi:10.4230/LIPIcs.SEA.2017.28.
+4 Max Bannach, Sebastian Berndt, Thorsten Ehlers, and Dirk Nowotka. SAT-encodings of
+tree decompositions. SAT COMPETITION 2018, page 72, 2018.
+5 Sebastian Berndt. Computing tree width: From theory to practice and back. InConference
+on Computability in Europe, pages 81–88. Springer, 2018.
+6 Andreas Björklund, Thore Husfeldt, Petteri Kaski, and Mikko Koivisto. Fourier meets
+möbius: fast subset convolution. In Proceedings of the 39th Annual ACM Symposium
+on Theory of Computing, San Diego, California, USA, June 11-13, 2007, pages 67–74,
+2007. URL: http://doi.acm.org/10.1145/1250790.1250801, doi:10.1145/1250790.
+1250801.
+7 Johannes Blum and Sabine Storandt. Computation and growth of road network dimensions.
+In International Computing and Combinatorics Conference, pages 230–241. Springer, 2018.
+8 Hans L. Bodlaender, Marek Cygan, Stefan Kratsch, and Jesper Nederlof. Deterministic
+single exponential time algorithms for connectivity problems parameterized by treewidth.
+Inf. Comput., 243:86–111, 2015. URL: https://doi.org/10.1016/j.ic.2014.12.008,
+doi:10.1016/j.ic.2014.12.008.
+9 Jarosław Byrka, Fabrizio Grandoni, Thomas Rothvoß, and Laura Sanità. Steiner tree
+approximation via iterative randomized rounding. J. ACM, 60(1):6:1–6:33, 2013. URL:
+http://doi.acm.org/10.1145/2432622.2432628, doi:10.1145/2432622.2432628.
+10 Miroslav Chlebík and Janka Chlebíková. The Steiner tree problem on graphs: Inapprox-
+imability results.Theor. Comput. Sci., 406(3):207–214, 2008. URL:https://doi.org/10.
+1016/j.tcs.2008.06.046, doi:10.1016/j.tcs.2008.06.046.
+11 Marek Cygan, Fedor V. Fomin, Łukasz Kowalik, Daniel Lokshtanov, Dániel Marx,
+Marcin Pilipczuk, Michał Pilipczuk, and Saket Saurabh. Parameterized Algorithms.
+Springer, 2015. URL: https://doi.org/10.1007/978-3-319-21275-3, doi:10.1007/
+978-3-319-21275-3.
+12 Marek Cygan, Jesper Nederlof, Marcin Pilipczuk, Michał Pilipczuk, Johan M. M. van Rooij,
+and Jakub Onufry Wojtaszczyk. Solving connectivity problems parameterized by treewidth
+in single exponential time. InIEEE 52nd Annual Symposium on Foundations of Computer
+Science, FOCS 2011, Palm Springs, CA, USA, October 22-25, 2011, pages 150–159, 2011.
+URL: https://doi.org/10.1109/FOCS.2011.23, doi:10.1109/FOCS.2011.23.
+13 Holger Dell, Thore Husfeldt, Bart M. P. Jansen, Petteri Kaski, Christian Komusiewicz,
+and Frances A. Rosamond. The ﬁrst parameterized algorithms and computational exper-
+iments challenge. In Jiong Guo and Danny Hermelin, editors,Proceedings of the 11th In-
+IPEC 2018
+
+===== PAGE 14 =====
+
+26:14 PACE 2018
+ternational Symposium on Parameterized and Exact Computation (IPEC 2016), volume 63
+of Leibniz International Proceedings in Informatics (LIPIcs), pages 30:1–30:9, Dagstuhl,
+Germany, 2017. URL: http://drops.dagstuhl.de/opus/volltexte/2017/6931, doi:
+10.4230/LIPIcs.IPEC.2016.30.
+14 Holger Dell, Christian Komusiewicz, Nimrod Talmon, and Mathias Weller. The PACE 2017
+parameterized algorithms and computational experiments challenge: The second iteration.
+In 12th International Symposium on Parameterized and Exact Computation, IPEC 2017,
+September 6-8, 2017, Vienna, Austria, pages 30:1–30:12, 2017. URL: https://doi.org/
+10.4230/LIPIcs.IPEC.2017.30, doi:10.4230/LIPIcs.IPEC.2017.30.
+15 Michael Dom, Daniel Lokshtanov, and Saket Saurabh. Kernelization lower bounds through
+colors and ids. ACM Trans. Algorithms, 11(2):13:1–13:20, 2014. URL: http://doi.acm.
+org/10.1145/2650261, doi:10.1145/2650261.
+16 Stuart E. Dreyfus and Robert A. Wagner. The Steiner problem in graphs. Networks,
+1(3):195–207, 1971.
+17 Eugene F. Dumitrescu, Allison L. Fisher, Timothy D. Goodrich, Travis S. Humble, Blair D.
+Sullivan, and Andrew L. Wright. Benchmarking treewidth as a practical component of
+tensor-network–based quantum simulation.arXiv preprint arXiv:1807.04599, 2018.
+18 Pavel Dvořák, Andreas Emil Feldmann, Dušan Knop, Tomáš Masařík, Tomáš Toufar, and
+Pavel Veselý. Parameterized approximation schemes for Steiner trees with small number
+of Steiner vertices. In Rolf Niedermeier and Brigitte Vallée, editors,35th Symposium on
+Theoretical Aspects of Computer Science, STACS 2018, February 28 to March 3, 2018,
+Caen, France, volume 96 ofLIPIcs, pages 26:1–26:15. Schloss Dagstuhl - Leibniz-Zentrum
+fuer Informatik, 2018. URL: https://doi.org/10.4230/LIPIcs.STACS.2018.26, doi:
+10.4230/LIPIcs.STACS.2018.26.
+19 Ranel E. Erickson, Clyde L. Monma, and Arthur F. Veinott Jr. Send-and-split method
+for minimum-concave-cost network ﬂows. Math. Oper. Res., 12(4):634–664, 1987. URL:
+https://doi.org/10.1287/moor.12.4.634, doi:10.1287/moor.12.4.634.
+20 Johannes K Fichte, Markus Hecher, Neha Lodha, and Stefan Szeider. An smt approach to
+fractional hypertree width.technical report, 2018.
+21 Johannes Klaus Fichte, Markus Hecher, Michael Morak, and Stefan Woltran. Answer
+set solving with bounded treewidth revisited. In Marcello Balduccini and Tomi Janhunen,
+editors, Proceedings of 14th International Conference on Logic Programming and Nonmono-
+tonic Reasoning - (LPNMR 2017), volume 10377 ofLecture Notes in Computer Science,
+pages 132–145. Springer, 2017.doi:10.1007/978-3-319-61660-5_13.
+22 Johannes Klaus Fichte, Markus Hecher, Michael Morak, and Stefan Woltran. DynASP2.5:
+Dynamic programming on tree decompositions in action. In Proceedings of the 12th
+International Symposium on Parameterized and Exact Computation (IPEC 2017), Leib-
+niz International Proceedings in Informatics (LIPIcs), Dagstuhl, Germany, 2017. doi:
+10.4230/LIPIcs.IPEC.2017.17.
+23 Johannes Klaus Fichte, Markus Hecher, Stefan Woltran, and Markus Zisser. Weighted
+model counting on the GPU by exploiting small treewidth. In 26th Annual European
+Symposium on Algorithms, ESA 2018, August 20-22, 2018, Helsinki, Finland , pages
+28:1–28:16, 2018. URL: https://doi.org/10.4230/LIPIcs.ESA.2018.28, doi:10.4230/
+LIPIcs.ESA.2018.28.
+24 Bernhard Fuchs, Walter Kern, Daniel Mölle, Stefan Richter, Peter Rossmanith, and
+Xinhui Wang. Dynamic programming for minimum Steiner trees. Theory Comput.
+Syst., 41(3):493–500, 2007. URL: https://doi.org/10.1007/s00224-007-1324-4, doi:
+10.1007/s00224-007-1324-4.
+25 SergeGaspers, JoachimGudmundsson, MitchellJones, JuliánMestre, andStefanRümmele.
+Turbochargingtreewidthheuristics. InJiongGuoandDannyHermelin, editors, Proceedings
+
+===== PAGE 15 =====
+
+É. Bonnet, F. Sikora 26:15
+of the 11th International Symposium on Parameterized and Exact Computation (IPEC
+2016), volume 63 ofLeibniz International Proceedings in Informatics (LIPIcs), pages 13:1–
+13:13, Dagstuhl, Germany, 2017. URL: http://drops.dagstuhl.de/opus/volltexte/
+2017/6932, doi:10.4230/LIPIcs.IPEC.2016.13.
+26 Martin Josef Geiger. Implementation of a metaheuristic for the steiner tree problem in
+graphs. Mendeley Data. v1. doi:10.17632/yf9vpkgwdr.1.
+27 Edgar N. Gilbert and Henry O. Pollak. Steiner minimal trees.SIAM Journal on Applied
+Mathematics, 16(1):1–29, 1968.
+28 L.W. van der Graaﬀ. Dynamic programming on Nice Tree Decompositions. Master’s thesis,
+Utrecht University, 2015. URL:https://dspace.library.uu.nl/handle/1874/309652.
+29 Stefan Hougardy, Jannik Silvanus, and Jens Vygen. Dijkstra meets Steiner: A fast exact
+goal-oriented Steiner tree algorithm.Math. Program. Comput., 9(2):135–202, 2017. URL:
+https://doi.org/10.1007/s12532-016-0110-1, doi:10.1007/s12532-016-0110-1.
+30 Frank K. Hwang, Dana S. Richards, and Pawel Winter.The Steiner tree problem, volume 53.
+Elsevier, 1992.
+31 Yoichi Iwata. Linear-Time Kernelization for Feedback Vertex Set. In Ioannis Chatzi-
+giannakis, Piotr Indyk, Fabian Kuhn, and Anca Muscholl, editors, Proceedings of the
+44th International Colloquium on Automata, Languages, and Programming (ICALP 2017),
+volume 80 ofLeibniz International Proceedings in Informatics (LIPIcs), pages 68:1–68:14,
+2017. doi:10.4230/LIPIcs.ICALP.2017.68.
+32 Krzysztof Kiljan and Marcin Pilipczuk. Experimental evaluation of parameterized al-
+gorithms for feedback vertex set.arXiv preprint arXiv:1803.00925, 2018.
+33 Neha Lodha, Sebastian Ordyniak, and Stefan Szeider. SAT-encodings for special treewidth
+and pathwidth. InProceedings of the 20th International Conference on Theory and Applic-
+ations of Satisﬁability Testing (SAT 2017), volume 10491 ofLecture Notes in Computer
+Science, pages 429–445. Springer, 2017.doi:10.1007/978-3-319-66263-3_27.
+34 Daniel Mölle, Stefan Richter, and Peter Rossmanith. Enumerate and expand: Im-
+proved algorithms for connected vertex cover and tree cover. Theory Comput. Syst.,
+43(2):234–253, 2008. URL: https://doi.org/10.1007/s00224-007-9089-3, doi:10.
+1007/s00224-007-9089-3.
+35 Networks project, 2017. URL:http://www.thenetworkcenter.nl.
+36 Parameterized Algorithms and Computational Experiments website, 2015–2018. URL:
+https://pacechallenge.org.
+37 Daniel Rehfeldt. A generic approach to solving the Steiner tree problem and variants.
+Master’s thesis, 2015.
+38 Gabriel Robins and Alexander Zelikovsky. Tighter bounds for graph Steiner tree approx-
+imation. SIAM Journal on Discrete Mathematics, 19(1):122–134, 2005.
+39 Ondřej Suchý. Extending the Kernel for Planar Steiner Tree to the Number of
+Steiner Vertices. Algorithmica, 79(1):189–210, 2017. URL: https://doi.org/10.1007/
+s00453-016-0249-1, doi:10.1007/s00453-016-0249-1.
+40 Hisao Tamaki. Positive-instance driven dynamic programming for treewidth. In Kirk Pruhs
+andChristianSohler, editors, 25th Annual European Symposium on Algorithms (ESA 2017),
+volume 87 ofLeibniz International Proceedings in Informatics (LIPIcs), pages 68:1–68:13,
+Dagstuhl, Germany, 2017.doi:10.4230/LIPIcs.ESA.2017.68.
+41 Tom C. van der Zanden and Hans L. Bodlaender. Computing treewidth on the GPU. In
+Proceedings of the 12th International Symposium on Parameterized and Exact Computa-
+tion (IPEC 2017), Leibniz International Proceedings in Informatics (LIPIcs), Dagstuhl,
+Germany, 2017. doi:10.4230/LIPIcs.IPEC.2017.29.
+IPEC 2018
+
+===== PAGE 16 =====
+
+26:16 PACE 2018
+42 Rim van Wersch and Steven Kelk. ToTo: An open database for computation, storage
+and retrieval of tree decompositions. Discrete Applied Mathematics, 217:389–393, 2017.
+doi:10.1016/j.dam.2016.09.023.

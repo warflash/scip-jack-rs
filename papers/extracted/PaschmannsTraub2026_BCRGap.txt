@@ -1,0 +1,4492 @@
+﻿SOURCE: PaschmannsTraub2026_BCRGap.pdf
+PAGES: 73
+EXTRACTOR: pypdf 6.10.0 (Unicode text), pdfplumber fallback
+
+
+===== PAGE 1 =====
+
+The Bidirected Cut Relaxation for Steiner Tree:
+Better Integrality Gap Bounds and the Limits of Moat Growing
+Paul Paschmanns∗ Vera Traub†
+Abstract
+The Steiner Tree problem asks for the cheapest way of connecting a given subset of the
+vertices in an undirected graph. One of the most prominent linear programming relaxations for
+Steiner Tree is the Bidirected Cut Relaxation (BCR). Determining the integrality gap of this
+relaxation is a long-standing open question. For several decades, the best known upper bound
+was 2, which is achievable by standard techniques. Only very recently, Byrka, Grandoni, and
+Traub [FOCS 2024] showed that the integrality gap of BCR is strictly below 2.
+We prove that the integrality gap of BCR is at most 1 .898, improving significantly on the
+previous bound of 1 .9988. For the important special case where a terminal minimum spanning
+tree is an optimal Steiner tree, we show that the integrality gap is at most 12
+7 , by providing
+a tight analysis of the dual-growth procedure by Byrka et al. To obtain the general bound
+of 1 .898 on the integrality gap, we generalize their dual growth procedure to a broad class of
+moat-growing algorithms. Moreover, we prove that no such moat-growing algorithm yields dual
+solutions certifying an integrality gap below 12
+7 .
+Finally, we observe an interesting connection to the Hypergraphic Relaxation.
+∗Department of Computer Science, ETH Zurich, Zurich, Switzerland. Email: paul.paschmanns@inf.ethz.ch.
+†Department of Computer Science, ETH Zurich, Zurich, Switzerland. Email: vtraub@ethz.ch.
+arXiv:2602.19879v1  [cs.DS]  23 Feb 2026
+
+===== PAGE 2 =====
+
+Contents
+1 Introduction 1
+1.1 Our Contributions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 2
+1.2 Further Related Work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 3
+1.3 Structure of the Paper . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+2 Overview of our Techniques 4
+2.1 Dual Growth with Merge Plans . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 5
+2.2 Choosing the Merge Plan . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 7
+2.3 Analyzing the Dual Growth Algorithm . . . . . . . . . . . . . . . . . . . . . . . . . . 10
+3 Merge Plans 17
+4 Preliminary Remarks on the Moat Growing Algorithm 21
+5 Feasibility of Strictly γ-Good Merge Plans 25
+5.1 Tight, Active, and Safe Paths . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+5.2 Meeting Points and the Length of Safe Paths . . . . . . . . . . . . . . . . . . . . . . 28
+5.3 The Main Invariant . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+5.4 The Invariant Holds as long as all Active Paths are Safe . . . . . . . . . . . . . . . . 36
+5.5 All Active Paths are Safe . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 41
+6 Existence of Good Merge Plans 48
+6.1 Defining the Function ρI and Bounding OPT . . . . . . . . . . . . . . . . . . . . . . 48
+6.2 Existence of a γ-Good Merge Plan . . . . . . . . . . . . . . . . . . . . . . . . . . . . 50
+6.3 Calculating the Upper Bound on the Integrality Gap . . . . . . . . . . . . . . . . . . 53
+7 Lower Bound for Merge Plan Based Dual Solutions 55
+8 BCR and the Hypergraphic Relaxation 62
+A Invariance under Subdivision 69
+
+===== PAGE 3 =====
+
+1 Introduction
+The Steiner Tree problem is one of the most fundamental problems in Network Design and has
+a multitude of applications (see e.g. [HRW92; PS02; BZ15]). We are given an undirected graph
+G = (V, E) with positive edge costs c: E → R>0 and a set R ⊆ V . The task is to find a tree T
+in G that connects all vertices from R and has minimal cost c (T ) = P
+e∈T c(e). We refer to the
+vertices in R as terminals and to other vertices as Steiner vertices.
+The Minimum Spanning Tree problem, or MST problem for short, is a special case of Steiner
+Tree (where R = V ). However, in contrast to the MST problem, approximating the Steiner Tree
+problem better than a factor of 96
+95 is NP-hard [CC08]. Computing a spanning tree on the terminals
+(in the metric closure of the instance) yields a simple 2-approximation for Steiner Tree [KMB81].
+The currently best-known approximation algorithm for Steiner Tree is due to Byrka, Grandoni,
+Rothvoss, and Sanit´ a [BGRS13] and achieves an approximation factor of ln(4) + ε (for any fixed
+ε > 0). See also [TZ25] for a different algorithm achieving the same approximation factor.
+The natural linear programming relaxation for Steiner Tree, which requires a fractional value
+of at least one for each cut separating two terminals, has an integrality gap of exactly 2, even in
+the special case of minimum spanning trees. Several stronger relaxations have been proposed, the
+most prominent ones being the Bidirected Cut Relaxation and the Hypergraphic LP (also known
+as the Directed Component LP). Several other LPs turned out to be equivalent to one of these two
+relaxations, see e.g. [GM93; CKP10; CDV11].
+The Hypergraphic LP (which we formally define in Section 8) has been used in the approxima-
+tion algorithm from [BGRS13] and it is known to have an integrality gap of at most ln 4 as shown
+in [GORZ12] (see also [TZ25]). However, one important drawback of this relaxation is that it has
+an exponential number of variables (and constraints) and it is NP-hard to solve [GORZ12]. One
+can solve the Hypergraphic LP approximately up to a factor of 1 + ε in polynomial time for fixed
+ε > 0, but the known algorithms for this rely on enumerating all subsets of terminals of size up to
+21/ε and are thus very slow.
+The Bidirected Cut Relaxation in contrast has only a polynomial number of variables. It is a
+natural cut-based relaxation in the bidirected graph. More precisely, we replace every undireced
+edge {u, w} of the graph G by two bidirected edges (u, v) and (v, u) of the same cost and we write ⃗E
+to denote the resulting directed edge set. If instead of searching for a Steiner tree in the undirected
+graph (V, E), we search for a Steiner tree in (V, ⃗E) that is oriented towards some (arbitrarily chosen)
+root r ∈ R, we naturally obtain the Bidirected Cut Relaxation:
+min
+X
+e∈ ⃗E
+c(e) · xe
+X
+e∈δ+(S)
+xe ≥ 1 for all S ⊆ V \ {r} with S ∩ R ̸= ∅
+xe ≥ 0 for all e ∈ ⃗E,
+(BCR)
+where δ+(S) := {(v, w) ∈ ⃗E : v ∈ S, w /∈ S} denotes the outgoing edges of S. The value of BCR
+is independent of the choice of the root r ∈ R (see e.g. [GM93]). Work of Fulkerson and Edmonds
+on spanning arborescences [Ful74; Edm67] implies that in the special case of minimum spanning
+trees, that is when R = V , the value of BCR is equal to the cost of a minimum spanning tree in G.
+For general instances of Steiner Tree, the best known lower bound on the integrality gap of BCR
+is 6
+5 [Vic20] (improving on earlier bounds of 36
+31 from [BGRS13] and 8
+7 by Goemans and Skutella;
+see [KPT11]).
+1
+
+===== PAGE 4 =====
+
+Despite extensive work on the Bidirected Cut Relaxation (see the discussion in Section 1.2),
+until very recently it remained open whether the integrality gap of BCR is better than 2 and thus
+better than the integrality gap of the natural undirected relaxation. In a recent breakthrough,
+Byrka, Grandoni, and Traub [BGT24] proved that the integrality gap of BCR is at most 1 .9988.
+To obtain this result, they construct a solution to the dual of BCR via a moat-growing procedure
+(as it is used in standard primal-dual algorithms). However, analyzing their construction in this
+bidirected setting is much more challenging than the analysis of standard primal-dual algorithms.
+While [BGT24] gave an analysis that shows that the integrality gap of BCR is below 2, they did
+not provide a tight analysis of their construction and it remained open whether much better upper
+bounds on the integrality gap can be achieved via such a moat-growing approach.
+1.1 Our Contributions
+We provide a new and much stronger analysis of the construction from [BGT24], generalize their
+construction to a more general class of moat-growing algorithms, and provide a lower bound example
+for what is achievable via this approach. Our main result is a significantly improved upper bound
+on the integrality gap of BCR.
+Theorem 1.1. The integrality gap of the Bidirected Cut Relaxation for the Steiner Tree problem
+is at most 1.898.
+As in [BGT24], we bound the integrality gap by the ratio between the cost of some Steiner tree
+and the value of some solution to the dual of BCR. By taking the metric closure, we may assume
+that the graph G is complete and the cost function c satisfies the triangle inequality. Then one
+possible Steiner tree to consider is a terminal MST, which is a minimum cost spanning tree in the
+complete graph G[R] induced by the terminals. For a fixed instance of the Steiner Tree problem,
+we denote the cost of a terminal MST by TMST. A well-known fact, which was already utilized
+by [BGT24], is that TMST is always at most twice the value of BCR (see Proposition 6.11). An
+immediate consequence of this is that the integrality gap of BCR is less than 2 whenever the cost
+OPT of a cheapest Steiner tree is (significantly) less than TMST.
+For this reason, instances where a terminal MST is an optimum Steiner tree are the key case
+to consider when proving that BCR has an integrality gap of less than 2.
+Definition 1.2 (MST-optimal instances). An instance of the Steiner Tree problem is MST-optimal
+if we have TMST = OPT, that is, a terminal MST is a cheapest Steiner tree.
+We also remark that the best-known lower bounds on the integrality gap of BCR stem from
+MST-optimal instances [Vic20]. For this important special case, we prove a better upper bound on
+the integrality gap of BCR. To this end, we consider the algorithm from [BGT24] for constructing
+dual solutions and provide a tight analysis of it.
+Theorem 1.3. The integrality gap of the Bidirected Cut Relaxation for Steiner Tree restricted to
+MST-optimal instances is at most 12
+7 .
+To prove Theorem 1.3, we crucially deviate from the proof strategy from [BGT24]. For an
+overview of the main ideas behind our new analysis, we refer to Section 2.3.
+In order to prove our upper bound of 1 .898 for the integrality gap of BCR for general Steiner
+tree instances, we generalize the construction from [BGT24] to what we call merge plan based
+dual growth procedures. This is a class of procedures for constructing dual solutions for BCR
+which captures algorithms that can be viewed as a natural directed analogue of the standard moat
+2
+
+===== PAGE 5 =====
+
+growing algorithms (as they are used in primal-dual algorithms). In Section 7, we show that not
+only our analysis of the construction from [BGT24] is tight for MST-optimal instances, but even
+no procedure from the much broader class of merge plan based dual growth procedures can lead to
+a better dual solution for BCR.
+Theorem 1.4. For every ε > 0, there is an MST-optimal instance such that no merge plan based
+dual solution has value more than
+  7
+12 + ε
+
+TMST.
+For a concise definition of merge plan based dual solutions, we refer to Section 7. Theo-
+rem 1.4 implies that significantly different techniques will be needed if one wants to prove that
+BCR has an integrality gap below 12
+7 , even for the special case of MST-optimal instances.
+Finally, we prove an interesting connection to the integrality gap of the Hypergraphic Relaxation
+for Steiner tree, whose value we denote by HYP. (For a definition of the Hypergraphic Relaxation,
+see Section 8.) We write OPT( I) to denote the cost of a cheapest Steiner tree for instance I, and
+we will simply write OPT if the instance is fixed and clear from the context.
+Theorem 1.5. We have
+sup
+HYP(I)
+BCR(I) : I instance of Steiner Tree
+
+= sup
+OPT(I)
+BCR(I) : I MST-optimal instance of Steiner Tree
+
+.
+(1)
+Observe that the right-hand side of (1) is the integrality gap of the Bidirected Cut Relaxation
+for Steiner Tree restricted to MST-optimal instances, which by Theorem 1.3 is at most 12
+7 .
+1.2 Further Related Work
+The integrality gap of BCR has been studied for multiple decades, with [BGT24] giving the first
+upper bound strictly below 2 for the general case.
+For the special case of quasi-bipartite instances (instances without any neighboring Steiner
+vertices), Rajagopalan and Vazirani proved that the integrality gap is at most 3
+2 [RV99], which was
+then improved to 4
+3 by Chakrabarty, Devanur, and Vazirani [CDV11]. Later, Feldmann, K¨ onemann,
+Olver, and Sanit` a [FKOS16] proved that for quasi-bipartite instances, BCR is equivalent to the
+Hypergraphic Relaxation, and the same applies even for the more general class of claw-free instances
+(instances that do not contain a Steiner vertex with three neighboring Steiner vertices). Together
+with [GORZ12], this implies an integrality gap of at most 73
+60 on quasi-bipartite instances (for both
+BCR and HYP). Hyatt-Denesik, Jabal Ameli, and Sanit´ a [HJS26] proved an upper bound of 991
+732
+on the integrality gap of HYP on claw-free instances, which by [FKOS16] implies the same upper
+bound on the integrality of BCR on claw-free instances.
+Byrka, Grandoni, and Traub [BGT25] considered a generalization of BCR to the Steiner Forest
+problem and showed that this relaxation has some promising properties. In particular, they proved
+that its integrality gap is at most 16
+9 on instances with half-integral optimal LP solutions. While
+very recently approximation factors strictly below 2 have been achieved for Steiner Forest [Ahm+25;
+GT25], no LP relaxation solvable in polynomial-time is known to have an integrality gap strictly
+below 2 for Steiner Forest.
+While the proof from [BGT24] can be turned into a polynomial-time algorithm for Steiner
+Tree with an approximation factor of 1 .9988 and thus strictly better than 2, significantly better
+3
+
+===== PAGE 6 =====
+
+approximation algorithms for Steiner Tree were known before. 1 The first better-than-two approx-
+imation [Zel93] uses a relative approach. This has been improved multiple times ([Zel96; KZ97;
+HP99; PS00]) culminating in a 1 .55-approximation [RZ05]. The currently best known approxima-
+tion algorithms have an approximation factor of ln 4 + ε < 1.4. This was first achieved by Byrka,
+Grandoni, Rothvoss, and Sanit` a [BGRS13] using an iterative rounding technique. Later, Traub
+and Zenklusen [TZ25] obtained the same guarantee using a local search algorithm.
+1.3 Structure of the Paper
+The remainder of this paper is structured as follows. In Section 2, we describe the techniques that
+we use to prove our upper bounds on the integrality gap (Theorems 1.1 and 1.3). We start with
+a brief recap of the classical moat growing procedure in an undirected setting, then move on to
+a directed version that generalizes the dual-growth procedure from [BGT24], and end the section
+with an outline of our new analysis of this dual growth procedure.
+Besides an instance of the Steiner tree problem, our dual growth algorithm additionally takes a
+so-called merge plan as an input. This object classifies which terminal sets are active at each point
+in time during the dual growth. In Section 3, we discuss several useful properties of such merge
+plans.
+In Section 4, we then introduce some technical assumptions about our instances and merge
+plans that we can make without loss of generality and that will simplify our proofs later on. In
+Section 5, we provide our new analysis of the dual growth procedure. That is, we show that (under
+the assumptions established in Section 4) our dual growth procedure indeed produces a large dual
+solution if we provide it with a good merge plan.
+In Section 6, we then complete the proof of our new upper bound on the integrality gap of BCR
+(Theorem 1.1). To this end, we simultaneously construct a Steiner tree and a merge plan, such
+that the cost of the Steiner tree is at most by a factor of 1 .898 larger than the value of the dual
+solution to BCR that we obtain from the merge plan (using our dual-growth procedure analyzed
+in Section 5).
+Finally, Sections 7 and 8 are independent of our proof of the new upper bound on the integrality
+gap. In Section 7, we prove our lower bound on what is achievable using our moat-growing algorithm
+(Theorem 1.4). In Section 8, we discuss a connection to the Hypergraphic Relaxation, that is we
+prove Theorem 1.5.
+Most figures in this paper show (partial) results of an undirected or bidirected moat growing
+procedure. There are animated versions of these figures showing the progress of the algorithm over
+time available at people.inf.ethz.ch/ppaschmanns/.
+2 Overview of our Techniques
+In this section, we give an outline of how we prove Theorems 1.1 and 1.3. First, we introduce a
+general class of moat-growing algorithms, which we call dual growth with merge plan (Section 2.1).
+Next, in Section 2.2, we discuss how we choose the merge plans, which are given as an input to the
+moat-growing algorithm. Finally, in Section 2.3, we provide an outline of our new analysis of the
+moat-growing algorithm for BCR.
+1Our proof implies that the relative greedy algorithm by Zelikovsky [Zel96] computes a Steiner tree of cost at most
+1.898 times the value of BCR. (See Section 6.)
+4
+
+===== PAGE 7 =====
+
+2.1 Dual Growth with Merge Plans
+The key part of our proof is the construction of solutions to the dual of BCR. This dual linear
+program is given by
+max
+X
+S⊆V \{r}:
+S∩R̸=∅
+yS
+X
+S:e∈δ+(S)
+yS ≤ c(e) for all e ∈ ⃗E
+yS ≥ 0 for all S ⊆ V.
+(Dual-BCR)
+Note that we wrote the dual linear program such that it has variables for all subsets of V , but only
+those containing some terminal, but not the root, contribute to the objective function. We can
+always set all other dual variables to zero in an optimal dual solution.
+To construct a dual solution, we use a moat growing algorithm—similar to [BGT24] and stan-
+dard primal-dual methods. Such moat growing algorithms start with the dual solution y = 0. Then,
+for each terminal s ∈ R, they take the smallest set Us that contains s and whose corresponding
+dual variable can be increased without violating the dual constraints. This is
+Us = {v ∈ V : v is reachable from s by a path of tight edges },
+where an edge e is tight if the corresponding constraint in the dual LP is satisfied with equality.
+Then the algorithm increases these dual variables (for all s ∈ R) at a unit speed, until any further
+improvement would lead to a violation of dual constraints. At this point, the sets Us change, and
+one can iterate this process. Moat growing algorithms do precisely this, except that at some times
+during the algorithm, some of the sets Us get merged into a single set. Then, instead of growing
+the dual variable for a set Us, we grow the dual variable for a set
+US = {v ∈ V : v is reachable from the set S by a path of tight edges }.
+where S ⊆ R is a subset possibly containing several terminals. For moat growing in undirected
+graphs, there is a natural point in time when two sets Us1, Us2 should be merged: this is when the
+corresponding terminals are connected by a path of tight edges. See Figure 1 for an example.
+In a bidirected graph, however, it is not obvious at all when two sets should be merged into a
+single one. The decision of when the sets “growing around the terminals” are merged is captured by
+the concept of a merge plan. For every time t during the dual growth algorithm, a merge plan has
+a partition S t of the terminal set R, where the sets growing around terminals are already merged
+at time t if and only if the terminals are part of the same part of the partition S t.
+Definition 2.1 (Merge Plan). A merge plan is a family M =
+ 
+S t
+t≥0 of partitions of R such that
+for every two terminals x, y ∈ R there exists a time mergeM (x, y) ≥ 0 such that x and y are in
+different parts of the partition S t if and only if 0 ≤ t ≤ mergeM (x, y). We call mergeM (x, y) the
+merge time of x and y.
+Note that the definition of a merge plan implies that for any times 0 ≤ t1 < t 2, the partition
+S t1 is a refinement of S t2. In particular, the partition changes only at a finite number of times.
+Moreover, there is some time t ≥ 0 such that |S t| = 1, that is S t = {R}.
+The dual growth algorithm with a given merge plan is described in Algorithm 1. We provide
+a generic version that could be applied to both directed and undirected graphs. To obtain a dual
+solution to BCR, we apply the algorithm to the bidirected graph. To obtain a dual solution to the
+natural undirected LP, one can apply it to the undirected graph.
+5
+
+===== PAGE 8 =====
+
+a b c d
+e f
+a b c d
+e f
+a b c d
+e f
+Figure 1: An example of the moat growing process for the undirected LP. The instance has four
+terminals a, d, e, f (shown as squares), and initially, we grow a set around each of these terminals
+(left picture). Once the sets Ua (red) and Ue (green) meet, we stop growing their corresponding
+dual variables and instead grow the dual variable US (brown) for the set S = {a, e}. Once, the
+vertex b is reachable from S = {a, e} by tight edges, it is included in the set US. The same applies
+symmetrically for the sets Ud (blue) and Uf (orange) and the vertex c. The colors on the edges
+indicate the contributions of the sets S ⊆ R to the tightness of the edges. An edge is tight once it
+is fully colored.
+Algorithm 1: Moat Growing with Merge Plan
+Input: a (directed or undirected) graph G = (V, E) with edge costs c: E → R≥0,
+a terminal set R ⊆ V , and a merge plan M =
+ 
+S t
+t≥0
+Output: a solution y to the dual linear program
+1 Initialize t = 0 and yU = 0 for all U ⊆ V .
+2 while
+S t > 1 do
+3 For S ∈ S t, define
+US = {v ∈ V : v is reachable from the set S by a path of tight edges }.
+4 Increase the time t and the dual variables yUS for S ∈ S t at unit rate until
+the partition S t changes or a new edge becomes tight.
+5 end
+6 return y
+We will choose the merge plan M so that we ensure the following. Whenever we grow a dual
+variable corresponding to a vertex setUS, then US contains the root r only if r ∈ S. This guarantees
+that all dual variables we grow, except for one dual variable at a time, contribute to the objective
+value of (Dual-BCR). Then the value of the dual solution resulting from Algorithm 1 is equal to
+the value of the merge plan M, which we define next.
+Definition 2.2. The value of a merge plan M =
+ 
+S t
+t≥0 is defined as
+value (M) =
+Z ∞
+0
+S t − 1 dt .
+Note that the value of a merge plan is finite because for every merge plan M =
+ 
+S t
+t≥0, there
+is some time t∗ such that |S t| = 1 for all t > t ∗.
+Both, the standard moat growing algorithm in undirected graphs and the construction of dual
+solutions from [BGT24], correspond to running Algorithm 1 with a particular choice of the merge
+plan M. The dual growth in the classical primal-dual algorithm in undirected graphs corresponds
+to Algorithm 1 with the canonical merge plan.
+6
+
+===== PAGE 9 =====
+
+Definition 2.3 (canonical merge plan). The canonical merge plan for an instance (G, c, R) of the
+Steiner Tree problem is the merge plan M with largest value that satisfies
+mergeM (x, y) ≤ 1
+2 dist (x, y) ∀x, y ∈ R, (2)
+where dist (x, y) is the length of a shortest x-y path in (G, c).
+The canonical merge plan has value 1
+2 TMST. For a proof of this fact and a more detailed
+discussion of the canonical merge plan and its properties, we refer to Section 3. The construction
+of dual solutions in [BGT24] for MST-optimal instances essentially 2 corresponds to Algorithm 1
+applied to the bidirected graph with a “scaled” version of the canonical merge plan: choose a
+suitable δ > 0 and let M be the merge plan with largest value satisfying
+mergeM (x, y) ≤ 1 + δ
+2 dist (x, y) ∀x, y ∈ R. (3)
+2.2 Choosing the Merge Plan
+Next, we discuss which properties a good merge plan should satisfy. On the one hand, we want the
+merge plan to have a large value. On the other hand, we want to ensure that the value of the dual
+solution resulting from Algorithm 1 is equal to the value of our merge plan, which is captured by
+the definition of a feasible merge plan.
+Definition 2.4 (feasible merge plan). A merge plan M is feasible for an instance I if Algorithm 1
+applied to the bidirected graph and the merge plan M satisfies: whenever we grow a dual variable
+corresponding to a set US, the set US contains the root r only if r ∈ S.
+Observation 2.5. If M is a feasible merge plan for an instance I, then Algorithm 1 yields a
+solution to Dual-BCR for I whose value is value (M).
+For MST-optimal instances, we will work with a scaled version of the canonical merge plan.
+More precisely, we choose M to be the merge plan with largest value that satisfies
+mergeM (x, y) ≤ 7
+12 dist (x, y) ∀x, y ∈ R. (4)
+This corresponds to the construction from [BGT24] with δ = 1
+6 and leads to a dual solution to
+BCR with a value of value (M) = 7
+12 TMST = 7
+12 OPT.
+Naturally, if the cost of a cheapest Steiner tree is much cheaper than TMST—in general, OPT
+could be as small as 1
+2 TMST—then we cannot expect to get dual solutions of value 7
+12 TMST. To
+address this, [BGT24] provide a reduction to a certain class of instances. Then they prove that for
+some sufficiently small δ > 0 the merge plan with largest value satisfying (3), is a feasible merge
+plan for this restricted class of instances.
+To explain what this class of instances is, we need the notion of components.
+Definition 2.6 (components, full components) . For a set X ⊆ V , we say that K ⊆ E is a
+component connecting X, if all vertices of X belong to the same connected component of (V, K).
+We say that K ⊆ E is a full component if it is the edge set of a tree whose leaves are terminals
+and whose other vertices are Steiner vertices.
+2One minor difference to the construction of [BGT24] is that their algorithm does not grow any dual variable
+corresponding to the set S ∈ S t containing the root. However, this difference is crucial in neither their nor our
+analysis. Moreover, [BGT24] first reduce to a particular class of instances (called γ-locally MST-optimal instances)
+and then apply this construction of dual solutions only to these instances.
+7
+
+===== PAGE 10 =====
+
+Observe that whenever there exists a set X ⊆ R and a component K connecting X, then we
+obtain a Steiner tree by taking the union of the component K and a terminal MST in the graph
+G/X arising from contraction of X (and possibly discarding some edges). This Steiner tree has
+cost (at most) c(K) + TMSTG/X. If
+c(K) < dropG (X) := TMST G − TMSTG/X ,
+then this Steiner tree is cheaper than a terminal MST in the original graph G. In this case we say
+that K is an improving component. If c(K) < (1 − γ) · dropG (X), we say that the component K
+is γ-improving. An instance is MST-optimal if and only if no improving component exists.
+Byrka, Grandoni, and Traub [BGT24] choose a sufficiently small number γ > 0 and show
+that the scaled version of the canonical merge plan is feasible for every instance that does not
+have any γ-improving component. Moreover, they provide a reduction to instances without γ-
+improving component. To this end they repeatedly contract γ-improving components, as long as
+they exist. They then observe that either only a small part of the instance gets contracted—in
+which case it suffices to prove a good lower bound on BCR in the contracted instance—or OPT
+must be significantly smaller than TMST, which immediately implies a better upper bound on the
+integrality gap than 2 because BCR ≥ 1
+2TMST.
+We strengthen the analysis from [BGT24] in two ways. First, we provide a significantly improved
+analysis for instances on which no γ-improving component exists. That is, we prove that for such
+instances there is a feasible merge plan of value 7−5γ
+12 · TMST. Moreover, we extend the analysis
+beyond the case where no γ-improving component exists.
+Next, we explain the condition that we prove to be sufficient for a merge plan being feasible. To
+see that our new condition is indeed less restrictive than the assumption from [BGT24], it will be
+useful to express their assumption in a different way. Namely, we will express drop G (X) in terms
+of the canonical merge plan. To this end we introduce the local value of a merge plan. We remark
+that for X = R, the local value of M for X is identical to the value of M.
+Definition 2.7 (local value of a merge plan) . Given a merge plan M =
+ 
+S t
+t≥0 and a
+nonempty set of terminals X ⊆ R, we define the local value of M for X as
+value (M, X) :=
+Z ∞
+0
+
+S ∈ S t : S ∩ X ̸= ∅
+	 − 1 dt .
+If M is the canonical merge plan, then we have drop G (X) = 2 · value (M, X) for all nonempty
+sets X ⊆ R, as we will show in Section 3 (Lemma 3.6). Hence, if Mδ is the (1 + δ)-scaled version
+of the canonical merge plan, i.e., Mδ is the merge plan with largest value satisfying (3), we have
+dropG (X) = 2
+1 + δ · value (Mδ, X) (5)
+for all nonempty sets X ⊆ R. We write cost( X) to denote the cost of a cheapest component K
+connecting a set X ⊆ R. Then a γ-improving component K connecting a set X ⊆ R exists if and
+only if
+cost(X) < (1 − γ) · 2
+1 + δ · value (Mδ, X) .
+When choosing δ = 1
+6 − 5
+6 γ (which is different from the choice of δ in [BGT24]), this leads to the
+definition of γ-cheap sets.
+8
+
+===== PAGE 11 =====
+
+Definition 2.8 (γ-cheap). Given γ ∈ [0, 1] and a merge plan M, we call a terminal set X ⊆ R
+γ-cheap with respect to M, if
+cost(X) < (1 − γ) · 12
+7 − 5γ · value (M, X) .
+Otherwise we say that X is γ-expensive.
+We will essentially prove that if for some γ ∈ [0, 1
+5] and a merge plan M, no γ-cheap set X ⊆ R
+exists, then the merge plan Mδ is feasible (for δ = 1
+6 − 5
+6 γ). This is already a strengthening
+of [BGT24], where the key difference is that our analysis allows us to choose the value of δ larger
+than in [BGT24].
+Nevertheless, to obtain the claimed upper bound of 1 .898 on the integrality gap of BCR, we
+prove an even stronger statement. The key insight here is that we can replace the assumption that
+no γ-cheap set exists by a less restrictive condition: whenever there is a γ-cheap set X ⊆ R, there
+must be two elements of X that are merged early.
+Definition 2.9 (γ-good). Let γ ∈ [0, 1
+5]. We say that a merge plan M is γ-good, if for all x, y ∈ R
+mergeM (x, y) ≤ 7 − 5γ
+12 dist (x, y) , (6)
+and for every terminal set X ⊆ R that is γ-cheap with respect to M, there are x, y ∈ X with x ̸= y
+satisfying
+mergeM (x, y) ≤ 7 − 5γ
+18 − 14γ dist (x, y) . (7)
+Up to some minor technical details, which we discuss in Section 4, we prove that any γ-good
+merge plan is feasible. For an outline of this proof, we refer to Section 2.3. By Observation 2.5, this
+immediately implies that any γ-good merge plan yields lower bounds on the value of (Dual-BCR),
+and hence on the value of BCR:
+Theorem 2.10. Let γ ∈ [0, 1
+5] and let M be a γ-good merge plan. Then
+BCR ≥ value (M) .
+For MST-optimal instances, the merge plan with maximum value satisfying (4), is a 0-good
+merge plan with value 7
+12 TMST (see Lemma 3.8). Thus, Theorem 2.10 implies Theorem 1.3.
+For general instances, we show in Section 6 that γ-good merge plans with large value exist:
+Theorem 2.11. For every Steiner tree instance and every γ ∈ (0, 1
+5], there exists a γ-good merge
+plan M with
+value (M) ≥ 7 − 5γ
+12
+
+TMST − TMST − OPT
+γ · 3 − 7γ
+9 − 7γ
+
+.
+Observe that for MST-optimal instances we have TMST − OPT = 0 and thus Theorem 2.11
+for arbitrarily small γ > 0 yields a merge plan with value arbitrarily close to 7
+12 TMST = 7
+12 OPT.
+In fact, in this case we can simply choose M to be a suitably scaled version of the canonical merge
+plan and use that the value of the canonical merge plan is 1
+2 TMST (Corollary 3.4).
+For general instances, we observe that for γ < 1
+5, we have 7−5γ
+12 > 1
+2. If TMST − OPT is suffi-
+ciently small, we then obtain a stronger lower bound on BCR than 1
+2 TMST ≥ 1
+2 OPT. Otherwise,
+TMST is much larger than OPT and thus BCR ≥ 1
+2 TMST already implies a better upper bound
+on the integrality gap of BCR than 2. Choosing the value of γ optimally, leads to an improved
+upper bound on the integrality gap of BCR compared to [BGT24]. To obtain the claimed upper
+bound of 1 .898 on the integrality gap, we use a stronger version of Theorem 2.11 and choose the
+value of γ depending on the Steiner tree instance. For details we refer to Section 6.
+9
+
+===== PAGE 12 =====
+
+s2ms1
+v
+6
+7 t6
+7 t
+2
+7 t
+Figure 2: An example of (a part of) an instance with two terminals s1 and s2, indicated as squares.
+The green and blue color indicate the contributions of the sets growings around s1 (green) and s2
+(blue) to the tightness of the edges. To the edge ( m, v) both sets contribute equally. The edges
+between si and m have length 6
+7 t each, and the two terminals can reach the vertex m at time 6
+7 t.
+However, they are merged only at time t = 7
+12 · dist (s1, s2). By this time they have reached the
+vertex v, which is at distance 2
+7 t from m. Thus, the edge from m to v effectively gets tight at
+speed 2.
+2.3 Analyzing the Dual Growth Algorithm
+In this section, we give an informal outline of our analysis of the dual growth procedure. We will
+first focus on the MST-optimal case with a particular merge plan, and only at the end of this section
+we will comment briefly on the extension to general instances and general γ-good merge plans.
+Consider an MST-optimal instance, let γ := 0, and let M be the merge plan with maximum
+value satisfying (4). The value of this merge plan is 7
+6 times the value of the canonical merge plan,
+and thus 7
+12 TMST (see Corollary 3.4). Moreover, because the merge plan M corresponds to the
+canonical merge plan scaled by a factor 1 + δ = 7
+6, by (5) we have
+dropG (X) = 12
+7 · value (M, X)
+for all nonempty X ⊆ R (see Lemma 3.6). Thus, the MST-optimality of the instance implies that
+there is no γ-cheap component for γ = 0.
+Recall that our goal is to show that if a set S ∈ S t (for some time t ≥ 0) does not contain the
+root r, then also the set US of vertices reachable from S by tight edges does not contain the root.
+By the choice of the merge plan, the vertices in S have a large distance from r, namely at least
+12
+7 t (otherwise, the vertices from S would have been already merged with r at time t). A natural
+strategy, already employed in [BGT24], is to prove that the set US cannot contain vertices that are
+too far away from S.
+Examples: Interactions of at most two Terminals. Let us start by considering some simple
+examples. Consider a set US growing around a single terminal, i.e. S = {s} for some terminal s.
+If there is no interaction with sets growing around other terminals, that is, if none of the vertices
+reachable from S is reachable from other terminals (yet), then we have
+US = {v ∈ V : dist (s, v) ≤ t}. (8)
+In other words, at time t, the set S can only reach vertices at distance at most t. If two sets
+growing around two different terminals interact, the situation can get more complicated. Figure 2
+shows that the sets can reach vertices at distance 8
+7 t. However, this is not a worst-case example.
+10
+
+===== PAGE 13 =====
+
+m
+v
+s2
+s1
+17
+18
+19
+1 2 1 2 1 2
+18
+m
+v
+s2
+s1
+m
+v
+s2
+s1
+(a part of) the instance t = 17 t = 18
+m
+v
+s2
+s1
+m
+v
+s2
+s1
+m
+v
+s2
+s1
+t = 19 t = 20 t = 21
+Figure 3: An example of two terminals interacting. The top left picture shows (a part of) an
+instance with two terminals s1 and s2, where the numbers indicate the cost/length of the edges.
+The other pictures indicate the contributions of the sets growing around s1 (green) and s2 (blue) to
+the tightness of the edges at different times t. The terminals s1 and s2 have distance 36 and have
+thus a merge time of (at most) 21. Observe that at time t = 18 the two sets meet at the vertex
+m, which is at distance 18 from s1 (and from s2). At time t = 21, the vertex v is reachable from
+s1 by a path of tight edges. The vertex v has distance 27 from s1 and thus between the meeting
+time t = 18 until the merge time t = 21, the maximum distance of vertices reachable from s1 grows
+effectively at speed 3. (This maximum distance is not continuous and there are “jumps”, but on
+average between the meeting time and the merge time it increases at speed 3.)
+11
+
+===== PAGE 14 =====
+
+m v. . .
+v
+ws2
+s3
+s1
+Figure 4: The left part of the figure shows (a part of) an instance with k terminals interacting.
+If they meet at the vertex m at time t = 1, then the edge ( m, v) afterwards becomes tight at
+speed k. However, this instance is not MST-optimal, because the star centered at m connecting
+the k terminals would be an improving component (for k > 2). (If the drop of this terminal set was
+smaller than k, then the terminals would have been merged much earlier and would not continue
+growing each on their own.)
+The example in the right part of the figure shows that even the interaction of just three terminals
+can lead to reaching far away vertices. In this example, the edges incident to the terminals are
+long, e.g. they could have length 1 each, whereas the other edges are short, e.g. they have length
+ε each for some small ε > 0. The figure shows the contributions of sets growing around the three
+terminals at time t = 1 + ε. The vertex w is reachable from s1 by a path of tight edges, but this
+path could be arbitrarily long. (The only bound on the distance of s1 and w that we can give in this
+example is 3 + 3ε by considering a non-tight path via one of the terminals s2 or s3. However, this
+bound is too weak to be useful.) Again, this instance is not MST-optimal, where a star centered
+at v connecting s1, s2, s3 is an improving component.
+Figure 3 shows that it is possible that a set reaches vertices at distance 9
+7 t and this turns out to
+be a worst-case example. 3
+We remark that the interaction of two terminals has already implicitly been analyzed tightly in
+[BGT24]. From now on, however, we will follow a different proof strategy than [BGT24].
+Safe Edges. If more than two disjoint sets S contribute to the same edge, then one could gen-
+eralize the example from Figure 2 to a situation, where a set S can reach vertices very far away.
+(See the left part of Figure 4.) Even worse, already the interaction of three sets can lead to a
+situation where S can reach vertices very far away. (See the right part of Figure 4.) However, a
+key observation is that both of the instances in this figure are not MST-optimal.
+If a set S “uses” an edge to which already two other disjoint sets contributed, we will say that
+this edge is not safe for S. (We refer to Definition 5.8 for a precise definition.) We will first consider
+the case that whenever a set S ∈ S t reaches a vertex v at time t via a path of tight edges, all edges
+of this path are safe (for S). Later, we will prove that this is indeed always true. To do so, we will
+crucially use that the instance is MST-optimal.
+3This follows from (22) in Definition 5.18 and Invariant 5.21 for γ = 0.
+12
+
+===== PAGE 15 =====
+
+s1 s2m
+v
+18 18
+9
+Figure 5: An abstract drawing of the component K in our invariant for X = {s1, s2}. The
+component shown here corresponds to the example from Figure 3. Both s1 and s2 reach the vertex
+m at time t = 18 = 1
+2 dist (s1, s2) ≥ 1
+2 dropG ({s1, s2}). At time t = 21 = 7
+12 dropG ({s1, s2}) the
+two terminals are merged and become part of the same set S, which at this time has not interacted
+with any sets disjoint from S. From time t = 18 until time t = 21 the m-v path becomes tight
+effectively at speed 3. Thus, if v is reached at time 21, it can have distance 9 from m.
+The Component Invariant. Next, we state the key invariant that we prove in our analysis:
+Suppose a set S ∈ S t reaches a vertex v at time t without having interacted with any sets disjoint
+from S before. Then there exist a subset X ⊆ S and a component K connecting X ∪ {v} such that
+c(K) ≤ dropG (X) + t.
+We will also prove that a very similar (but more technical) invariant applies when S is interacting
+with some other set, but for the purpose of this outline we will focus on the invariant stated above.
+Before expanding on how we prove our component invariant, let us first explain why it implies
+that the set US does not contain the root (unless r ∈ S). Suppose for the sake of deriving a
+contradiction that r ∈ US, i.e., the root r is reachable from S by a path of tight edges at a time t
+with S ∈ S t. Then the invariant implies that there exist a setX ⊆ S and a component K connecting
+X ∪ {r} such that c(K) ≤ dropG (X) +t. Using that S ∈ S t does not contain r and X ⊆ S, we get
+value (M, X ∪ {r}) ≥ value (M, X) + t by the definition of the local value (see also Lemma 3.9).
+Because M is the default merge plan scaled by a factor of 7
+6, using (5) for δ = 1
+6, this implies
+dropG (X ∪ {r}) = 12
+7 value (M, X ∪ {r}) ≥ 12
+7
+ 
+value (M, X) + t
+
+> dropG (X) + t.
+Therefore, the cost c(K) ≤ dropG (X) + t of the component K connecting X ∪ {r} is strictly less
+than dropG (X ∪ {r}), contradicting the MST-optimality of our instance. This way we can use our
+invariant to show that our merge plan is feasible.
+We remark that the only property of the rootr that we used is that r is a terminal not contained
+in S. Thus, the component invariant also implies that the only terminals contained in US are the
+terminals in S. Next, we explain how we prove our component invariant.
+Proving the Component Invariant. First, observe that the invariant is satisfied if S contains
+only a single terminal s. In this case X = S = {s} and dropG (X) = 0. The component K consists
+of a shortest s-v path, which has length at most t by (8).
+In this case, the two terminals s1 and s2 have distance at least dropG ({s1, s2}) from each other.
+Recall that terminals not interacting with other terminals can at time t only reach vertices at
+distance at most t. Thus, s1 and s2 cannot reach the same vertex and start interacting before time
+13
+
+===== PAGE 16 =====
+
+m
+K1 K2
+S1 S2
+Figure 6: Two components K1 (green) and K2 (blue) meeting at a vertex m. Once they met, they
+interact analogously to the interaction of two sets growing around single terminals. Each of the
+components Ki connects a subset Xi ⊂ Si to m. Once S1 and S2 get merged in S t, we can combine
+them to a new component K for the new set S arising from the merge of S1 and S2 (and possibly
+further sets). The components Ki arise by induction and hence there are several subsets of Si that
+contributed to the tightness of the edges of Ki, which are the subsets of Si shown in the picture.
+1
+2 dropG ({s1, s2}). Starting from the vertex m where s1 and s2 “meet” (until s1 and s2 are merged)
+the length of the path via which the terminals reach the vertex v can grow effectively at speed 3
+(see Lemma 5.17), where the upper bound is attained by the example in Figure 3. Using that s1
+and s2 are not merged “too late” (by the choice of the merge plan), we can prove that they do not
+travel at speed 3 for too long. We then choose X = {s1, s2} and choose the component K as the
+component consisting of the paths from s1 and s2, respectively, to the vertex m together with the
+path from m to v. See Figure 5. This is our strategy for analyzing the interaction of sets growing
+around two single terminals that then get merged to a new set S.
+Let us next explain, how we proceed in the general case. Here we use induction over time,
+which is possible because the set of reachable vertices only changes at discrete points in time. If
+S reaches v via a path P of tight edges, there might be two disjoint subsets S1 and S2 of S that
+interacted with each other along this path P . Because of our assumption that our path P consists
+of safe edges, it will be sufficient to analyze the interaction of two disjoint terminal sets. Let S1 ⊆ S
+and S2 ⊆ S be such interacting sets. (Note that each of S1 and S2 could each have again disjoint
+interacting subsets, which again could have interacting subsets and so on.) Similar to the case of
+two interacting terminals, we identify a vertex m where the two sets “meet”. In particular, the
+vertex m will have the property that none of the two sets S1 and S2 contributed4 to the other set
+reaching m. We then apply the induction hypothesis to S1 and m, as well as to S2 and m. We
+obtain sets X1 ⊆ S1 and X2 ⊆ S2 and components K1 and K2 connecting X1 ∪ {m} and X2 ∪ {m},
+respectively. See Figure 6 for an illustration.
+The union of K1 and K2 is a component connecting X1 ∪ X2. If t′ is the time where the sets
+4If a set S′ contributes to Si reaching v, this means that some corresponding set US′ contributed to the tightness
+of the edges on the Si-v path via which the set Si reached the vertex v.
+14
+
+===== PAGE 17 =====
+
+S1 and S2 reach m, then the induction hypothesis implies
+c(K1 ∪ K2) ≤ dropG (X1) + dropG (X2) + 2t′.
+Using that the instance is MST-optimal and hence c(K1 ∪ K2) ≥ dropG (X1 ∪ X2), we obtain a
+lower bound on when S1 and S2 “meet” at the vertex m. Then, analogously to the special case
+of two interacting terminals we considered before, the path from m to v is effectively growing at
+speed 3, and the two sets stop interacting once they are merged into a single set. Once the two
+sets are merged, we can construct a new component K for the merged set S by taking the union
+of K1, K2, and the m-v path.
+Bifurcation Vertices. In the proof of our component invariant, the bifurcation vertex m where
+two set S1 and S2 “meet” plays a crucial role. So far, we did not give a concise definition of this
+bifurcation vertex and indeed it is not obvious how to choose this vertex m. A key property of the
+bifurcation vertex is that each of the sets S1 and S2 reaches m without any interaction with the
+other set. However, not every path of tight edges from Si to v contains such a point, as shown in
+Figure 7.
+s1
+s2
+m
+v
+30
+30
+2
+1
+30 2 2
+32
+2
+1 2
+s1
+s2
+m
+v
+Figure 7: An example illustrating the difficulty in the choice of the bifurcation vertex m. The left
+part of the figure shows (a part of) an instance with the lengths of the edges. The right part of
+the figure indicates the contributions of the two sets growing around the two terminals s1 (green)
+and s2 (blue) at time t = 35. The tight s1-v path using the upper outgoing edge of s1 does not
+contain any point that each of the terminals can reach via a path to which the other terminal did
+not contribute. The same applies for the tight s2-v path using the right outgoing edge of s2. In our
+proof, we will choose the indicated vertex m as the bifurcation vertex and analyse the component
+consisting of the edges {s1, m} and {s2, m} as well as the m-v path of tight edges.
+The concept of bifurcation vertices and the proof of their existence is a key technical contribu-
+tions in our new analysis that enables our recursive proof strategy, which differs substantially from
+the analysis from [BGT24]. 5
+5The analysis of [BGT24] always started from an arbitrary S-v path P with a particular property (a so-called
+S-tight path; see Definition 5.3) and constructed only components containing this path P . The example in Figure 7
+shows that it might be that no such paths contains any bifurcation vertex. Hence, for our proof strategy to work, we
+crucially need to deviate from including an arbitrary S-tight path to v in the component K.
+15
+
+===== PAGE 18 =====
+
+v w
+s1 s2 s3
+1 1 1 1
+1
+2
+1
+2
+Figure 8: An example with three terminals s1, s2, s3 reaching the same vertex v at time t = 7
+6.
+If the terminals are not merged at this time, they would all contribute to the edge ( v, w), causing
+this edge to be non-safe. If a terminal MST contains the edges {s1, s2} and {s2, s3}, each having
+length 2, then we have drop G ({s1, s2, s3}) = 4, and the three terminals will be merged exactly at
+time t = 7
+6.
+If one modifies the example by making the edges entering v just a little bit shorter, ( v, w) would
+indeed not be safe. However, we could then obtain an improving component by connecting s1, s2
+and s3 to v (omitting one of the two green edges). This example shows that in the MST-optimal
+case, we cannot merge terminals any later if we want edges to be safe. As we will show in Section 7,
+this is not an artifact of our analysis strategy relying on safe edges, but there is indeed no merge
+plan that leads to any better dual solution.
+Everything is Safe. Let us briefly comment on how we prove that our assumption regarding
+safe edges is indeed always satisfied. Suppose some set would encounter a non-safe edge. Then we
+consider a first such non-safe edge e. Let S1 be the set that encounters an edge that is non-safe (for
+S1) and let S2 and S3 be the other disjoint sets that contribute to e. We will apply our component
+invariant to obtain three components K1, K2, K3 connecting sets X1 ∪ { v}, X2 ∪ { v}, X3 ∪ { v},
+respectively, and combine them to an improving component K connecting X1 ∪ X2 ∪ X3. Then, we
+use this component K to derive a contradiction to the MST-optimality and can thus conclude that
+we never encounter non-safe edges. Here, we will make use of the (slightly more technical) version
+of our invariant that also applies to sets S that interacted with one other disjoint set. This will
+be needed for example to handle the case where some of the sets S1, S2, S3 already had pairwise
+interactions with each other. See Figure 8 for an example.
+Beyond the MST-Optimal Case. To generalize the analysis beyond the MST-optimal case,
+we make two changes to the outline above. First, we strengthen the upper bound on the cost of
+the component K in our invariant and prove
+c(K) ≤ 8 − 8γ
+7 − 5γ value (M, X) + t.
+For γ = 0 and M being the merge plan we used in the MST-optimal case, this is equivalent to
+c(K) ≤ 2
+3 dropG (X) +t, where we used (5) for δ = 1
+6 to express the drop in terms of the local value
+of the merge plan. Hence, up to the factor of 2
+3 this indeed corresponds exactly to the invariant we
+stated before for the MST-optimal case.
+Second, we additionally prove a bound on the distance of reachable vertices. More precisely, if
+X ⊆ S is the set of terminals from S that K connects to the vertex v (in our component invariant),
+16
+
+===== PAGE 19 =====
+
+then we prove an upper bound on the x-v distance for all x ∈ X. (See Definition 5.18 for a precise
+description of the bounds.) We make use of these distance bounds in two ways. First, they will
+help us to obtain a good dependence of our bounds on γ.
+Second, they are crucial for us to go beyond the case where all components are γ-expensive.
+If a γ-cheap component connecting a set Y exists, then by the definition of a γ-good merge plan
+(Definition 2.9), there are some verticesx, y ∈ Y that have large distance from each other (compared
+to their merge time). Using this, the distance bounds imply that if x and y are not merged at time t,
+the two sets in S t that each contain one of x and y cannot reach the same vertex v. For this reason,
+these two sets cannot interact in any way, and we will never consider a component connecting Y in
+our analysis. Thus, it does not matter for our analysis whether such components are γ-expensive.
+3 Merge Plans
+In this section, we establish a connection between merge plans and minimum spanning trees that will
+serve two purposes: first, it provides a more convenient way of constructing a merge plan, without
+defining each partition explicitly; second, for a set X ⊆ R, it allows us to express drop G (X) :=
+TMSTG −TMSTG/X in terms of local value value (M, X) of X with respect to the canonical merge
+plan M of G.
+Definition 3.1. Given a terminal set R and an upper bound u:
+ R
+2
+
+→ R≥0 we say that a merge
+plan M is upper bounded by u if
+mergeM (x, y) ≤ u ({x, y}) for all x, y ∈ R .
+A natural question to ask is: given an upper bound u:
+ R
+2
+
+→ R≥0, how large can the value
+value (M) be if the merge plan M is upper bounded by u? Before we answer this question in
+Lemma 3.3, we observe an upper bound on the merge time merge M (x, y) that holds whenever M
+is upper bounded by u:
+Observation 3.2. Given a terminal set R and an upper bound u:
+ R
+2
+
+→ R≥0, every merge plan
+M upper bounded by u satisfies
+mergeM (x, y) ≤ min
+P : x-y path
+in (R,(R
+2))
+max
+e∈P
+u (e) (9)
+for all x, y ∈ R.
+Proof. Let M =
+ 
+S t
+t≥0 be a merge plan that is upper bounded by u, and let x, y ∈ R. Further,
+let P be an x-y path in
+ 
+R,
+ R
+2
+
+. Then, for every time t > maxe∈P u (e), for each edge e of P both
+endpoints of e have to be in the same part of the partition S t. Thus, all vertices of the path, in
+particular x and y, are in the same part of S t, which implies (9).
+Next we show that the upper bound (9) on merge M (x, y) is tight as there exists a merge plan
+that is upper bounded by u and satisfies (9) with equality for all x, y ∈ R simultaneously. For an
+upper bound u:
+ R
+2
+
+→ R≥0, we write MST u to denote the cost of a minimum spanning tree in
+(R,
+ R
+2
+
+) with respect to the edge costs u.
+Lemma 3.3. Given a terminal set R and an upper bound u, there is a unique merge plan Mu
+that fulfills (9) with equality for all x, y ∈ R. This merge plan is also the unique merge plan with
+maximal value among all merge plans upper bounded by u. Its value is value (Mu) = MSTu.
+17
+
+===== PAGE 20 =====
+
+Proof. We start by defining a merge plan M =
+ 
+S t
+≥0 for which we then show that it fulfills (9)
+with equality and satisfies value (M) = MSTu.
+Let T be a minimum spanning tree in the weighted graph
+ 
+R,
+ R
+2
+
+, u
+
+. For every t ≥ 0, let T t
+be the subgraph of ( R, T) that contains an edge {x, y} ∈ T if and only if u ({x, y}) < t. We define
+S t to be the partition of R according to the connected components of T t.
+For every tree edge {x, y} ∈ T , this implies that merge M (x, y) = u ({x, y}). For general
+x, y ∈ R, consider the unique x-y path P in T . By definition of M, the terminals x and y are
+merged at time max e∈P u (e). Because T is an MST, none of the edges in P can be more expensive
+than the edge {x, y}. More precisely, u (e) ≤ u ({x, y}) for all e ∈ P . Thus,
+mergeM (x, y) = max
+e∈P
+u (e) ≤ u ({x, y}) ,
+which implies not only that M fulfills the upper bound u and thus (9), but also that M obtains
+equality in (9).
+Note that there can only be one merge plan that fulfills (9) with equality, because a merge plan
+is uniquely defined by the vector of merge times (merge M (x, y))x,y∈R. Additionally, if there was
+a different merge plan M′ ̸= M that is upper bounded by u with value (M′) ≥ value (M), there
+would be terminals x, y ∈ R with mergeM′ (x, y) > mergeM (x, y) contradicting Observation 3.2.
+It remains to determine value ( M). To this end, we observe that for t ≥ 0, the edges e ∈ T
+with u (e) ≥ t form a spanning tree in the graph that arises from
+ 
+R,
+ R
+2
+
+by contracting each part
+of the partition S t (by construction of S t). Thus, the number of such edges is
+ {e ∈ T | u (e) ≥ t}
+ =
+S t − 1 .
+This allows us to express the value of M as
+value (M) =
+Z ∞
+0
+S t − 1 dt =
+Z ∞
+0
+ {e ∈ T : u (e) ≥ t}
+ dt =
+X
+e∈T
+u (e) = MST u .
+A direct consequence of Lemma 3.3 is that if we choose u ({x, y}) proportional to the distance
+dist (x, y) in the graph G for all x, y ∈ R, then the value of Mu is proportional to the cost of a
+terminal minimum spanning tree. In particular, for u(x, y) = 1
+2 dist (x, y), this determines the value
+of the canonical merge plan (Definition 2.3):
+Corollary 3.4. The canonical merge plan has value 1
+2 TMST.
+Another consequence of Lemma 3.3 is the following.
+Observation 3.5. Given an upper bound u, the minimum spanning trees in the complete graph on
+R with respect to the cost function u and with respect to the cost function {x, y} 7→ mergeMu (x, y)
+all have the same cost, namely value (Mu).
+Proof. Let ˜u denote the upper bound given by ˜u(x, y) := mergeMu (x, y). Then, because the merge
+plan Mu is upper bounded by u, we have MST u ≤ MST˜u. Moreover, the merge plan Mu is also
+upper bounded by ˜u. Thus, we have value ( M˜u) ≥ value (Mu), where we used that M˜u is the
+merge plan with maximum value that is upper bounded by ˜ u. Finally, by Lemma 3.3, we have
+MSTu = value (Mu) and MST ˜u = value (M˜u), implying
+MSTu = value (Mu) ≤ value (M˜u) = MST˜u ≤ MSTu
+and hence we have equality throughout.
+18
+
+===== PAGE 21 =====
+
+As mentioned earlier, we can express drop G (X) := TMSTG − TMSTG/X in terms of the local
+value of X with respect to the canonical merge plan M of G.
+Lemma 3.6. Let M be the canonical merge plan of G and X ⊆ R, then
+dropG (X) = 2 · value (M, X) .
+To prove Lemma 3.6, we show that the canonical merge plan (and more generally Mu for any
+upper bound u) behaves nicely under contraction of terminal sets. Given a terminal set R, a merge
+plan M =
+ 
+S t
+t≥0 on R, and a set X ⊆ R, we define the contracted merge plan M/X =
+ 
+S t
+X
+
+t≥0
+to be the merge plan on R/X with the following property: For every time t ≥ 0 the partition S t
+X
+arises from S t by combining all sets that intersect X into a single set. Moreover, we define an upper
+bound uX arising from u by contraction of X as follows: for a, b ∈ R\X, let uX ({a, b}) := u ({a, b})
+and uX ({a, X}) := minx∈X u ({a, x}).
+Using this notation, we can show that Mu is stable under contraction. More precisely:
+Lemma 3.7. Given a terminal set R, an upper bound u, and a subset X ⊆ R we have
+Mu/X = MuX .
+Proof. Because for all a, b ∈ R, the merge time cannot increase when contracting X, that is
+mergeMu/X (a, b) ≤ mergeMu (a, b), the merge plan Mu/X satisfies the upper bound uX. We will
+show that for all a, b ∈ R/X with a ̸= b, there exists an a-b path P in the complete graph on R/X
+with
+mergeMu/X (a, b) ≥ max
+e∈P
+uX (e) . (10)
+Then Lemma 3.3 implies that Mu/X = MuX. It remains to show (10).
+Consider the time t := mergeMu/X (a, b). By definition of Mu/X one of the following it true:
+(i) in Mu the terminals a and b are merged exactly at time t , or (ii) in Mu the terminal a is
+merged with some terminal xa ∈ X and b is merged with some terminal xb ∈ X both no later than
+time t. Thus, by Lemma 3.3 the complete graph on R contains (i) an a-b path P with u (e) ≤ t
+for all e ∈ P , or (ii) an a-xa path Pa and an b-xb path Pb with u (e) ≤ t for all e ∈ Pa ∪ Pb. In
+both cases there is an a-b path Pab in the complete graph on R/X with uX (e) ≤ t for all e ∈ Pab
+(in case (i) choose Pab = P and for (ii) choose Pab = Pa ∪ Pb). This path Pab fulfills (10), which
+concludes the proof.
+Using Lemma 3.7 and Corollary 3.4, we can prove Lemma 3.6:
+Proof of Lemma 3.6. Let M be the canonical merge plan of G. Then by Lemma 3.7, M/X is the
+canonical merge plan of G/X. By Corollary 3.4, the values of the terminal spanning tree in G and
+G/X equal twice the values of M and M/X, respectively. Thus
+1
+2 dropG (X) = 1
+2 MSTG − 1
+2 MSTG/X = value ( M) − value (M/X) .
+It remains to show that that the right hand-side equals value ( M, X). To this end, we fix a time
+t ≥ 0 and consider the corresponding partitions S t of M and S t
+X of M/X. By definition of M/X,
+the partition S t
+X arises from S t by combining all parts of S t that intersect X. Thus,
+ S t − 1
+
+−
+ S t
+X
+ − 1
+
+=
+S t −
+S t
+X
+ =
+
+S ∈ S t : S ∩ X ̸= ∅
+	 − 1 .
+19
+
+===== PAGE 22 =====
+
+Integrating both sides from 0 to ∞ yields
+value (M) − value (M/X) = value ( M, X) .
+A direct consequence of Lemma 3.6 is the following.
+Lemma 3.8. For MST-optimal instances of Steiner tree, there exists a merge plan M that is 0-good
+and satisfies value (M) ≥ 7
+12 · TMST.
+Proof. For an MST-optimal instance, there are no improving components. That is, we have
+cost (X) ≥ dropG (X) for all X ⊆ R. Let MG be the canonical merge plan, and consider a
+“scaled” version M of MG, namely the merge plan with maximal value subject to satisfying
+mergeM (x, y) ≤ 7
+12 dist (x, y) ∀x, y ∈ R .
+Then, by Lemma 3.6, we obtain for all X ⊆ R,
+cost (X) ≥ dropG (X) = 2 · value (MG, X) = 12
+7 · value (M, X) ,
+where the last equation follows from the fact that M is a suitably scaled version of MG. Hence,
+there are no 0-cheap components with respect to M (see Definition 2.8) and the merge plan M
+is 0-good (see Definition 2.9). The value of M equals 7
+6 times that value of MG. Together with
+Corollary 3.4, this implies value (M) = 7
+6 value (MG) = 7
+12 TMST.
+Next, we discuss how the local value of sets behaves under taking unions. For generalX, ¯X ⊆ R,
+the local value value
+ 
+M, X ∪ ¯X
+
+might be as small as
+max
+
+value (M, X) , value
+ 
+M, ¯X
+	
+.
+This is the case, for example, if for essentially all times t the sets X and ¯X intersect the same parts
+of the partition S t. However, this can not be the case if the partition S t separates X and ¯X until
+one of them is entirely contained in a single part of S t, as we prove next.
+Lemma 3.9. Given a fixed merge plan M =
+ 
+S t
+t≥0, let S ∈ S t∗
+be a set that is active at time t∗
+and consider two terminal sets X ⊆ S and ¯X ⊆ R \ S. Then
+value
+ 
+M, X ∪ ¯X
+
+≥ value (M, X) + value
+ 
+M, ¯X
+
++ t∗ .
+Proof. For Y ∈
+
+X, ¯X, X ∪ ¯X
+	
+let fY (t) :=
+
+S′ ∈ S t : S′ ∩ Y ̸= ∅
+	. For every time t < t ∗, any
+active set S′ ∈ S t can intersect at most one of X and ¯X and thus fX∪ ¯X (t) = fX (t) + f ¯X (t),
+implying
+fX∪ ¯X (t) − 1 = ( fX (t) − 1) + (f ¯X (t) − 1) + 1. (11)
+For t ≥ t∗ exactly one set S′ ∈ S t will intersect X and thus
+fX∪ ¯X (t) − 1 ≥ f ¯X (t) − 1 = ( fX (t) − 1) + (f ¯X (t) − 1) . (12)
+20
+
+===== PAGE 23 =====
+
+Together (11) and (12) imply
+value
+ 
+X ∪ ¯X
+
+=
+Z ∞
+0
+fX∪ ¯X (t) − 1 dt
+≥
+Z ∞
+0
+(fX (t) − 1) + (f ¯X (t) − 1) dt + t∗
+= value (X) + value
+  ¯X
+
++ t∗ .
+Finally, we prove a well-known fact about drop G (X), namely that it can only decrease, when
+we contract terminals:
+Observation 3.10. For a graph G and two terminal sets X, Y ⊆ R, we have
+dropG/Y (X) ≤ dropG (X) .
+Proof. Due to Lemmas 3.6 and 3.7, it suffices to prove that for any merge plan M we have
+value (M/Y, X ) ≤ value (M, X). Let M =
+ 
+S t
+t≥0 and M/Y =
+ 
+S t
+Y
+
+t≥0. For each set of the
+partition S t
+Y that X intersects, it has to intersect at least one set of the partition S t. Hence,
+value (M/Y, X ) =
+Z ∞
+0
+
+S ∈ S t
+Y : S ∩ X ̸= ∅
+	 − 1 dt
+≤
+Z ∞
+0
+
+S ∈ S t : S ∩ X ̸= ∅
+	 − 1 dt = value ( M, X) .
+4 Preliminary Remarks on the Moat Growing Algorithm
+The goal of this section is to describe the precise setting for which we analyze Algorithm 1. To
+avoid tedious case distinctions we do two things: First, we will not work with γ-good merge plans,
+but with strictly γ-good merge plans (Definition 4.1). Second, we will not run Algorithm 1 on the
+original instance. Instead, if we are given an instance I and a strictly γ-good merge plan M for I,
+we show that M is feasible for an instance ˜I that arises from I by subdivision of edges. Note that
+subdividing edges changes neither the value of BCR nor the cost of an optimum Steiner tree. Thus,
+the instance arising from subdivision is equivalent and, in particular, has the same integrality gap.
+Before we introduce the precise theorem that we prove, we want to clarify the following: as we
+are interested in dual solutions of BCR, we always run Algorithm 1 on the bidirected graph. That
+is, we replace each undirected edge {v, w} of the given undirected graph by two directed edges
+(v, w) and ( w, v) to which we assign the same cost c ((v, w)) = c ((w, v)) = c ({v, w}). The step of
+bidirecting edges happens after we subdivided the undirected edges.
+The only difference between strictly γ-good merge plans and γ-good merge plans is that we
+want strict inequalities. Hence, we say that a set X ⊂ R is strictly γ-expensive with respect to M
+if cost (X) > 12−12γ
+7−5γ value (M, X), and define strictly γ-good merge plans as follows:
+Definition 4.1 (strictly γ-good). Let γ ∈ [0, 1
+5]. We say that a merge plan M is strictly γ-good,
+if for all x, y ∈ R with x ̸= y
+mergeM (x, y) < 7 − 5γ
+12 dist (x, y) , (13)
+21
+
+===== PAGE 24 =====
+
+and for every terminal set X ⊆ R that is not strictly γ-expensive with respect to M, there are
+x, y ∈ X with x ̸= y satisfying
+mergeM (x, y) < 7 − 5γ
+18 − 14γ dist (x, y) . (14)
+We can approximate (the value of) a γ-good merge plan using strictly γ-good merge plans as
+follows: Whenever we have a γ-good merge plan M, we can obtain a strictly γ-good merge plan
+˜M, by scaling down all merge times by a factor of (1 − ε):
+Observation 4.2. Let ε ∈ (0, 1) and let M be a γ-good merge plan. Then we obtain a strictly
+γ-good merge plan ˜M =
+  ˜S t
+t≥0 with value
+  ˜M
+
+= (1 − ε) value (M) by defining ˜S t := S t/(1−ε) for
+all t ≥ 0.
+Proof. Consider two terminals x, y ∈ R with x ̸= y. By definition of the merge plan ˜M, we have
+merge ˜M (x, y) = (1 − ε) mergeM (x, y). For every X ⊆ R the local value of X with respect to ˜M
+is value
+  ˜M, X
+
+= (1 − ε) value (M, X). In particular, value
+  ˜M
+
+= (1 − ε) value (M).
+Because our edge costs are positive, we have for all x ̸= y ∈ R that dist (x, y) > 0. Thus, if
+mergeM (x, y) = 0, then also merge ˜M (x, y) = 0 < 7−5γ
+12 dist (x, y). Otherwise, merge M (x, y) > 0
+and we get
+merge ˜M (x, y) = (1 − ε) mergeM (x, y) < mergeM (x, y) ≤ 7 − 5γ
+12 dist (x, y) ,
+which shows the first property (13) of Definition 4.1.
+For the second property we can argue in a similar way. Because M is γ-good (Definition 2.9),
+for each set X ⊆ R one of the following holds: (i) X is not γ-cheap with respect to M, or (ii) there
+are x, y ∈ X with x ̸= y that where merged very early. More precisely, we have (i)
+12 − 12γ
+7 − 5γ value
+  ˜M, X
+
+< 12 − 12γ
+7 − 5γ value (M, X) ≤ cost (X) , (15)
+or (ii)
+merge ˜M (x, y) < mergeM (x, y) ≤ 7 − 5γ
+18 − 14γ dist (x, y) . (16)
+Hence, every set X ⊆ R is strictly γ-expensive, or there are x, y ∈ X that are merged strictly
+before time 7−5γ
+18−14γ dist (x, y). (Note that, in both cases, if value ( M, X) respectively mergeM (x, y)
+is zero, the first inequality in (15) respectively (16) is not strict, but then the second inequality is
+strict instead.)
+The reason why we run Algorithm 1 on a subdivided instance ˜I, and not on I itself, is that
+it allows us to split edges into segments with the same properties and to easily refer to points “in
+the middle of some edge” by adding new vertices at these points. To formally define the properties
+obtained by subdivision, we introduce some notation.
+Definition 4.3. We say that a directed edge e is tight if P
+U ⊆V :e∈δ+(U) yU = c (e).
+Definition 4.4. A set X ⊆ R reaches a vertex v at time t, if there is an X-v path P such that all
+edges of P are tight at time t. By tX→v we denote the first time t for which v is reachable from X.
+Definition 4.5. We say that a set S contributes to an edge e = (v, w) at time t, if S ∈ S t and
+tS→v < t ≤ tS→w.
+22
+
+===== PAGE 25 =====
+
+Note that if S ∈ S t, we increase the dual variable yUS at time t. Moreover, for times t between
+tS→v and tS→w, we have (v, w) ∈ δ+ (US).
+There are two reasons, why we subdivide edges. First, we want to ensure that sets don’t
+“meet in the middle of an edge” (see (i) of Definition 4.6 below). In particular, we want that
+every bifurcation vertex (as mentioned in Section 2.3) is indeed a vertex and not “some point in
+the middle of an edge”. Second, it will be convenient to split edges into segments with the same
+properties (see (ii) of Definition 4.6 below).
+Both of this is captured by the definition of a well-subdivided instance:
+Definition 4.6 (well-subdivided). We say that a Steiner tree instance (G = (V, E), c, R) is well-
+subdivided for a merge plan M, if Algorithm 1 with merge plan M fulfills the following two prop-
+erties:
+(i) If at time t both endpoints of an edge e are reachable (by some terminals), then at least one
+orientation of e is tight at time t.
+(ii) For every edge ⃗ eof the bidirected graph with P
+U : ⃗ e∈δ+(U) yU > 0, there is a time interval
+(t1, t2] and a set family B ⊆ S t2 such that
+• until (including) time t1 no set S ∈ S t contributes to ⃗ e, and
+• from time t1 until (including) t2, the sets contributing to ⃗ eare exactly the sets in B, and
+• at time t2 the edge ⃗ eis tight.
+A natural strategy to obtain a well-subdivided instance would be to establish the properties for
+one edge after the other by a suitable subdivision of this edge. For this approach to work, we need
+to ensure that a subdivision does not destroy the properties on already considered edges. Thus, it
+would be desirable that Algorithm 1 behaves equivalently on both the original and the subdivided
+instance. Unfortunately this is not the case as the example in Figure 9 shows.
+However, it is possible to subdivide the instance such that any further subdivision of edges
+does not change the behavior of Algorithm 1. For this reason, we will subdivide our instance in
+two steps. In the first step, we will ensure that (i) of Definition 4.6 is fulfilled and that further
+subdivisions of our instance won’t change the behavior of Algorithm 1. The result of this first step
+is captured by the following lemma.
+Lemma 4.7. Let I = (G = (V, E), c, R) be an instance of Steiner Tree and let M be a merge plan
+for I. Then there exists a graph G′ = (V ′, E′) that arises from G by subdividing each edge at most
+once, such that instance I ′ = (G′, c, R) satisfies (i) of Definition 4.6 and any further subdivisions
+of the edges of G′ leave tX→v unchanged for all X ⊆ R and v ∈ V ′.
+The idea to prove Lemma 4.7 is the following: We run acontinuous version of Algorithm 1, which
+corresponds to the limit of what we obtain when subdividing edges into shorter and shorter pieces.
+This continuous version is, by construction, invariant under subdivision of edges. Afterwards, we
+detect for every original edge {v, w}, the point where the sets contributing to ( v, w) and the sets
+contributing to ( w, v) meet on {v, w}. This point is the only one where we have to subdivide
+the edge. In the example shown in Figure 9, the continuous version of Algorithm 1 behaves on
+the original instance as Algorithm 1 behaves on the subdivided instance. In particular, from time
+t = 18 to t = 20, the terminal s2 would contribute to both ( x, z) and ( z, x). At time t = 20, the
+terminal s2 would meet itself at the midpoint of {x, z}. Thus, we subdivide {x, z} by inserting y.
+Similarly, we subdivide {v, x} at the point where s1 and s2 meet at time t = 19, namely we insert
+23
+
+===== PAGE 26 =====
+
+s1 s2
+v x z
+18 18 18
+2 4
+s1 s2
+v x z
+s1 s2
+v x z
+original instance t = 20 t = 22
+s1 s2
+v x zw y
+18 18 18
+1 1 2 2
+s1 s2
+v x zw y
+s1 s2
+v x zw y
+subdivided instance t = 20 t = 22
+Figure 9: An example showing that Algorithm 1 is in general not invariant under subdivision. In
+the instance shown in the first row, the terminals2 contributes to neither (x, z) nor to (z, x) because
+it reaches x and z at the same time ( t = 18). In the second row, we see a subdivided version of the
+instance from the first row. That is, the edge {x, z} of length two was replaced by two edges {x, y}
+and {y, z}, each of length two. Similarly, the edge {v, x} is subdivided. Because s2 does not reach
+the newly introduced vertex y at time 18, it will contribute to both ( x, y) and ( z, y). While this
+does not affect when s2 can reach the original vertices, it has an impact on s1. In the subdivided
+instance, s1 reaches z at time t = 22, which is not the case in the original instance. The subdivided
+instance satisfies (i) of Definition 4.6. In fact, w and y are precisely the vertices we would introduce
+to prove Lemma 4.7. The second property (ii) of Definition 4.6 is not satisfied (in both instances)
+because to both edges ( v, s1) and ( x, s2) some terminal contributed, but the edges are not tight in
+the end.
+v w
+original edge (satisfying (i) of Definition 4.6)
+v x y z w
+result of subdivision (satisfying both (i) and (ii) of Definition 4.6)
+Figure 10: An edge {v, w} on which, for different points in time, different families of sets contributed.
+The first time a set contributes to an orientation of {v, w} is when the red terminal set reaches v.
+While the red set still contributes to ( v, w), eventually also the yellow set reaches v and thus also
+contributes to ( v, w). A bit later (still before ( v, w) got tight), the red set and the yellow set
+are merged into an orange set, which then is the only set contributing to ( v, w) until the edge
+becomes tight. Later, the blue terminal set reaches w and starts contributing to the edge ( w, v).
+Soon afterwards, the algorithm terminates before ( w, v) got tight. Below the original edge, it is
+shown how we subdivide this edge. If the edge {v, w} is part of an instance that is invariant
+under subdivision (as we obtain it from Lemma 4.7), then subdividing at each position where the
+contributing sets change will result in an instance satisfying (ii) of Definition 4.6.
+24
+
+===== PAGE 27 =====
+
+the vertex w. The three other edges do not need to be subdivided to obtain (i) of Definition 4.6.
+For a detailed proof of Lemma 4.7, we refer to Appendix A.
+Given an instance I ′ as in Lemma 4.7 (in particular, an instance for which further subdivisions
+leave tX→v unchanged), we can easily obtain a well-subdivided instance ˜I by further subdividing
+the edges as we explain next.
+By Lemma 4.7, the times tS→v at which active sets S can reach vertices v don’t change, if
+we further subdivide edges. Hence, also the sets US of vertices that are reachable from S remain
+unchanged (except that it might contain newly introduced vertices). Thus, if we subdivide an
+edge e, we cannot destroy properties (i) and (ii) of Definition 4.6 on other edges where they were
+already established.
+Therefore, it suffices to show that we can subdivide a single edge such that the edges arising
+from the subdivision satisfy both properties of Definition 4.6. This can be achieved by subdividing
+the edge at each position, where (for one of the orientations) the family of sets contributing to this
+edge changes. See Figure 10 for an example.
+Hence, for every instance I of the Steiner tree problem and merge plan M, there is an instance
+˜I that arises from I by subdividing edges, such that ˜I is well-subdivided for merge plan M.
+In Section 5 we will prove the following:
+Theorem 4.8. Let γ ∈ [0, 1
+5]. Let I a Steiner tree instance and let M be a strictly γ-good merge
+plan for I such that I is well-subdivided for M. Then M is feasible for I.
+Before proving Theorem 4.8, we show that it indeed implies Theorem 2.10:
+Proof of Theorem 2.10. Let I be a Steiner tree instance and let M be a γ-good merge plan.
+We show that for every ε > 0 we have BCR ( I) ≥ (1 − ε) value (M). The merge plan ˜M with
+merge ˜M (x, y) = (1 − ε) mergeM (x, y) for all x, y ∈ R is strictly γ-good for I (by Observation 4.2).
+By subdividing the edges of I as described above, we obtain an instance ˜I that is well-subdivided
+for ˜M. Subdividing edges changes neither distances between terminals, nor the cost of connecting
+a given terminal set. Hence, ˜M is strictly γ-good not only for I but also for ˜I. Thus, by Theo-
+rem 4.8, ˜M is feasible for ˜I. Because subdividing edges leaves the value of BCR unchanged, we
+conclude
+BCR (I) = BCR
+ ˜I
+
+≥ value
+  ˜M
+
+= (1 − ε) value (M) .
+Hence, we have BCR (I) ≥ (1 − ε) value (M) for all ε > 0 and thus BCR (I) ≥ value (M).
+5 Feasibility of Strictly γ-Good Merge Plans
+The goal of this section is to prove Theorem 4.8. Thus, throughout this section, we fix an instance
+I, a merge plan M, and γ ∈
+
+0, 1
+5
+
+such that I is well-subdivided and M is strictly γ-good. Our
+goal is to prove that M is feasible for I, namely that whenever we increase a dual variable yUS
+during Algorithm 1, the set US contains the root r only if r ∈ S.
+To simplify notation, we abbreviate merge (x, y) := mergeM (x, y) for x, y ∈ R and value (X) :=
+value (M, X) for X ⊆ R.
+This section is structured as follows. In Section 5.1 we define increasingly restrictive classes of
+paths, namely tight paths, active paths, and safe paths. Safe paths will play a crucial role in our
+analysis: every path and every component we consider in the analysis will be composed of (parts
+of) safe paths. In Section 5.2, we formalize the notion of a set “meeting” another set. This will not
+immediately give the bifurcation vertices mentioned in Section 2.3, but it will play the main role in
+25
+
+===== PAGE 28 =====
+
+(implicitly) finding such bifurcations. Furthermore, we bound the length of (parts of) safe paths.
+In particular, we show that the example from Figure 3 is indeed a worst-case example. Section 5.3
+formally introduces our main invariant, and outlines how we use this invariant to prove that M is
+a feasible merge plan. The latter is done in two main steps: First, we prove that if at time t a set
+S ∈ S reaches a vertex v via a safe path and strictly before time t all active paths were safe, then
+the invariant holds (Section 5.4). Second, we show that indeed all active paths are safe, implying
+that the invariant is satisfied throughout the entire algorithm (Section 5.5).
+5.1 Tight, Active, and Safe Paths
+In this section, we introduce several basic definitions, including in particular the notion of S-tight,
+S-active, and S-safe paths. The definition of S-tight paths (Definition 5.3) and a proof of their
+existence (Lemma 5.5) were already given in [BGT24].
+We say that a set S is active at time t if S ∈ S t. By S =S
+t≥0 S t we denote all sets that are
+active at some time during the algorithm.
+Definition 5.1 (activation time, deactivation time) . For a set S ∈ S , we denote its activation
+time and its deactivation time by
+aS = inf
+
+t ≥ 0 : S ∈ S t	
+and dS = max
+
+t ≥ 0 : S ∈ S t	
+, (17)
+respectively.
+Note that by Definition 2.1, the infimum in (17) is a minimum if and only if S is a singleton.
+Also by Definition 2.1, the partitions S t are refinements of each other. Thus S is a laminar family.
+That is, for any two sets S, S′ ∈ S , either S and S′ are disjoint, or one is a subset of the other.
+Recall that a set X ⊆ R reaches a vertex v at time t, if there is an X-v path for which all of
+its edges are tight at time t. Further, recall that tX→v denotes the first time at which X reaches v.
+For a set S ∈ S , we are mainly interested in the vertices it can reach before it is deactivated, which
+motivates the following definition:
+Definition 5.2 (actively reaching). We say that a set S ∈ S actively reaches a vertex v ∈ V if S
+is active at time tS→v.
+If a set S (actively) reaches a vertex v, there might be multiple S-v paths consisting only of tight
+edges. For the analysis, we are interested in paths that represent how S built its way towards v.
+This is captured by the concept of S-tight paths, which was introduced in [BGT24].
+Definition 5.3 (S-tight, S-active). Given a set S ∈ S , we call an edge e = ( v, w) S-tight, if
+tS→v ≤ tS→w and e is tight at time tS→w. Similarly, a path is called S-tight if it starts in S and
+all of its edges are S-tight. An S-tight S-v path is called S-active if S actively reaches v.
+For a path P visiting vertices a and b in this order, we write P[a,b] to denote the a-b subpath
+of P . For an S-tight path P visiting a vertex v, we also write P[S,v] to denote the prefix of P until
+the vertex v. In other words, if s ∈ S is the first vertex of P , then P[S,v] = P[s,v].
+A direct consequence of Definition 5.3 is the following observation.
+Observation 5.4. Let S ∈ S , v ∈ V , P an S-tight path to v, and w a vertex on P . Then all edges
+of P[S,w] are tight at time tS→w.
+26
+
+===== PAGE 29 =====
+
+Proof. Let v1, . . . , vk = w be the vertices of P[S,w]. By the S-tightness of the path P , we have
+tS→v1 ≤ tS→v2 ≤ · · · ≤ tS→w .
+Moreover, by Definition 5.3, each edge ( vi, vi+1) of P[S,w] is tight at time tS→vi+1. Hence, all edges
+of P[S,w] are tight at time tS→w.
+Another useful fact about S-tight paths, which was already proven by Byrka, Grandoni, and
+Traub, is that they always exist if a set S reaches a vertex v.
+Lemma 5.5 ([BGT24]). If a set S ∈ S reaches a vertex v ∈ V , there exists an S-tight S-v path.
+Proof. We prove the lemma by induction over time t. Note that it suffices to consider a finite
+number of points in time, namely, those at which an edge becomes tight. For t = 0, the set S can
+only reach vertices contained in S. Thus, in this case, the path containing no edges is an S-tight
+path. For t > 0, consider any S-v path P whose edges are tight at time t. Let w be the last vertex
+of P for which tS→w < t. Because P is S-tight and by the choice of the vertex w, the suffix P[w,v]
+consists of one edge along which tS→ · is increasing, followed by (zero or more) edges along which
+tS→ · = t stays constant. Thus, all edges of P[w,v] are S-tight. By the induction hypothesis, there
+is an S-tight S-w path Q. Combining Q with P[w,v], yields an S-tight S-v path.
+By Definition 5.3, every prefix of an S-tight path is again S-tight. However, a prefix P[S,w]
+of an S-active path P might not be S-active, because S might only be activated after it already
+reached w. Nevertheless, P[S,w] is still an active path, namely an S′-active path for a suitable subset
+S′ ⊆ S. Before we prove this, we need a small observation regarding the first time a set X ⊆ R
+can reach a vertex v.
+Observation 5.6. Let v ∈ V and ∅ ̸= X ′ ⊆ X ⊆ R then tX→v ≤ tX ′→v.
+Proof. Whenever a set X ⊆ R can reach a vertex v, then by definition of reachability also all super
+sets of X can reach v.
+Lemma 5.7. For a set S ∈ S , let v ∈ V be a vertex that is reachable from S at time tS→v ≤ dS,
+and let P be an S-tight path to v, then there exists a unique subset S′ ∈ S of S such that P is
+S′-active. This subset satisfies tS′→v = tS→v.
+Proof. Let s ∈ S be the start vertex of P . Let S′ ∈ S be the unique set that is active at time
+tS→v and contains s (note that this is the only possible candidate for S′). Because tS→v ≤ dS and
+S ∩ S′ ̸= ∅, we have S′ ⊆ S.
+Consider a vertex w visited by P . Then, by Observation 5.4, all edges of the path P[s,w] are tight
+at time tS→w, implying t{s}→w ≤ tS→w. Moreover, by Observation 5.6, we have tS→w ≤ tS′→w ≤
+t{s}→w. We conclude tS→w = tS′→w = t{s}→w, for every vertex w visited by P . This implies, that
+P is S′-tight and S′ actively reaches v (because P is S-tight and S′ is active at time tS→v). Hence,
+P is an S′-active path.
+Even though Byrka, Grandoni, and Traub did not define S-active paths, they proved that for
+their particular choice of the merge plan M, every S-active path is short, which then implies that
+no set can actively reach the root (see [BGT24, Lemma 17]). We will follow a different proof
+strategy and won’t bound the length of every S-active path.
+Instead, we will bound the distance from a set S to a vertex v that it (actively) reaches as
+follows. If S reaches v without interacting with any disjoint set along the way, then a simple
+27
+
+===== PAGE 30 =====
+
+inductive argument will be sufficient. If S did not reach v on its own, but interacted with a set ¯S
+disjoint from S along the way, we will identify a bifurcation vertex m such that both S and ¯S can
+reach m without the help of other terminals (that is without interacting with disjoint sets along
+the way). (Recall the discussion in Section 2.3 and Figure 5.) By induction, we obtain a bound on
+the distance from S to m. Furthermore, we will bound the distance from the bifurcation vertex m
+to the vertex v.
+The example in Figure 7 shows that the path from m to v might not be contained in a single
+˜S-active path for any terminal set ˜S. (In this example, there is an m-v path consisting of tight
+edges, but neither ts1→ · nor ts2→ · nor t{s1,s2}→ · is monotone along this m-v path, which implies
+that it is not contained in any ˜S-tight path for any terminal set ˜S.) Nevertheless, the m-v paths
+we consider will always be composed of certain suffixes of ˜S-tight paths for some terminal sets ˜S.
+Hence, it will be sufficient to analyze the length of such suffixes.
+As the examples in Figure 4 show, (suffixes of) tight paths can be arbitrarily long in general.
+What both examples have in common is that more than two disjoint sets interact with each other
+on the problematic path. Thus, we will restrict our analysis to safe paths, which we define next.
+Intuitively safe paths are those on which at most two disjoint sets interact with each other. Eventu-
+ally, we will show that (for strictly γ-good merge plans) every active path is safe (see Section 5.5),
+but for now, we define safe paths as the following (possibly more restrictive) class of paths.
+Definition 5.8 (safe paths). Consider a directed edge e = (v, w) and let t be the time at which e
+became tight. For a set S ∈ S , we say that e is S-safe, if until time t at most two sets contributed
+to e or ⃗e = ( w, v) and at most one of these sets is a subset of R \ S. We call an S-active path
+S-safe if all of its edges are safe.
+The definition of safe paths is chosen such that the problematic paths in the examples from
+Figure 4 are not safe. In Lemma 5.17, we will prove that along an S-safe path P to the vertex v,
+the set S travels (amortized) at most with speed 3. More precisely, we will show that if mP is
+the first vertex on P where S “met” another set ¯S ⊆ R \ S (see Definition 5.9 below), then the
+length of P[mP ,v] is at most 3
+ 
+tS→v − tS→mP
+
+. In particular, this implies that Figure 3 is indeed a
+worst-case example.
+5.2 Meeting Points and the Length of Safe Paths
+Before we analyze the length of (parts of) safe paths, we define the meeting point of an S-active
+path P , that is the first vertex on P where R \ S arrives no later than S does:
+Definition 5.9 (Meeting point). For an S-active path P the meeting point mP is the first vertex
+of P with tR\S→mP ≤ tS→mP . If no such vertex exists, we say that P has no meeting point. If mP
+is not the last vertex of P , we call it a proper meeting point .
+Figure 11 shows the meeting points of two different paths. While the definition itself allows that
+R \ S arrives at mP even strictly earlier than S does, this will not be the case for well-subdivided
+instances (see Lemma 5.11 below).
+We are mainly interested in proper meeting points, because only if P has a proper meeting
+point, the set S might have gotten help from disjoint terminal sets to reach v, that is, such sets
+disjoint from S could have contributed to edges of P . If the path P has a proper meeting point,
+then S can reach the proper meeting point mP strictly earlier than v. Before we prove this fact
+(Lemma 5.11), we need an auxiliary statement that captures a useful property of well-subdivided
+instances:
+28
+
+===== PAGE 31 =====
+
+Consider a directed edge ( w, v) and a terminal set X (not necessarily contained in S) such that
+no other terminal reaches the vertex v strictly earlier than X reaches v. We show that if the edge
+(w, v) is not tight at the time when X reaches v, then X reaches w strictly later than it reaches v,
+and moreover, no other terminal reaches w strictly earlier than X reaches w.
+Lemma 5.10. Let (w, v) be a directed edge, and X ⊆ R a set with tX→v = tR→v. If (w, v) is
+not tight at time tX→v, then tX→w = tR→w > t R→v = tX→v (or the algorithm terminates at time
+tR→v).
+Proof. Let ( w, v) be an edge that is not tight at time tR→v, and let X ⊆ R be a terminal set
+reaching v at time tR→v.
+Before time tR→v, no set contributed to ( v, w), implying that ( v, w) is not tight at that time.
+Recall that also (w, v) is not tight at time tR→v. Hence, by (i) of Definition 4.6, the vertex w is not
+reachable at time tR→v and will not be reachable until one of the edges ( v, w) and ( w, v) is tight.
+Because the edge ( w, v) can only become tight strictly after some terminal reached w, the vertex
+w will not be reachable from any terminal until the edge ( v, w) becomes tight.
+Thus, the time at which the edge ( v, w) becomes tight is the first time at which any terminal
+can reach w. The set X can then reach w via (v, w). Hence,
+tX→w = tR→w > t R→v = tX→v ,
+unless the edge ( v, w) never becomes tight. We claim that in the latter case, the algorithm ter-
+minates as time tR→v. Indeed, if the algorithm does not terminate at time tR→v, there is at least
+one set S ∈ S that is active immediately after time tR→v, and that can reach v. Because this set
+cannot yet reach w (no terminal can reach w at time tR→v), this set S will contribute to ( v, w).
+Hence, (ii) of Definition 4.6 implies that ( v, w) will eventually become tight.
+Lemma 5.11. Let S ∈ S , v ∈ V and consider an S-active path P to v. If P has a proper meeting
+point mP , then
+tS→mP = tR→mP < t S→v .
+Proof. We start by proving tR→mP < t S→v. By assumption mP is a proper meeting point, that is
+mP ̸= v. Hence, P contains an outgoing edge of mP . By Observation 5.4, this edge is tight at time
+tS→v. Thus, any set contributing to it must have reached the meeting point mP strictly before
+time tS→v, which implies tR→mP < t S→v.
+Next, we show tS→mP = tR→mP . By the definition of the meeting point (Definition 5.9), we have
+tR\S→mP ≤ tS→mP . Thus, assume for the sake of deriving a contradiction that tR\S→mP < t S→mP .
+Then mP cannot be the start vertex of P (because the start vertex is contained in S and is thus
+reached by S at time 0). Consider the predecessor w of mP on P and let e = ( w, mP ). If the
+edge e is tight at time tR\S→mP < t S→mP , then no subset of S contributed to e. In particular, this
+implies that R \ S reaches w before S does. Otherwise, e is not tight at time tR\S→mP and then
+by Lemma 5.10 applied for X = R \ S, the set R \ S can reach w at time tR→w. In particular,
+R \ S can reach w no later than S can reach w. Hence, in both cases we would have rather chosen
+w instead of mP as the meeting point (according to Definition 5.9), which leads to the desired
+contradiction.
+By Definition 5.9, the set R \ S can reach the meeting point mP whenever S can reach it. In
+fact, this not only holds for mP , but also for every vertex of P that comes after the meeting point.
+Observation 5.12. Let S ∈ S and v ∈ V , and let P be an S-active path to v with meeting point
+mP . Then for every vertex w of P[mP ,v], we have tR\S→w ≤ tS→w.
+29
+
+===== PAGE 32 =====
+
+s1
+s2
+m1 vm2
+10
+2 1
+10
+1
+2 2
+s1
+s2
+m1 vm2
+P1
+P2
+well-subdivided instance t = 12
+s1
+s2
+m1 vm2
+P1
+P2
+s1
+s2
+m1 vm2
+P1
+P2
+t = 13 t = 14
+Figure 11: A well-subdivided instance in which both terminals S1 and s2 can reach v at time 14 via
+the s1-active path P1 and s2-active path P2, respectively. The first vertex of P1 at which s2 arrives
+no later than s1 does is the meeting point of m1 of P1. The meeting point of P2 is m2. Because the
+instance is well-subdivided, s1 and s2 arrive at m1 simultaneously at time t = 12 (and both arrive
+at m2 simultaneously at time t = 13). Note that while both s1 and s2 can reach m1 without the
+help of the other terminal, the same does not hold for s1 and m2.
+30
+
+===== PAGE 33 =====
+
+Proof. If P is an S-active path with meeting point mP , then by Definition 5.9, the set R \ S can
+reach mP at time tS→mP . Consider a vertex w that is visited after mP by P , then the S-tightness of
+P implies that tS→mP ≤ tS→w, and all edges of P[S,w] are tight at time tS→w (by Observation 5.4).
+Thus, at time tS→w the set R \ S can reach w.
+By Definition 5.9, we know that R \ S can reach the meeting point mP at time tR→mP . Often
+reachability alone will not be sufficient for us. Instead, we want to find a set in S that is disjoint
+from S and actively reaches mP at time tR→mP . By the following lemma this is always possible.
+Lemma 5.13. Let S ∈ S and v ∈ V , and let P be an S-active path to v. If mP is a proper meeting
+point of P , then there is a subset ¯S ∈ S of R \ S that actively reaches mP at time tR→mP .
+Proof. By Definition 5.9, the set R \ S can reach mP at time tR→mP . Thus, there exists a terminal
+¯s ∈ R \ S such that ¯s reaches mP at time tR→mP . Let ¯S ∈ S be the set containing ¯s that is active
+at time tR→mP . Then ¯S actively reaches mP . If ¯S = {¯s}, it is clearly disjoint from S. Otherwise,
+we have a ¯S < t R→mP . By Lemma 5.11, this implies
+a
+¯S < t R→mP < t S→v ≤ dS,
+where the last inequality follows from the fact that S actively reaches v. Thus, ¯S is no super-set of
+S. Because ¯S contains the vertex ¯s ∈ R \ S, the set ¯S its also no subset of S, implying that S and
+¯S are disjoint (because both S and ¯S belong to the laminar family S).
+To bound the length of the path P[mP ,v], we need to understand which sets contribute to an
+edge and how much a set S contributes to an edge ⃗ e. The latter, we define as the length of the
+time interval during which S contributes to e. An edge ⃗ eis tight if and only if the total amount
+that all sets contributed to ⃗ eadds up to c (⃗ e). We first observe, that two sets that contribute to
+(orientations of) the same edge have to be disjoint:
+Lemma 5.14. Let e be an undirected edge and S, ¯S ∈ S be two different sets that each contribute
+to some direction of e. Then S and ¯S are disjoint.
+Proof. Suppose that S and ¯S are not disjoint. Then, by laminarity of S, we can assume without
+loss of generality that ¯S ⊊ S. Let ( v, w) be the direction of e to which ¯S contributed. Then
+Observation 5.6, the fact that ¯S contributed to (v, w), and ¯S ⊊ S imply
+tS→v ≤ t
+¯S→v < d
+¯S ≤ aS .
+Hence, when S is activated, it can already reach v. Thus, S cannot contribute to the direction
+(w, v). Using that our instance is well-subdivided, we have (ii) of Definition 4.6 and thus the set S
+cannot contribute to ( v, w) either (because it is not active at the same time as ¯S). Together, this
+yields a contradiction to S contributing to some direction of e.
+By Definition 4.5, a set S contributes to an edge ( v, w) at times t ∈ (tS→v, tS→w] ∩ (aS, dS].
+However, using (ii) of the definition of well-subdivided instances (Definition 4.6), we can give a
+simpler characterization.
+Observation 5.15. If a set S ∈ S contributes to an edge ⃗ e= (v, w) at some time t, then it does
+so exactly at the times t ∈ (tS→v, tS→w].
+Proof. By Definition 4.5, the set S contributes to ⃗ eat each time t with t ∈ (tS→v, tS→w]∩(aS, dS] =:
+(t1, t2]. Thus, our goal is to show that if ( t1, t2] is non-empty, then
+31
+
+===== PAGE 34 =====
+
+(a) t1 = tS→v, and
+(b) t2 = tS→w.
+By (ii) of the definition of well-subdivided instances (Definition 4.6), all other sets that contribute
+to ⃗ edo so exactly during the interval ( t1, t2] and ⃗ ebecomes tight at time t2. In particular, S can
+reach w at time t2 (via the edge ⃗ e). This implies (b) as follows:
+tS→w ≤ t2 = min
+ 
+dS, t S→w
+≤ tS→w .
+To prove (a), consider a terminal s ∈ S with t{s}→v = tS→v. Let ˜S ∈ S be the subset of S
+containing s that is active immediately after time tS→v (which exists because the interval ( t1, t2] is
+non-empty and thus tS→v < d S). Then, using Observation 5.6 and the fact that S contributed to
+the edge ( v, w), we get
+t
+˜S→v ≤ t{s}→v = tS→v < t S→w ≤ t
+˜S→w .
+Because ˜S is active immediately after time tS→v, this implies that ˜S starts contributing to ⃗ e
+immediately after time tS→v. Thus, by Lemma 5.14, we have S = ˜S. We conclude that the set S
+is activated no later than at time tS→v, which yields (a).
+One consequence of Observation 5.15 is the following.
+Lemma 5.16. For a set S ∈ S , let ⃗ e= (v, w) be an S-tight edge. Each subset of S contributes at
+most tS→w − tS→v to ⃗ e.
+Proof. Let S′ ∈ S be a subset of S that contributes to ⃗ e. By Observation 5.15, the set S′ contributes
+exactly tS′→w − tS′→v to ⃗ e. Hence, it remains to show that tS′→w − tS′→v ≤ tS→w − tS→v. By
+Observation 5.6, we get tS′→v ≥ tS→v. Further, by the S-tightness of ⃗ e, the edge ⃗ eis tight at
+time tS→w. In particular, we have tS′→v ≤ tS→w (because S′ contributes to ⃗ eat some time) and
+thus S′ can reach w via ⃗ eat time tS→w, implying tS′→w ≤ tS→w. All together, we thus obtain
+tS′→w − tS′→v ≤ tS→w − tS→v and hence S′ contributes at most tS→w − tS→v to ⃗ e.
+The previous statements in this section all applied to any S-active path. The final lemma we
+will prove in this section will apply only to S-safe paths. We will prove that Figure 3 is indeed a
+worst-case example. Namely, from the meeting point mP to the vertex v, the set S (on average)
+travels with a speed of at most 3. More precisely, as S reaches mP at time tS→mP = tR→mP and v
+at time tS→v, traveling with average speed at most 3, means that the length of P[mP ,v] is at most
+3
+ 
+tS→v − tS→mP
+
+. We will actually show a slightly stronger statement: our upper bound on the
+length will be even smaller if v is reachable by some other terminal before time tS→v.
+Lemma 5.17. Let S ∈ S , v ∈ V and consider an S-safe path P to v. If mP is a proper meeting
+point of P then the length of P[mP ,v] is at most
+2tS→v + tR→v − 3tS→mP .
+Proof. We start by showing that for every edge e = (a, b) of P[mP ,v] there is a unique set ¯S ⊂ R \ S
+that contributed to e or ⃗e before e got tight and this set fulfills
+t
+¯S→a = tR→a and t
+¯S→b = tR→b. (18)
+Consider an edge ( a, b) of P[mP ,v], and let x ∈ { a, b} be the vertex of a and b that is first
+reachable by some terminal, and let y be the other one of these two vertices, that is tR→x ≤ tR→y.
+32
+
+===== PAGE 35 =====
+
+This in particular implies that ( y, x) is not tight at time tR→x. By Observation 5.12, there is a
+terminal ¯s ∈ R \ S, that reaches x at time tR→x. Let ¯S ∈ S be the set containing ¯s that is active
+immediately after time tR→x, then Lemma 5.10 implies that t ¯S→y = tR→y > t R→x = t ¯S→x. Thus
+¯S contributes to the edge ( x, y) and satisfies (18).
+The fact that P is S-safe (Definition 5.8) has two useful implications: First, ¯S is the only subset
+of R \ S that contributes to ( a, b) or ( b, a) before ( a, b) is tight. In particular, ¯S is the only subset
+of R \ S can contribute to ( a, b). Second, at most one subset of S can contribute to ( a, b) or ( b, a)
+before (a, b) is tight. In particular, at most one subset of S can possibly contribute to ( a, b).
+Using this, we can bound the length of P[mP ,v] as follows. Consider a directed edge ⃗ e= (a, b) ∈
+P[mP ,v] and the corresponding set ¯S as above. By Observation 5.15, the set ¯S contributes exactly
+max
+n
+t ¯S→b − t ¯S→a, 0
+o
+to ⃗ e. Similarly, if there is a subset of S that contributes to ⃗ e, then by
+Lemma 5.16, it contributes at most tS→b − tS→a. The edge ⃗ eeventually becomes tight (as it is tight
+at time tS→v). Hence, its length equals the total contribution of ¯S and the corresponding subset
+of S, which gives the following bound:
+c (⃗ e) ≤ tS→b − tS→a + max
+n
+t
+¯S→b − t
+¯S→a, 0
+o
+. (19)
+The set ¯S cannot contribute more than c (⃗ e) to either of ⃗ eand ⃗e = (b, a). Hence, again using
+Observation 5.15,
+c (⃗ e) ≥
+t
+¯S→b − t
+¯S→a
+ . (20)
+Subtracting (20) from two times (19), we get
+c (⃗ e) ≤ 2tS→b − 2tS→a + 2 · max
+n
+t
+¯S→b − t
+¯S→a, 0
+o
+−
+t
+¯S→b − t
+¯S→a
+
+= 2 tS→b − 2tS→a + t
+¯S→b − t
+¯S→a
+= 2 tS→b − 2tS→a + tR→b − tR→a, (21)
+where we used (18) in the last equality. Summing (21) over all edges on P[mP ,v], we obtain a
+telescopic sum that collapses to
+c
+ 
+P[mP ,v]
+
+≤ 2tS→v − 2tS→mP + tR→v − tR→mP = 2 tS→v + tR→v − 3tR→mP ,
+where we used Lemma 5.11 in the last step.
+We want to point out, that the proof of Lemma 5.17 is the key part of our analysis where we
+use that the paths we consider are safe. For non-safe paths, there are multiple reasons why the
+proof of Lemma 5.17 might fail: If there are two or more subsets of S or two or more subsets of
+R \ S contributing to ⃗ e, then (19) does not hold in general (no matter which set we choose as ¯S).
+For the example on the right-hand side of Figure 4, we could for each directed edge of the v-w
+path identify one subset ¯S of R \ S such that (19) is fulfilled (by taking ¯S as the subset of R \ S
+contributing to this directed edge, with is unique in this example) 6. However, ¯S will not satisfy
+(18). Consequently, the last step of (21) does not work, and we eventually don’t obtain a telescopic
+sum (because we cannot choose ¯S uniformly on all edges).
+6The instance on the right-hand side of Figure 4 is not well-subdivided. However, subdividing each diagonal edge
+exactly at its midpoint would result in a well-subdivided instance with the same issue.
+33
+
+===== PAGE 36 =====
+
+5.3 The Main Invariant
+In this section we introduce the invariant (Invariant 5.21) which we later prove to be satisfied
+throughout the moat growing procedure. As mentioned in Section 2.3, we want to prove that
+whenever S actively reaches a vertex v, there is a non-empty subset X ⊆ S that can be cheaply
+connected to v. To get a good analysis also for instances that are not MST-optimal, we additionally
+prove that all terminals in X have a short distance to v. Both of this is captured by the notion
+of t-closeness, which we introduce next. Recall that cost ( X) denotes the minimum cost of a
+component that connects the terminals in X. Similarly we define cost ( X, v) to be the minimum
+cost of a component that connects terminals X and the vertex v.
+Definition 5.18 (t-close). A terminal set X ⊆ R is t-close to a vertex v, if every vertex x ∈ X
+reaches v at time tx→v ≤ t and satisfies
+dist (x, v) ≤ min
+
+t + 2 − 6γ
+7 − 5γ value (X) , 9 − 7γ
+7 − 5γ t
+
+, and (22)
+cost (X, v) ≤ t + 8 − 8γ
+7 − 5γ value (X) . (23)
+In the MST-optimal case it would suffice to require (23). The first part of the upper bound on
+dist (x, v) in (22) will be used to obtain a better dependence on γ. The second part allows us to
+identify strictly γ-expensive set and will be used as follows.
+If we want to use our upper bound (23) on cost ( X, v) and cost (Y, v) to obtain a lower bound
+on the time when two sets X and Y “meet” at a vertex v, then we will need a lower bound on
+cost (X, v) + cost (Y, v) ≥ cost (X ∪ Y ). More precisely, we want X ∪ Y to be strictly γ-expensive.
+For an MST-optimal instance and a strictly 0-good merge plan, this is the case for every set
+X ∪ Y ⊆ R. In general, a terminal set X is strictly γ-expensive if no two terminals x, y ∈ X ∪ Y
+satisfy (14) (because our merge plan M is strictly γ-good). This yields a sufficient condition for a
+set to be strictly γ-expensive.
+Definition 5.19 (late-merged). We say that a terminal set X ⊆ R is late-merged if for all x, y ∈ X
+with x ̸= y:
+merge (x, y) ≥ 7 − 5γ
+18 − 14γ dist (x, y) . (24)
+Observation 5.20. Every late-merged set X ⊆ R is strictly γ-expensive, that is, we have
+cost (X) > 12 − 12γ
+7 − 5γ value (X) .
+Using dist (x, y) ≤ dist (x, v) + dist (y, v), will allow us to use (22) to prove that we have (24)
+for any x ∈ X and y ∈ Y , which we will then use to prove that X ∪ Y is indeed late-merged (see
+Lemma 5.26) and thus strictly γ-expensive.
+To summarize, if S actively reaches v at time t, we would ideally want to find a non-empty
+subset X ⊆ S that is late-merged and t-close to v. This will only be the case if S reached v on its
+own, meaning without the help of terminals in R \ S. If this is not the case, we will additionally
+identify a set ¯X ⊆ R \ S that helped S to reach v. Further, we will identify a vertex m that serves
+as a bifurcation when connecting X ∪ ¯X to v. More precisely, we want both X and ¯X to be close
+to m, and we want that m is not too far away from v.
+The intuition is that both X and ¯X can reach the bifurcation vertex m on their own, but they
+work together to get from m to v. All of this is captured by the following invariant, which we will
+prove to be satisfied throughout the dual growth procedure.
+34
+
+===== PAGE 37 =====
+
+Invariant 5.21. Let v ∈ V be a vertex and S ∈ S a set that actively reaches v at time tS→v via
+an S-safe path. Then one of the following is true:
+(a) there is a non-empty late-merged subset X ⊆ S that is tS→v close to v, or
+(b) there is a vertex m ∈ V and non-empty late-merged sets X ⊆ S, and ¯X ⊆ R \ S such that
+both X and ¯X are tR→m-close to m with tR→m < t S→v, and there is an m-v path Q, all of
+whose edges are tight at time tS→v, with
+c (Q) ≤ 2tS→v + tR→v − 3tR→m . (25)
+This is illustrated in Figure 12. For S, v, Q, m, X, and ¯X as in Invariant 5.21, we will also say
+that the tuple
+ 
+S, v, Q, m, X, ¯X
+
+satisfies Invariant 5.21. For the first case of the invariant, we say
+that (S, v, ∅, v, X, ∅) satisfies Invariant 5.21.
+m
+v
+S
+X¯X
+Q
+Figure 12: An example of a tuple
+ 
+S, v, Q, m, X, ¯X
+
+satisfying case (b) of Invariant 5.21. The set
+S actively reaches the vertex v. The path Q from m to v has length at most 2tS→v + tR→v −3tR→m
+and all of its edges are tight when S first reaches v. The light-blue terminals form the set X that
+is tR→m-close to m. Similarly, the green terminals form the set ¯X that is also tR→m-close to m.
+All of the blue terminals are contained in S, while none of the green terminals is contained in S.
+If S had help from external terminals ¯X, there is, in general, no X ⊆ S that is tS→v-close to
+v. In this case, we have to find a suitable bifurcation vertex m. A natural candidate for m would
+be the meeting point of the S-active path to v. Then, the bound (25) on the length of Q would
+be satisfied by Lemma 5.17. However, as the example from Figure 7 shows 7, the meeting point
+mP is not always a valid choice because the terminals in R \ S reaching it might again had help
+from (subsets of) S. If this is the case, we will recursively (by some inductive argument) choose
+the bifurcation vertex by considering the bifurcation vertex that we would choose for a path from
+¯S ⊆ R \ S to mP .
+7Note that in this example, the bifurcation vertex m lies neither on the only {s1}-tight s1-v path, nor on the only
+{s2}-tight s2-v path.
+35
+
+===== PAGE 38 =====
+
+To prove that Invariant 5.21 holds, we use an inductive argument. To this end, we will not
+only need that S reaches v via a safe path, but we will also need the following: if some other set
+S′ ∈ S actively reaches a vertex w strictly before time tS→v, then it does so via a safe path. For
+this reason, we first prove the following lemma in Section 5.4.
+Lemma 5.22. Invariant 5.21 is satisfied until (including) the first time at which there exists an
+S-active path (for some set S ∈ S ) that is not S-safe.
+To prove Lemma 5.22 by induction, we will also show the following lemma, which is a key part
+of the induction step.
+Lemma 5.23. Let
+ 
+S, v, Q, m, X, ¯X
+
+fulfill Invariant 5.21. Then X ∪ ¯X is tS→v-close to v.
+Using Lemma 5.22, we then show that indeed all S-active paths are S-safe (Section 5.5).
+Lemma 5.24. Every S-active path (for a set S ∈ S ) is S-safe.
+Given Lemmas 5.22 to 5.24, we can complete the proof of Theorem 4.8 as follows:
+Proof of Theorem 4.8. Suppose, for the sake of deriving a contradiction, that the merge plan M is
+not feasible. Then at some time t during the algorithm we grow the dual variable corresponding to
+a set US containing r for a set S ∈ S with r /∈ S. This implies that S reaches r no later than time t.
+Hence, by Lemma 5.7, there is a subset S′ ∈ S of S that actively reaches r. By Lemma 5.24, it
+does so via an S′-safe path and Lemma 5.22 applies. Together with Lemma 5.23, this implies that
+there is a vertex s ∈ S′ ⊆ S such that dist (s, r) ≤ 9−7γ
+7−5γ t. However, s and r are not merged before
+time t (because we grow the dual variable US at time t and s ∈ S, but r /∈ S). Thus, (13) from the
+definition of strictly γ-good merge plans implies 12
+7−5γ t < dist (s, r), which leads to a contradiction:
+dist (s, r) ≤ 9 − 7γ
+7 − 5γ t < 12
+7 − 5γ t < dist (s, r) .
+We remark that, as sketched in Section 2.3, it is also possible to prove Theorem 4.8 by (lower-
+and upper-) bounding the cost cost ( X ∪ {r}) = cost (X, r) of connecting a suitable subset X ⊆ S′
+of terminals to r. This would require a few more computations, but allows avoiding bounds on
+distances (namely (22)) for the special case of MST-optimal instances.
+5.4 The Invariant Holds as long as all Active Paths are Safe
+The goal of this section is to prove Lemma 5.22, that is, that Invariant 5.21 holds until (including)
+the first time that there is some S-active path that is not S-safe. Before we can do this, we need a
+few auxiliary statements.
+Lemma 5.25. Let t ≥ t′ ≥ 0, v, w ∈ V , and X ⊆ R. If X is t′-close to w and there is a w-v path
+Q with c (Q) ≤ t − t′ such that all edges of Q are tight at time t, then X is t-close to v.
+Proof. Both (22) and (23) are preserved when adding the length of Q (where we used that 9−7γ
+7−5γ ≥ 1
+because γ ≤ 1
+5). Moreover, all x ∈ X can reach w at time t′ ≤ t, and the edges of Q are tight at
+time t. Thus, all x ∈ X can reach v at time t.
+Our second auxiliary statement will allow us to ensure that we only ever encounter late-merged
+sets. We remark that the only reason why we care about sets being late-merged is that late-merged
+sets are strictly γ-expensive, and thus, this statement is not needed for the MST-optimal case.
+36
+
+===== PAGE 39 =====
+
+Lemma 5.26. If
+ 
+S, v, Q, m, X, ¯X
+
+fulfills Invariant 5.21, then X ∪ ¯X is late-merged.
+Proof. If ¯X is empty, then (a) of Invariant 5.21 applies and and in particular, X ∪ ¯X = X is
+late-merged. Otherwise, by (b) of Invariant 5.21, both X and ¯X are late-merged. Hence, it suffices
+to prove (24) for x ∈ X and y ∈ ¯X. By the tR→m-closeness of X and ¯X to v, we can upper bound
+the distance from x to y by
+dist (x, y) ≤ dist (x, v) + dist (y, v) ≤ 2 · 9 − 7γ
+7 − 5γ · tR→m = 18 − 14γ
+7 − 5γ · tR→m . (26)
+The terminals x and y are separated by the set S that is active at time tS→v > t R→m. Thus, their
+merge time is at least tR→m. Together with (26), this gives
+merge (x, y) ≥ tR→m ≥ 7 − 5γ
+18 − 14γ dist (x, y) ,
+which implies that X ∪ ¯X is late-merged.
+How early can two sets meet? A crucial part of Invariant 5.21 is (25), the bound on the
+length of Q. However, this bound would be very weak if tR→m could be arbitrarily small. Recalling
+Figure 6, this means that we want to lower bound the time that the green component ( K1) and the
+blue component ( K2) can meet. In Figure 2 we have seen that two terminals cannot meet earlier
+than 6
+7 times the time they will be merged. By arguing about the cost of K1 ∪ K2, we will be able
+to derive a similar bound on the time that two terminal sets meet (Lemma 5.27). Note that for
+the MST-optimal case ( γ = 0) this generalizes the bound from Figure 2. However, in general (for
+larger values of γ) we only get a weaker bound. To compensate this, we will additionally argue
+about the distance between the two sets that meet (Lemma 5.28).
+Lemma 5.27. If
+ 
+S, v, Q, m, X, ¯X
+
+fulfills Invariant 5.21 and ¯X is non-empty, then
+tR→m > 6 − 6γ
+7 − 5γ · tS→v + 2 − 2γ
+7 − 5γ ·
+ 
+value (X) + value
+  ¯X
+
+. (27)
+Proof. By Lemma 5.26, X ∪ ¯X is late-merged. Thus, by Observation 5.20, X ∪ ¯X is strictly
+γ-expensive, that is
+cost
+ 
+X ∪ ¯X
+
+> 12 − 12γ
+7 − 5γ value
+ 
+X ∪ ¯X
+
+. (28)
+Using Lemma 3.9, we can lower bound the right hand-side of (28) by
+12 − 12γ
+7 − 5γ
+ 
+value (X) + value
+  ¯X
+
++ tS→v
+.
+The left hand-side of (28) can be upper bounded by cost ( X, m) + cost
+  ¯X, m
+
+. Together with (23)
+this yields
+8 − 8γ
+7 − 5γ
+ 
+value (X) + value
+  ¯X
+
++ 2tR→m > 12 − 12γ
+7 − 5γ
+ 
+value (X) + value
+  ¯X
+
++ tS→v
+,
+which is equivalent to (27).
+37
+
+===== PAGE 40 =====
+
+Lemma 5.28. If
+ 
+S, v, Q, m, X, ¯X
+
+fulfils Invariant 5.21 and ¯X is non-empty, then
+tR→m > 6
+7 − 5γ · tS→v − 1 − 3γ
+7 − 5γ ·
+ 
+value (X) + value
+  ¯X
+
+. (29)
+Proof. We consider the distance between X and ¯X. Using that both X and ¯X are tR→m-close to
+the bifurcation vertex m, we can upper bound their distance by
+dist
+ 
+X, ¯X
+
+≤ dist (X, m) + dist
+  ¯X, m
+
+≤ 2tR→m + 2 − 6γ
+7 − 5γ
+ 
+value (X) + value
+  ¯X
+
+.
+However, X and ¯X are not merged before time tS→v, that is, for times t < t S→v, no vertex from
+X belongs to the same part of S t as a vertex from ¯X. Thus, the distance of X and ¯X is strictly
+larger than 12
+7−5γ · tS→v (because the merge plan M is strictly γ-good), implying
+2tR→m + 2 − 6γ
+7 − 5γ
+ 
+value (X) + value
+  ¯X
+
+> 12
+7 − 5γ tS→v,
+which is equivalent to (29).
+In the MST-optimal case (where we can choose γ = 0), the bound (27) dominates (29) and is
+thus sufficient. In general, neither of the bounds (27) and (29) dominates the other, which is why
+we often use linear combinations of (27) and (29). To simplify later computations, we provide the
+relevant combinations in Corollary 5.29.
+Corollary 5.29. If
+ 
+S, v, Q, m, X, ¯X
+
+fulfils Invariant 5.21 and ¯X is non-empty, then
+tS→v − tR→m < 1 − 3γ
+7 − 5γ · tS→v , and (30)
+2
+ 
+tS→v − tR→m
+< 2 − 2γ
+7 − 5γ · tS→v − 2 − 2γ
+7 − 5γ ·
+ 
+value (X) + value
+  ¯X
+
+. (31)
+Proof. Subtracting 2
+3 of (29) and 1
+3 of (27) from tS→v implies (30):
+tS→v − tR→m < t S→v − 2
+3
+ 6
+7 − 5γ · tS→v − 1 − 3γ
+7 − 5γ
+ 
+value (X) + value
+  ¯X
+
+− 1
+3
+6 − 6γ
+7 − 5γ · tS→v + 2 − 2γ
+7 − 5γ
+ 
+value (X) + value
+  ¯X
+
+≤ 1 − 3γ
+7 − 5γ · tS→v.
+Inequality (27) is equivalent to
+tS→v − tR→m < 1 + γ
+7 − 5γ · tS→v − 2 − 2γ
+7 − 5γ
+ 
+value (X) + value
+  ¯X
+
+.
+Adding this to (30) gives (31).
+Using Corollary 5.29, we can prove Lemma 5.23, which we restate here. At this point, the proof
+boils down to a few calculations. However, we want to emphasize that this is the key lemma that
+allows us to control the behavior of Algorithm 1 with merge plans for which S is not a collection
+of singletons.
+38
+
+===== PAGE 41 =====
+
+Lemma 5.23. Let
+ 
+S, v, Q, m, X, ¯X
+
+fulfill Invariant 5.21. Then X ∪ ¯X is tS→v-close to v.
+Proof. If ¯X = ∅, then we are in case (a) of Invariant 5.21 and thus the statement trivially holds.
+Therefore, we now assume that ¯X is non-empty. In particular, we can apply Corollary 5.29.
+We start by proving the desired upper bound on cost( X ∪ ¯X, v), that is (23). Due to X and ¯X
+being tR→m-close to m, and (25) from Invariant 5.21, we have
+cost
+ 
+X ∪ ¯X, v
+
+≤ cost (X, m) + cost
+  ¯X, m
+
++ dist (m, v)
+≤ 8 − 8γ
+7 − 5γ value (X) + tR→m + 8 − 8γ
+7 − 5γ value
+  ¯X
+
++ tR→m + 2 tS→v + tR→v − 3tR→m
+≤ 8 − 8γ
+7 − 5γ
+ 
+value (X) + value
+  ¯X
+
++ 2tS→v + tS→v − tR→m,
+where the last inequality follows from Observation 5.6. Together with (30) from Corollary 5.29,
+this implies
+cost
+ 
+X ∪ ¯X, v
+
+≤ 8 − 8γ
+7 − 5γ
+ 
+value (X) + value
+  ¯X
+
++
+
+2 + 1 − 3γ
+7 − 5γ
+
+tS→v
+= 8 − 8γ
+7 − 5γ
+ 
+value (X) + value
+  ¯X
+
++ tS→v
++ tS→v
+≤ 8 − 8γ
+7 − 5γ value
+ 
+X ∪ ¯X
+
++ tS→v ,
+where we used Lemma 3.9 in the last step. This proves (23).
+To prove the desired distance bound (see (22)) for all x ∈ X ∪ ¯X, fix such a vertex x and assume
+without loss of generality that x ∈ X. (The argument for x ∈ ¯X is the same, except that we replace
+X everywhere by ¯X.) Using again (25) from Invariant 5.21, we have dist ( m, v) ≤ 2tS→v + tR→v −
+3tR→m ≤ 3
+ 
+tS→v − tR→m
+, where the second inequality follows from Observation 5.6. By the
+tR→m-closeness of X to m, this implies
+dist (x, v) ≤ dist (x, m) + dist (m, v)
+≤ tR→m + 2 − 6γ
+7 − 5γ value (X) + 3
+ 
+tS→v − tR→m
+= tS→v + 2 − 6γ
+7 − 5γ value (X) + 2
+ 
+tS→v − tR→m
+. (32)
+Combining (32) with each of the bounds (30) and (31) from Corollary 5.29, yields
+dist (x, v) ≤ min
+
+tS→v + 2 − 6γ
+7 − 5γ
+ 
+value (X) + tS→v
+, t S→v + 2 − 2γ
+7 − 5γ tS→v
+
+.
+Using Lemma 3.9, this implies the desired distance bound (see (22)) for x ∈ X ∪ ¯X.
+Finally, we have to show that every vertex x ∈ X ∪ ¯X can reach v at time tS→v. This is indeed
+the case because each x ∈ X ∪ ¯X can reach m at time tR→m ≤ tS→v, and by Invariant 5.21 there
+is an m-v path consisting only of edges that are tight at time tS→v. Thus, X ∪ ¯X is tS→v-close
+to v.
+Before we can prove the main result of this section (Lemma 5.22), we need to establish one
+technical detail about ¯X. Namely, that at time tR→v the terminal set ¯X is contained in a single
+active set.
+39
+
+===== PAGE 42 =====
+
+Lemma 5.30. If
+ 
+S, v, Q, m, X, ¯X
+
+fulfills Invariant 5.21 and ¯X is non-empty, then all vertices of
+¯X are contained in the same active set at time tR→v (and thus also at any later time).
+Proof. Suppose that at time tR→v the set ¯X is not contained in a single active set. Then in
+particular value
+  ¯X
+
+≥ tR→v (by Lemma 3.9 or directly by the definition of value). Thus, by
+Lemma 5.27, we have
+2tR→m > 12 − 12γ
+7 − 5γ tS→v + 4 − 4γ
+7 − 5γ
+ 
+value (X) + value
+  ¯X
+
+≥ 12 − 12γ
+7 − 5γ tS→v + 4 − 4γ
+7 − 5γ tR→v.
+Using tS→v ≥ tR→v (by Observation 5.6), this yields
+2tR→m > 9 − 11γ
+7 − 5γ tS→v + tR→v ≥ tS→v + tR→v , (33)
+where we used γ ≤ 1
+5. Thus, the length of the m-v path Q can be bounded as follows:
+c (Q) ≤ 2tS→v + tR→v − 3tR→m < t S→v − tR→m = tS→v − tS→m, (34)
+where in the last step we used that X ⊆ S is tR→m-close to m, which in particular implies that X
+(and thus also S) can reach m at time tR→m.
+To derive a contradiction, we show that (34) cannot be true. Namely, we show that c (Q) ≥
+tS→v − tS→m. Indeed, for every time t ∈
+
+tS→m, tS→v
+, there is at least one edge e = ( a, b)
+on the directed m-v path Q for which a is reachable by S but b is not. Hence, at every time
+t ∈
+ 
+tS→m, tS→v
+at least one subset of S contributes to an edge of Q. Thus, in total, the subsets
+of S contribute at least max
+
+0, t S→v − tS→m	
+to the edges of the directed path Q, and hence
+tS→v − tS→m ≤ max
+
+0, t S→v − tS→m	
+≤ c (Q) . (35)
+This contradicts (34).
+Finally, we are ready to prove the main result of this section.
+Lemma 5.22. Invariant 5.21 is satisfied until (including) the first time at which there exists an
+S-active path (for some set S ∈ S ) that is not S-safe.
+Proof. We do a proof by induction over time. Note that it suffices to consider the finite set of
+points in time at which an edge becomes tight, or the partition of active sets changes. We work
+with a slightly stronger induction hypothesis and additionally show that if a set S ∈ S reaches a
+vertex v ∈ V via a safe path P , then we can choose ¯X (see Invariant 5.21) such that every vertex
+x ∈ ¯X can reach some inner vertex w of the path P at time tR→w.
+At time t = 0, each terminal set S ∈ S t can only reach itself. For every v ∈ S, the tuple
+(S, v, ∅, v, {v} , ∅) satisfies Invariant 5.21.
+Now let v ∈ V be a vertex and S ∈ S a set that actively reaches v at time t := tS→v > 0 via a
+safe path P . Further, assume that all active paths that existed strictly before time tS→v are safe.
+We distinguish two cases, based on whether or not the path P has a proper meeting point.
+Case 1: P has no proper meeting point. Let e = ( w, v) be the last edge of P . Then e is
+tight at time tS→v and we have tS→w ≤ tS→v. Because P has no proper meeting point, we have
+tR\S→w > t S→w. This implies that tS→v is strictly larger than tS→w, as otherwise no set could have
+contributed to e before it became tight. Hence, S or some subset of S contributed to e throughout
+40
+
+===== PAGE 43 =====
+
+the time interval (tS→w, tS→v]. Because S (and thus non of its strict subsets) is active at time tS→v
+and because tR\S→w > t S→w, property (ii) of well-subdivided instances (Definition 4.6) implies that
+S is the only set that ever contributes to e. Hence, c (e) = tS→v − tS→w and t′ := tS→w < t S→v = t.
+By Lemma 5.7, there is a subset S′ ∈ S of S that actively reaches w at time tS→w and for which
+the path P ′ resulting from P by removing e is an S′-active path. All edges of P ′ were already
+tight at time t′ < t . Hence, this path is S′-safe by assumption. By induction, we get a tuple 
+S′, w, Q′, m′, X′, ¯X ′
+that fulfills Invariant 5.21.
+The path P has no proper meeting point, but every vertex x ∈ ¯X ′ can reach w at time tS′→w =
+tS→w. Thus, the set ¯X ′ has to be disjoint from R\S, implying X ′ ∪ ¯X ′ ⊆ S. By Lemma 5.23, the set
+X ′ ∪ ¯X ′ is tS→w-close to w. By Lemma 5.25 it is also tS→v-close to v. Further, X ′ ∪ ¯X ′ is late-merged
+by Lemma 5.26. All together this implies that
+ 
+S, v, ∅, v, X′ ∪ ¯X ′, ∅
+
+satisfies Invariant 5.21.
+Case 2: P has a proper meeting point. By Lemma 5.13, there is a set ¯S ⊆ R \ S that
+actively reaches mP at time tR→mP , which by Lemma 5.11 is strictly earlier than time tS→v. Thus,
+we can use the induction hypothesis for ¯S and mP , to obtain a tuple
+
+¯S, mP , ¯Q, ¯m, ¯X, ˆX
+
+satisfying
+Invariant 5.21. By Lemma 5.30, ˆX is either a non-empty subset of S, or disjoint from S.
+If ˆX is a non-empty subset of S, then
+
+S, v, ¯Q + P[mP ,v], ¯m, ˆX, ¯X
+
+fulfills Invariant 5.21. To
+verify this, note that all edges of ¯Q + P[mP ,v] are tight at time tS→v. Moreover, by Lemma 5.11, we
+have t ¯S→mP = tR→mP , and thus by Lemma 5.17,
+c
+  ¯Q + P[mP ,v]
+
+= c
+  ¯Q
+
++ c
+ 
+P[mP ,v]
+
+≤ 2t
+¯S→mP + tR→mP − 3tR→ ¯m + 2tS→v + tR→v − 3tR→mP
+= 2 tS→v + tR→v − 3tR→ ¯m.
+Furthermore, the additional condition in our strengthened induction hypothesis is satisfied because
+each vertex x ∈ ¯X can reach the inner vertex mP of P at time tR→mP .
+Otherwise, ˆX and S are disjoint. Then ¯X ∪ ˆX is a subset of R \ S and, by Lemma 5.23, is
+tR→mP -close to mP . By Lemma 5.7, there is a subset S′ ⊆ S for which P[S,mP ] is an S′-active
+path. Applying the induction hypothesis to S′ and mP , we obtain a tuple
+ 
+S′, mP , Q′, m′, X′, ¯X ′
+fulfilling Invariant 5.21 and our extra condition, namely that all x ∈ ¯X ′ can reach some inner vertex
+w of P[S,mP ] at time tR→w. By the choice of mP , the latter implies that ¯X ′ ⊆ S (otherwise we
+would have chosen the meeting point mP closer to S on P ; see Definition 5.9). By Lemma 5.23,
+X ′ ∪ ¯X ′ is tS′→mP -close to mP and hence it is also tR→mP -close to mP (because tS′→mP = tS→mP =
+tR→mP by Lemmas 5.7 and 5.11). We conclude that the tuple
+
+S, v, P[mP ,v], mP , X′ ∪ ¯X ′, ˆX ∪ ¯X
+
+fulfills Invariant 5.21: Both sets X ′ ∪ ¯X ′ and ˆX ∪ ¯X are tR→mP -close to mP , and tR→mP < t S→v
+(Lemma 5.11). Furthermore, all edges of the path P[mP ,v] are tight at time tS→v and by Lemma 5.17
+its length is at most 2 tS→v + tR→v − 3tR→mp. By the tR→mP -closeness of ˆX ∪ ¯X to the inner vertex
+mP of P , the additional condition in our strengthened induction hypothesis is satisfied as well.
+5.5 All Active Paths are Safe
+In this section, we will complete the proof of Theorem 4.8 by showing that there is never an active
+path that fails to be safe:
+Lemma 5.24. Every S-active path (for a set S ∈ S ) is S-safe.
+41
+
+===== PAGE 44 =====
+
+The overall strategy will be a proof by contradiction. We consider the first time when there is a
+non-S-safe edge on an S-active path (for some set S ∈ S ). Then, we will construct a component K
+from three parts, each of whose cost we will upper bound using that Invariant 5.21 is still satisfied
+at this time (by Lemma 5.22). Additionally, we will show that K connects a late-merged (and
+thus strictly γ-expensive) set of terminals, which yields a lower bound on the cost of K. The lower
+bound we obtain will be strictly greater than our upper bound on the cost of K, leading to the
+desired contradiction.
+Suppose that Lemma 5.24 is not true and let t be the first time at which there is an S-active
+path (for some set S ∈ S ) that is not S-safe. (Note that such a first time exists because it suffices
+to consider the finite set of times at which some edge becomes tight.) Further, let P + e be an
+inclusion-wise minimal such path that exists at time t, and let S1 ∈ S such that P + e is S1-active,
+but not S1-safe. Let e = (v, w). Then, by Lemma 5.7, there is a set S′
+1 ⊆ S1 such that P is S′
+1-active
+and tS′
+1→v = tS1→v. By minimality of the path P + e, the path P is not only S′
+1-active, but also
+S′
+1-safe. By the definition of safe edges (Definition 5.8) and because S′
+1 ⊆ S1, every S′
+1-safe edge is
+also S1-safe. This implies that all edges of P are S1-safe. Hence, the edge e = (v, w) is not S1-safe.
+According to the definition of safe edges (Definition 5.8), there are two possible reasons why e
+could be non- S1-safe: (i) there are three sets that contributed to e or (w, v) before e got tight, or
+(ii) there are two subsets of R \ S1 that contributed to e = (v, w) or ( w, v) before e became tight.
+We next show that (ii) is always the case.
+Lemma 5.31. There exist two subsets of R \ S1 that each contributed to one of the directed edges
+e = (v, w) or (w, v) before the time at which e became tight.
+Proof. We first show that no proper subset of S1 can contribute to e or ( w, v) before e became
+tight. Suppose that some proper subset S′ ⊊ S1 contributed to e, then S′ actively reaches w (by
+(ii) of the definition of well-subdivided instances; see Definition 4.6). This implies that S1 cannot
+actively reach w, and thus contradicts P + e being S1-active.
+Now suppose instead that some proper subset S′ ⊊ S1 contributed to ( w, v) before e = (v, w)
+became tight. Then e is not yet tight at time tS′→w and thus also not tight at time tS1→w ≤ tS′→w
+(where we used Observation 5.6). This contradicts the fact that P + e is an S1-tight path.
+Hence, there is at most one subset of S1 (namely S1 itself) that could have contributed to e or
+(w, v) before e got tight. Thus, if there are three or more sets that contributed to e or (w, v) before
+e got tight, at least two of them are subsets of R \ S (by laminarity of S).
+Let S2, S3 ∈ S be two subsets of R \ S1 that contributed to e or (w, v) before e became tight.
+By Lemma 5.7, there are subsets S′
+2, S′
+3 ∈ S of S2 and S3, respectively, that actively reach v at the
+same time as S2 and S3, respectively. In particular, we have
+tS′
+1→v = tS1→v, t S′
+2→v = tS2→v, t S′
+3→v = tS3→v . (36)
+By Lemma 5.14, the sets S1, S2, S3 are pairwise disjoint. Thus, also their subsets S′
+1, S′
+2, S′
+3 are
+pairwise disjoint. The reason that we use S′
+i instead of Si is a technical detail only needed to ensure
+that Invariant 5.21 applies (as Si might not actively reach v). For intuition, one can think of Si
+and S′
+i as being equal (and this is indeed the case if Si actively reaches v).
+Lemma 5.32. Each set S′
+i (for i = 1 , 2, 3) actively reaches the vertex v via an S′
+i-safe path.
+Moreover, at time tS1→v, each set Si (with i = 1, 2, 3) can reach the vertex v.
+Proof. For S′
+1, this is the case because P is an S′
+1-safe path to v. Let now i ∈ {2, 3}. We show that
+Si (and thus by (36) also S′
+i) can reach v strictly before time t, which by our choice of t implies
+that the S′
+i-active path via which S′
+i reaches v is S′
+i-safe.
+42
+
+===== PAGE 45 =====
+
+If the set Si contributed to e, it reached v before e became tight, and thus strictly before time t
+and no later than time tS1→v. Otherwise, Si contributed to ( w, v) before e became tight. Then
+in particular, the edge e is not tight at time tR→w ≤ tSi→w. Consider a set S ∈ S that actively
+reaches w at time tR→w. By Lemma 5.10, we have tS→v = tR→v > t R→w = tS→w. Hence, S or
+a super-set of S contributed to ( w, v). Recall that the set Si also contributed to ( w, v). Thus,
+by (ii) of Definition 4.6 (well-subdivided instances), the sets Si and S reach v at the same time,
+namely at time tS→v = tR→v. Before time tR→v no set can contribute to e and thus tR→v < t .
+We conclude that the set Si indeed reaches v strictly before time t and no later than time tS1→v
+(because tS1→v ≥ tR→v).
+By Lemma 5.32, we may assume without loss of generality that tS1→v ≥ tS2→v ≥ tS3→v.
+Moreover, by Lemmas 5.22 and 5.32, for all i ∈ {1, 2, 3} we can apply Invariant 5.21 for S′
+i and v,
+that is, there are tuples
+ 
+S′
+i, v, Qi, mi, Xi, ¯Xi
+
+fulfilling Invariant 5.21.
+Let i, j ∈ { 1, 2, 3}. By Lemma 5.30, for any time t′ ≥ tR→v, all vertices of ¯Xi are contained in
+the same active set (that is the same set from the partition S t′
+). Because S′
+j is active at time
+tS′
+j →v ≥ tR→v, the set ¯Xi is either a non-empty subset of S′
+j or it is disjoint from S′
+j. Figures 13
+and 14 provide some examples and illustrate the tuples
+ 
+S′
+i, v, Qi, mi, Xi, ¯Xi
+
+for two different
+scenarios.
+To derive the desired contradiction, we will to choose three (non-empty) sets out of X1, ¯X1, X2,
+¯X2, X3, ¯X3. We then do two things: First, we upper bound the cost (for connecting) the union
+of these three sets, and second, we show that the union of these three sets is late-merged and thus
+strictly γ-expensive (Observation 5.20).
+By the definition of late-merged sets (Definition 5.19), the union of the three sets is late-merged
+if each union of two of the sets is late-merged:
+Observation 5.33. Let A, B, C ⊆ R be three sets, such that A ∪ B, B ∪ C, and C ∪ A are all
+late-merged, then also A ∪ B ∪ C is late-merged.
+We will always choose at least two of X1, X2, and X3. Hence, we in particular need that the
+union of two of these sets is late-merged:
+Observation 5.34. For a, b ∈ {1, 2, 3} the set Xa ∪ Xb is late-merged.
+Proof. Assume without loss of generality that tS′
+a→v ≤ tS′
+b→v. By Lemma 5.23, both Xa ∪ ¯Xa and
+Xb ∪ ¯Xb are tS′
+b→v-close to v. Hence, (22) from the definition of t-closeness implies that for any
+x ∈ Xa and y ∈ Xb,
+dist (x, y) ≤ dist (x, v) + dist (y, v) ≤ 2 · 9 − 7γ
+7 − 5γ · tS′
+b→v ≤ 18 − 14γ
+7 − 5γ · merge (x, y) .
+Which three sets we choose depends on which of ¯X1, ¯X2, ¯X3 are empty. If all of them are
+empty, our only option is to choose X1, X2, X3. However, in general, it could be better to choose,
+for example, X1, X2, ¯X2 because we can connect them without using the path Q3, which leads to a
+better upper bound on the cost. (See the example in Figure 14.) We distinguish the following two
+cases:
+43
+
+===== PAGE 46 =====
+
+v
+m1
+S1=S′1
+S2=S′2
+S3=S′3
+Q1
+X1 ¯X1
+X2X3
+Figure 13: An abstract drawing of three disjoint sets S1, S2, and S3 that all (actively) reach the
+same vertex v as such that Invariant 5.21 applies. The shown configuration belongs to Case 1 of
+our proof. The tuple
+ 
+S1, v, Q1, m1, X1, ¯X1
+
+satisfies case (b) of Invariant 5.21 and for i = 2, 3, the
+tuple (Si, v, ∅, v, Xi, ∅) satisfies case (a) of Invariant 5.21. That is, X2 and X3 are close to v, the set
+X1 is close to m1 and we can upper bound the length of the m1-v path Q1. Using that X1, X2, and
+X3 are separated by the active sets S1, S2, and S3, we can lower bound value ( X1 ∪ X2 ∪ X3) and
+show that X1 ∪ X2 ∪ X3 is late-merged (and thus strictly γ-expensive). To derive a contradiction,
+we prove that X1 ∪ X2 ∪ X3 can be connected in a cheap way (using the path Q1 and all shown
+components except for the gray one). The set ¯X2 could also be contained in S2, or in S3. However,
+for our proof in Case 1 this is not relevant, as we will anyways not connect the terminals in ¯X1.
+44
+
+===== PAGE 47 =====
+
+Case 1: Both ¯X2 and ¯X3 are empty.
+An example is shown in Figure 13. In this case, (a) of Invariant 5.21 applies, and thus both X2
+and X3 are tS2→v-close respectively tS3→v-close to v, where we used (36). The set X1 might not be
+tS1→v-close to v, but we can still bound to cost of connecting it to v by using Q1 and the closeness
+to m1. More precisely, if ¯X1 ̸= ∅, then (b) of Invariant 5.21 applies and yields
+cost (X1, v) ≤ tR→m1 + 8 − 8γ
+7 − 5γ value (X1) + c(Q1)
+≤ tR→m1 + 8 − 8γ
+7 − 5γ value (X1) + 2tS1→v + tR→v − 3tR→m1
+≤ tR→m1 + 8 − 8γ
+7 − 5γ value (X1) + 3tS1→v − 3tR→m1
+= tS1→v + 8 − 8γ
+7 − 5γ value (X1) + 2
+ 
+tS1→v − tR→m1
+
+.
+By Corollary 5.29, this implies
+cost (X1, v) ≤ tS1→v + 8 − 8γ
+7 − 5γ value (X1) + 2 − 6γ
+7 − 5γ tS1→v.
+If ¯X1 = ∅, then (a) of Invariant 5.21 applies, which also yields
+cost (X1, v) ≤ tS1→v + 8 − 8γ
+7 − 5γ value (X1) ≤ tS1→v + 8 − 8γ
+7 − 5γ value (X1) + 2 − 6γ
+7 − 5γ tS1→v.
+We conclude that no matter whether ¯X1 is empty or not, we have
+cost (X1 ∪ X2 ∪ X3) ≤ cost (X1, v) + cost (X2, v) + cost (X3, v)
+≤ 8 − 8γ
+7 − 5γ (value (X1) + value (X2) + value (X3))
++ tS1→v + tS2→v + tS3→v + 2 − 6γ
+7 − 5γ tS1→v.
+Because tS1→v ≥ tS2→v ≥ tS3→v, and using 1 + 2−6γ
+7−5γ < 12−12γ
+7−5γ and 3 + 2−6γ
+7−5γ < 24−24γ
+7−5γ , we can
+simplify our upper bound to
+cost (X1 ∪ X2 ∪ X3) < 12 − 12γ
+7 − 5γ
+ 
+value (X1) + value (X2) + value (X3) + tS1→v + tS2→v
+≤ 12 − 12γ
+7 − 5γ value (X1 ∪ X2 ∪ X3) , (37)
+where the second inequality follows from Lemma 3.9 (applied twice).
+By Observations 5.33 and 5.34, the set X1 ∪ X2 ∪ X3 is late-merged, contradicting (37).
+Case 2: At least one of ¯X2 and ¯X3 is non-empty.
+An example of this case is shown in Figure 14.
+Let j ∈ {2, 3} be an index such that ¯Xj ̸= ∅. Our strategy will be to choose Xj and ¯Xj as two
+of the three sets. As the third set we will choose one of the sets X1, X2, X3 (but not Xj again).
+We write Xk to denote this third set, where k ∈ { 1, 2, 3} \ { j}. Let k ̸= j such that exactly one
+of Xk and ¯Xj is contained in S1 (which is possible because X1 ⊆ S1, but X2 and X3 are disjoint
+45
+
+===== PAGE 48 =====
+
+v
+m1
+m2
+m3
+S1=S′1
+S2=S′2
+S3=S′3
+Q1
+Q2
+Q3
+X1
+¯X1
+X2
+¯X2
+X3
+¯X3
+Figure 14: An abstract drawing of three disjoint sets S1, S2, and S3 that all (actively) reach the
+same vertex v as such that Invariant 5.21 holds. The shown configuration belongs to Case 2 of our
+proof. Here, for i ∈ {1, 2, 3}, the tuple
+ 
+Si, v, Qi, mi, Xi, ¯Xi
+
+satisfies case (b) of Invariant 5.21. In
+particular, both sets Xi and ¯Xi are close to mi, and we can upper bound the length of the mi-v
+path Qi.
+To derive a contradiction, we choose three sets amongX1, ¯X1, X2, ¯X2, X3, ¯X3 whose union is strictly
+γ-expensive, and we show that connecting all terminals of these three sets to v is too cheap. There
+are two aspects to consider for our choice: we want to choose three sets for which we (i) know how
+to cheaply connect them (using the components and paths shown in the figure) and (ii) know that
+their union has large value (which implies connecting them must be expensive). To argue that the
+union of the three sets has large value, we will choose them such that they are separated by (two
+of) the sets S1, S2, S3. (Then Lemma 3.9 will yield a good lower bound on the value of the union
+of our three sets.) In this example, this means that we want to choose one of the green sets X1 and
+¯X3, one of the red sets X2 and ¯X1, and one of the blue sets X3 and ¯X2.
+Choosing X1, X2, and X3 would be the easiest choice to ensure (ii). However, the cheapest way of
+connecting them might include all three path Q1, Q2, and Q3 and the tree components connecting
+Xi to mi. In this example, we could instead choose X1, X2 and ¯X2. Connecting them requires
+three components (two connecting X2 and ¯X2 to m2 and one connecting X1 to m1) but only two
+of the three paths Qi.
+In general, in Case 2 of our proof, the set ¯X2 could also be contained in S1 or it could be disjoint
+from all S1, S2, and S3. But, by Lemma 5.30, we know that ¯X2 cannot contain elements of both
+S1 and S3 simultaneously. Hence, choosing ¯X1 cannot simultaneously prevent us from choosing
+X1 and from choosing X3. (It is also possible that ¯X2 is empty, in which case we use X3 and ¯X3
+instead of X2 and ¯X2.)
+46
+
+===== PAGE 49 =====
+
+from S1). Recall that (by Lemma 5.30) ¯Xj is either contained in S1 or disjoint from S1. Thus, our
+choice of k guarantees that the terminals from Xk and ¯Xj are not merged before time dS1 ≥ tS1→v
+(where the inequality follows from P + e being an S1-active path with e = (v, w)).
+We will now use this property to prove that Xj ∪ ¯Xj ∪ Xk is late-merged. We already know that
+Xj ∪ ¯Xj is late-merged (Lemma 5.26) and that Xj ∪ Xk is late-merged (Observation 5.34). Thus,
+by Observation 5.33, it suffices to show that Xk ∪ ¯Xj is late merged.
+Observation 5.35. ¯Xj ∪ Xk is late-merged.
+Proof. By our choice of k, exactly one of Xk and ¯Xj is contained in S1 and the other set is
+disjoint from S1. Further, by Lemma 5.32, tS1→v ≥ max
+
+tS2→v, tS3→v	
+, and hence, tS′
+1→v ≥
+max
+n
+tS′
+j →v, tS′
+k→v
+o
+by (36). Thus, by Lemma 5.23, both Xj ∪ ¯Xj and Xk ∪ ¯Xk are tS′
+1→v-close
+to v. Hence, using (22) from the definition of tS′
+1→v-closeness, we get for all x ∈ ¯Xj and y ∈ Xk,
+dist (x, y) ≤ dist (x, v) + dist (y, v) ≤ 2 · 9 − 7γ
+7 − 5γ · tS′
+1→v ≤ 18 − 14γ
+7 − 5γ · merge (x, y) .
+We conclude that Xj ∪ ¯Xj ∪ Xk is late-merged and thus strictly γ-expensive (Observation 5.20).
+To derive the desired contradiction, we will now establish an upper bound on the cost of connecting
+Xj ∪ ¯Xj ∪ Xk.
+We know that both Xj and ¯Xj are tR→mj-close to mj and Xk is tR→mk-close to mk. Thus,
+using the mj-v path Qj and the mk-v path Qk, we get
+cost
+ 
+Xj ∪ ¯Xj ∪ Xk
+
+≤ cost (Xj, mj) + cost
+  ¯Xj, mj
+
++ cost (Xk, mk) + c (Qj) + c (Qk)
+≤ 8 − 8γ
+7 − 5γ
+ 
+value (Xj) + value
+  ¯Xj
+
++ value (Xk)
+
++ 2tR→mj + tR→mk + c (Qj) + c (Qk) . (38)
+Using Corollary 5.29, we can bound the length of the path Qj as follows:
+c (Qj) ≤ 2tSj →v + tR→v − 3tR→mj <
+
+1 + 1 − 3γ
+7 − 5γ
+
+tSj →v + tR→v − 2tR→mj . (39)
+If ¯Xk is non-empty, we can similarly bound c (Qk), using again Corollary 5.29:
+c (Qk) ≤ 2tSk→v + tR→v − 3tR→mk ≤ 2 − 6γ
+7 − 5γ tSk→v + tR→v − tR→mk . (40)
+If ¯Xk is empty, then v = mk and c (Qk) = 0, and thus (40) is trivially satisfied.
+Combining (38), (39), and (40) yields
+cost
+ 
+Xj ∪ ¯Xj ∪ Xk
+
+< 8 − 8γ
+7 − 5γ
+ 
+value (Xj) + value
+  ¯Xj
+
++ value (Xk)
+
++ 8 − 8γ
+7 − 5γ tSj →v + 2 − 6γ
+7 − 5γ tSk→v + 2tR→v.
+Using 2tR→v = 14−10γ
+7−5γ tR→v ≤ 4−4γ
+7−5γ tSj →v + 10−6γ
+7−5γ tSk→v (by Observation 5.6), this implies
+cost
+ 
+Xj ∪ ¯Xj ∪ Xk
+
+< 12 − 12γ
+7 − 5γ
+ 
+value (Xj) + value
+  ¯Xj
+
++ value (Xk) + tSj →v + tSk→v
+≤ 12 − 12γ
+7 − 5γ
+ 
+value
+ 
+Xj ∪ ¯Xj
+
++ value (Xk) + tSk→v
+≤ 12 − 12γ
+7 − 5γ value
+ 
+Xj ∪ ¯Xj ∪ Xk
+
+,
+47
+
+===== PAGE 50 =====
+
+where the last two inequalities follow from Lemma 3.9: first, applied to the set S′
+j, which is active
+at time tSj →v and separates Xj and ¯Xj, and second, applied to the set S′
+k, which is active at time
+tSk→v and separates Xj ∪ ¯Xj and Xk. This contradicts the fact that Xj ∪ ¯Xj ∪ Xk is strictly
+γ-expensive.
+6 Existence of Good Merge Plans
+The goal of this section is to prove the existence ofγ-good merge plans whose value is large whenever
+the cost OPT of a cheapest Steiner tree is large. In particular, we will prove Theorem 2.11 and show
+how our upper bound on the integrality gap of BCR (Theorem 1.1) follows from Theorem 2.10.
+To this end, we will consider the Steiner tree resulting from Zelikovsky’s relative greedy algo-
+rithm [Zel96], whose cost yields an upper bound on OPT (see Section 6.1). Moreover, for every
+γ ∈ [0, 1
+5], we will construct a γ-good merge plan Mγ. This will lead to the following theorem.
+Theorem 6.1. For every instance I of the Steiner tree problem, there is a non-increasing function
+ρI :
+
+0, 1
+2
+
+→ [0, 1] such that for every γ ∈ [0, 1
+5], there exists a γ-good merge plan Mγ with
+value (Mγ)
+TMST ≥ 7 − 5γ
+12
+
+1 − ρI (γ) 3 − 7γ
+9 − 7γ
+
+(41)
+and
+OPT
+TMST ≤ 1 −
+Z 1
+2
+0
+ρI (γ) dγ. (42)
+Observe that the lower bound (41) on the value of our merge plan gets weaker, if ρI(γ) is large.
+However, if this is the case for all (or many) values of γ, then (42) is a strong upper bound on OPT.
+In fact, Theorem 6.1 is a strengthening of Theorem 2.11. Indeed, by (42), for every γ∗ ∈ [0, 1
+5], we
+have
+TMST − OPT ≥ TMST ·
+Z 1
+2
+0
+ρI (γ) dγ ≥ TMST ·
+Z γ∗
+0
+ρI (γ) dγ ≥ γ∗ · ρI(γ∗) · TMST,
+which together with (41) implies
+value (Mγ∗) ≥ 7 − 5γ∗
+12
+
+TMST − TMST − OPT
+γ∗ · 3 − 7γ∗
+9 − 7γ∗
+
+.
+As explained in Section 2.2, combining Theorem 2.11 with Theorem 2.10 readily implies an upper
+bound on the integrality gap of BCR that is smaller than 2. However, to prove our upper bound
+of 1.898 on the integrality gap, we will directly work with Theorem 6.1 instead of Theorem 2.11.
+We will prove Theorem 6.1 in Sections 6.1 and 6.2. First, in Section 6.1, we use Zelikovsky’s
+relative greedy algorithm [Zel96] to define a function ρI satisfying (42). Then, in Section 6.2, we
+construct a γ-good merge plan satisfying (41). Finally, in Section 6.3 we use Theorem 6.1 to prove
+our upper bound on the integrality gap of BCR (Theorem 1.1) follows from Theorem 6.1.
+6.1 Defining the Function ρI and Bounding OPT
+We consider a fixed instance I, for which we will define the function ρI (γ) and show that it
+satisfies (42). Because the instance I is fixed, we omit the index I in the following.
+We construct a Steiner tree by an (exponential-time) relative greedy algorithm. Starting with
+our initial graph G =: G1, we choose a terminal set X1 and a full component K1 that connects
+48
+
+===== PAGE 51 =====
+
+X1 such that c(K1)
+dropG1(X1) is minimized. We contract X1 to obtain a new graph G2. We iterate this
+until we obtain an MST-optimal instance. This yields sets X1, . . . , Xj, components K1, . . . , Kj,
+and graphs G1, . . . , Gj+1. This algorithm is essentially the same as Zelikovsky’s algorithm [Zel96],
+but because our goal is an upper bound on the integrality gap rather than an algorithmic result,
+we do not need to restrict ourselves to components of constant size.
+For i ∈ { 1, . . . , j} and X ⊆ R, we write drop i(X) := drop Gi(X). Then we observe that the
+ratios c(Ki)
+dropGi(Xi) are non-decreasing and always between 1
+2 and 1.
+Observation 6.2.
+1
+2 ≤ c (K1)
+drop1(X1) ≤ · · · ≤ c (Kj)
+dropj(Xj) < 1
+Proof. Each full component that exists in some Gi, already existed in G and has the same cost
+in both graphs. Furthermore, by Observation 3.10, the drop of a terminal set can only decrease
+by contracting components. Thus, by the choice of our components and terminal sets, for all
+i ∈ {1, . . . , j − 1}, we have
+c (Ki)
+dropi (Xi) ≤ c (Ki+1)
+dropi (Xi+1) ≤ c (Ki+1)
+dropi+1 (Xi+1) .
+Moreover, the component K1 connecting terminals X1 cannot be cheaper than half the cost of a
+spanning tree on X1 in the metric closure (because we obtain such a spanning tree by doubling
+all edges of K1 and short-cutting an Eulerian walk in the resulting graph; similar to the proof
+of Proposition 6.11). The cost of such a spanning tree is at least drop 1 (X1). Thus, the ratio
+c(K1)
+drop1(X1) is at least 1
+2. Because we stop the algorithm when the remaining graph is MST-optimal,
+the last component Kj for which we contracted the set Xj was an improving component and thus
+c(Kj)
+dropj(Xj) < 1.
+Observation 6.2 implies that for every γ ∈ [0, 1
+5], there is an index j(γ) such that the component
+Ki is γ-improving with respect to Gi if and only if i ≤ j(γ). We define ρ (γ) to be the fraction of
+TMST that vanished due to contracting these γ-improving components. More precisely, j(γ) is the
+last index such that
+c(Kj(γ))
+dropj(γ)(Xj(γ)) < 1 − γ and we define
+ρ (γ) :=
+TMST − TMSTGj(γ)
+TMST = 1
+TMST
+X
+1≤i≤j(γ)
+dropi(Xi). (43)
+The function ρ is non-increasing. Moreover, it allows us to bound the cost of an optimal Steiner
+tree, as we show next.
+Lemma 6.3. The function ρ satisfies (42).
+Proof. For α, γ ∈ R, we write 1 [γ < α ] to denote the indicator variable that is equal to 1 if γ < α
+and equal to 0 otherwise. The union of a terminal MST in the final graph Gj+1 together with the
+49
+
+===== PAGE 52 =====
+
+contracted components K1, . . . , Kj is a Steiner tree for the original instance I. Therefore,
+OPT ≤ TMSTGj+1 +
+X
+1≤i≤j
+c (Ki)
+= TMSTGj+1 +
+X
+1≤i≤j
+
+dropi(Xi) −
+ 
+dropi(Xi) − c (Ki)
+
+= TMSTGj+1 +
+X
+1≤i≤j
+ 
+TMSTGi − TMSTGi+1
+
+−
+X
+1≤i≤j
+ 
+dropi(Xi) − c (Ki)
+
+= TMST −
+X
+1≤i≤j
+
+1 − c (Ki)
+dropi(Xi)
+
+· dropi(Xi)
+= TMST −
+X
+1≤i≤j
+Z 1
+2
+0
+1
+
+γ < 1 − c (Ki)
+dropi(Xi)
+
+dγ · dropi(Xi)
+= TMST −
+Z 1
+2
+0
+X
+1≤i≤j
+1
+
+γ < 1 − c (Ki)
+dropi(Xi)
+
+· dropi(Xi) dγ
+= TMST −
+Z 1
+2
+0
+X
+1≤i≤j(γ)
+dropi(Xi) dγ
+= TMST −
+Z 1
+2
+0
+TMST · ρ (γ) dγ,
+where we used (43) and the definition of the index j(γ) in the last equations.
+To prove Theorem 6.1, it remains to show that for every γ ∈ [0, 1
+5], there exists a γ-good merge
+plan with sufficiently large value, that is, a merge plan satisfying (41).
+6.2 Existence of a γ-Good Merge Plan
+In this section, we complete the proof of Theorem 6.1 by showing that there exists a merge plan
+that is γ-good and has a large value. We do this using the tools from Section 3. Namely, we will
+construct an upper bound uγ and show that every merge plan that is upper bounded by uγ is
+γ-good (Lemma 6.5), and the cost of a terminal MST with respect to uγ is large (Lemma 6.6). By
+Lemma 3.3, the latter implies the existence of a merge plan that is upper bounded by uγ and has
+large value.
+We fix γ ∈ [0, 1
+5]. By construction, the graph G′ := Gj(γ)+1 does not contain any γ-improving
+components. This will allow us to establish a sufficient condition for a merge plan (for G) being
+γ-good. To this end, we use the following notation: if MG is the canonical merge plan of G, we
+define
+mergeG (x, y) := mergeMG (x, y) , value (G; X) := value (MG, X) , value (G) = value (MG) ,
+for x, y ∈ R and X ⊆ R. The values merge G′ (x, y), value (G′, X), and value ( G′) are defined
+analogously.
+We define the upper bound uγ :
+ R
+2
+
+→ R+ by
+uγ ({x, y}) = max
+7 − 5γ
+6 mergeG′ (x, y) , 7 − 5γ
+9 − 7γ mergeG (x, y)
+
+for all x, y ∈ R . (44)
+50
+
+===== PAGE 53 =====
+
+This upper bound is chosen such that it implies γ-goodness of any merge plan upper bounded
+by uγ. To prove this, we need the following observation.
+Observation 6.4. Let M1 and M2 be two merge plans, let X be a terminal set, and let α ∈ R≥0.
+If mergeM1 (x, y) ≤ α · mergeM2 (x, y) for all x, y ∈ X, then value (M1, X) ≤ α · value (M2, X).
+Proof. Let M1 =
+ 
+S t
+1
+
+t≥0 and M2 =
+ 
+S t
+2
+
+t≥0. If two terminals x and y are merged in M2 at time
+t, then they are merged in M1 no later than at time α · t. Hence, for any t ≥ 0 the partition S t
+2
+is a refinement of the partition S α·t
+1 . Consequently, the set X cannot intersect more parts of S α·t
+1
+than it intersects parts of S t
+2. By the definition of the local value (Definition 2.7), this implies
+value (M1, X) ≤ α · value (M2, X) .
+Lemma 6.5. Every merge plan that is upper bounded by uγ is γ-good.
+Proof. Let M be a merge plan that is upper bounded by uγ. Let K be a component that connects
+a set X of terminals. By the choice of j(γ) and the greedy choice of components, we have c (K) ≥
+(1 − γ) dropG′ (X). We distinguish two cases: if value ( M, X) ≤ 7−5γ
+12 dropG′ (X), then
+c (K) ≥ (1 − γ) dropG′ (X) ≥ (1 − γ) 12
+7 − 5γ value (M, X) ,
+and thus K is γ-expensive with respect to M.
+Otherwise, if value ( M, X) > 7−5γ
+12 dropG′ (X) = 7−5γ
+6 value (G′, X) by Lemma 3.6. Thus, by
+Observation 6.4, there are terminals x, y ∈ X with mergeM (x, y) > 7−5γ
+6 mergeG′ (x, y). Using that
+M is upper bounded by uγ, this implies
+mergeM (x, y) ≤ 7 − 5γ
+9 − 7γ mergeG (x, y) ≤ 7 − 5γ
+18 − 14γ dist (x, y) .
+We conclude that M is γ-good.
+Lemma 6.6. Let TMSTuγ be the value of a terminal MST with respect to uγ. Then
+TMSTuγ ≥
+7 − 5γ
+12 − 7 − 5γ
+18 − 14γ
+
+TMSTG′ + 7 − 5γ
+18 − 14γ TMSTG .
+Before providing the proof of Lemma 6.6, we first observe that it implies Theorem 6.1.
+Proof of Theorem 6.1. We define the function ρ as in (43). Then by Lemma 6.3, it satisfies (42).
+Let Mγ be the merge plan with maximum value that is upper bounded by uγ. Lemma 6.5 implies
+that Mγ is γ-good. Together, Lemma 3.3 and Lemma 6.6 imply
+value (Mγ) = TMSTuγ ≥
+7 − 5γ
+12 − 7 − 5γ
+18 − 14γ
+
+TMSTG′ + 7 − 5γ
+18 − 14γ TMSTG .
+Moreover, by the definition (43) of the function ρ, we have
+TMSTG′ = (1 − ρ (γ)) · TMSTG,
+and hence the merge plan Mγ satisfies
+value (Mγ)
+TMSTG
+≥
+7 − 5γ
+12 − 7 − 5γ
+18 − 14γ
+
+(1 − ρ (γ)) + 7 − 5γ
+18 − 14γ = 7 − 5γ
+12
+
+1 − ρ (γ) 3 − 7γ
+9 − 7γ
+
+,
+which shows (41).
+51
+
+===== PAGE 54 =====
+
+The intuition behind our proof of Lemma 6.6 is the following. Let T be a terminal MST
+with respect to uγ. Then by construction, we have uγ (T ) ≥ 7−5γ
+9−7γ value (G) = 7−5γ
+18−14γ TMSTG,c (by
+Corollary 3.4). Whenever an edge e = (x, y) ∈ T is not contracted in G′, we want to improve on this
+simple bound using that uγ (e) is not only at least 7−5γ
+9−7γ mergeG (x, y) but at least 7−5γ
+6 mergeG (x, y).
+To prove that this strategy indeed yields Lemma 6.6, we need the following key lemma.
+Lemma 6.7. There is a terminal minimum spanning tree T in G with respect to uγ such that T
+contains a spanning tree T ′ for G′ consisting only of edges {x, y} whose merge time in G is the
+same as in G′, that is mergeG (x, y) = mergeG′ (x, y) for all {x, y} ∈ T ′.
+Given Lemma 6.7, we can complete the proof of Lemma 6.6 as follows.
+Proof of Lemma 6.6. Let T and T ′ be as in Lemma 6.7. Then for every edge {x, y} ∈ T \ T ′, we
+have uγ ≥ 7−5γ
+9−7γ mergeG (x, y) by the definition of uγ. Moreover, every edge {x, y} ∈ T ′ satisfies
+mergeG (x, y) = mergeG′ (x, y). Using 7−5γ
+6 > 7−5γ
+9−7γ , this implies
+uγ({x, y}) = 7 − 5γ
+6 mergeG′ (x, y) = 7 − 5γ
+9 − 7γ mergeG (x, y) +
+7 − 5γ
+6 − 7 − 5γ
+9 − 7γ
+
+mergeG′ (x, y) .
+Therefore, the total cost uγ (T ) is at least
+TMSTuγ ≥ 7 − 5γ
+9 − 7γ
+X
+{x,y}∈T
+mergeG (x, y) +
+7 − 5γ
+6 − 7 − 5γ
+9 − 7γ
+ X
+{x,y}∈T ′
+mergeG′ (x, y) . (45)
+By Observation 3.5, the two sums in (45) can be lower bounded by 1
+2 TMSTG and 1
+2 TMST′
+G
+respectively.
+It remains to prove Lemma 6.7.
+Proving Lemma 6.7 We define a cost function c∗ :
+ R
+2
+
+→ R≥0 so that c∗(x, y) < c ∗(x′, y′)
+if and only if the ordered pair ( uγ(x, y), mergeG (x, y)) is lexicographically smaller than the pair
+(uγ(x′, y′), mergeG (x′, y′)). For example, we can choose c∗ as
+c∗(x, y) := M · uγ(x, y) + mergeG (x, y)
+for a sufficiently large number M. Let T be a spanning tree in G that minimizes c∗. Note that T
+also minimizes uγ. Then, let T ′ ⊆ T be a spanning tree for G′ that minimizes c∗ among all such
+trees.
+To prove Lemma 6.7, it remains to show merge G′ (x, y) = merge G (x, y) for all {x, y} ∈ T ′.
+Note that we always have merge G′ (x, y) ≤ mergeG (x, y) because G′ arises from G by contrac-
+tions. Hence, it remains to show that T ′ does not contain any edge {x, y} with merge G′ (x, y) <
+mergeG (x, y).
+Lemma 6.8. Let e = {x, y} ∈ E (G′) be an edge with mergeG′ (x, y) < mergeG (x, y). Then, there
+exists an x-y path in G′ consisting only of edges f with c∗ (f) < c ∗ (e).
+Proof. By Lemma 3.3, there is an x-y path P ′ in G′ such that
+mergeG′ (x, y) = max
+{a,b}∈P ′
+distG′ (a, b)
+2 .
+52
+
+===== PAGE 55 =====
+
+We represent each edge of P ′ by a a corresponding edge {a, b} from G. By choosing suitable
+representatives a, b ∈ R for each edge, we can assume that dist G′ (a, b) = dist G (a, b). Thus, for
+every edge f = {a, b} of P ′, we have
+mergeG′ (a, b) ≤ mergeG (a, b) ≤ distG (a, b)
+2 ≤ mergeG′ (x, y) < mergeG (x, y) .
+This implies
+uγ (f) = max
+7 − 5γ
+6 mergeG′ (a, b) , 7 − 5γ
+9 − 7γ mergeG (a, b)
+
+≤ max
+7 − 5γ
+6 mergeG′ (x, y) , 7 − 5γ
+9 − 7γ mergeG (x, y)
+
+= uγ (e) .
+Together with mergeG (a, b) < mergeG (x, y) we obtain c∗ (f) < c ∗ (e).
+Next, we show that we may assume that the path we obtain from Lemma 6.8 consists only of
+edges from the tree T . To this end, we use that T is a minimum spanning tree in (G, c∗), and hence
+it satisfies the following property.
+Observation 6.9. Let e = {x, y} ∈ E (G) be an edge of G. Then, the x-y path P in the tree T
+satisfies c∗ (f) ≤ c∗ (e) for all f ∈ P .
+Corollary 6.10. Let e = {x, y} ∈ E (G′) be an edge of G′ such that there is an x-y path in G′
+consisting only of edges f with c∗ (f) < c ∗ (e). Then there also exists such a path whose edges all
+belong to T .
+Proof. Call an edge f cheap if it satisfies c∗ (f) < c ∗ (x, y). Let P ′ be an x-y path in G′ consisting
+only of cheap edges. Consider an edge f ∈ P ′, and let u, v ∈ V (G′) be the endpoints of the edge f.
+By Observation 6.9, there is an u-v path Pf in T whose edges are all cheap. Concatenating the
+paths Pf for all f ∈ P ′ yields an x-y-walk in T consisting only of cheap edges.
+Now suppose for the sake of deriving a contradiction that there is an edge e = {x, y} ∈ T ′ with
+mergeG′ (x, y) < mergeG (x, y). Then by Lemma 6.8, there is a path P in G′ with c∗ (f) < c ∗ (e)
+for all f ∈ P . By Corollary 6.10, we may assume P ⊆ T . In other words, the graph G′ restricted
+to edges of T contains an x-y path consisting only of edges strictly cheaper than {x, y}. Because
+T ′ is a minimum spanning tree (with respect to c∗) in the graph G′ restricted to edges of T , this
+contradicts the fact that {x, y} ∈ T ′. This concludes the proof of Lemma 6.7.
+6.3 Calculating the Upper Bound on the Integrality Gap
+Next, we prove that the integrality gap of BCR is at most 1 .898, that is we prove Theorem 1.1.
+We will use the following well-known lower bound on BCR.
+Proposition 6.11. For every instance of the Steiner tree problem, we have BCR ≥ TMST
+2 .
+Proof. We apply a well-known proof strategy that can also be used to show 2 · OPT ≥ TMST and
+2 · HYP ≥ TMST (see e.g. Lemma 5 in [BGRS13]): Let x be an optimal (primal) solution to BCR.
+Define x′
+(v,w) := x(v,w) + x(w,v) for every undirected edge {v, w}. This yields an Eulerian solution
+x′ to BCR. By directed splitting-off (see e.g. Theorem 3.3 in [TV24]), we obtain a solution x′′ to
+BCR that does not use edges incident to Steiner vertices and satisfies c(x′′) ≤ c(x′). Because BCR
+53
+
+===== PAGE 56 =====
+
+is integral on instances without Steiner vertices (Theorem 2 in [Edm67]), the cost of x′′ cannot be
+smaller than the cost of a terminal MST. Hence,
+TMST ≤ c
+ 
+x′′
+≤ c
+ 
+x′
+= 2 · c (x) = 2 · BCR .
+Theorem 2.10 and (41) from Theorem 6.1 imply that for every γ ∈
+
+0, 1
+5
+
+, we have
+BCR
+TMST ≥ 7 − 5γ
+12| {z }
+=:a(γ)
+− ρ (γ) (7 − 5γ) (3 − 7γ)
+12 (9 − 7γ)| {z }
+=:b(γ)
+. (46)
+We choose the value γ so that this lower bound on the value of BCR is as large as possible.
+Namely, let γ∗ ∈
+
+0, 1
+5
+
+such that a (γ∗) − b (γ∗) ρ (γ∗) is maximal. Then, using Proposition 6.11,
+we conclude
+BCR
+TMST ≥ max
+
+a (γ∗) − b (γ∗) ρ (γ∗) , 1
+2
+
+.
+By the choice of γ∗, we have for all γ ∈
+
+0, 1
+5
+
+ρ (γ) ≥ a (γ) − (a (γ∗) − b (γ∗) ρ (γ∗))
+b (γ) ≥ a (γ) − max
+
+a (γ∗) − b (γ∗) ρ (γ∗) , 1
+2
+	
+b (γ) .
+Hence, by (42) from Theorem 6.1, we have
+OPT
+TMST ≤ 1 −
+Z 1
+2
+0
+ρ (γ) dγ
+≤ 1 −
+Z 1
+5
+0
+ρ (γ) dγ
+≤ 1 −
+Z 1
+5
+0
+a (γ) − max
+
+a (γ∗) − b (γ∗) ρ (γ∗) , 1
+2
+	
+b (γ) dγ.
+Therefore, we can upper-bound the integrality gap by
+OPT
+BCR ≤
+1 −
+R 1
+5
+0
+a(γ)−max{a(γ∗)−b(γ∗)ρ(γ∗), 1
+2 }
+b(γ) dγ
+max
+
+a (γ∗) − b (γ∗) ρ (γ∗) , 1
+2
+	
+=
+1 −
+R 1
+5
+0
+a(γ)
+b(γ) dγ
+max
+
+a (γ∗) − b (γ∗) ρ (γ∗) , 1
+2
+	 +
+Z 1
+5
+0
+1
+b (γ)
+≤ 2 ·
+
+1 −
+Z 1
+5
+0
+a (γ)
+b (γ) dγ
+
++
+Z 1
+5
+0
+1
+b (γ)
+= 2
+ 
+1 −
+Z 1
+5
+0
+a (γ) − 1
+2
+b (γ) dγ
+!
+,
+where we used that for our choice of the functions a and b we have
+R 1
+5
+0
+a(γ)
+b(γ) dγ =
+R 1
+5
+0
+9−7γ
+3−7γ dγ < 1, as
+well as
+R 1
+5
+0
+1
+b(γ) dγ < ∞. Plugging in the definition of the functions a and b from (46) and evaluating
+the integral yields
+OPT
+BCR ≤ 2 · (1 − 0.051) = 2 − 0.102 = 1 .898 ,
+54
+
+===== PAGE 57 =====
+
+which proves Theorem 1.1.
+7 Lower Bound for Merge Plan Based Dual Solutions
+The goal of this section is to prove Theorem 1.4, which we restate here.
+Theorem 1.4. For every ε > 0, there is an MST-optimal instance such that no merge plan based
+dual solution has value more than
+  7
+12 + ε
+
+TMST.
+Definition 7.1 (merge plan based dual solution). Given an instance I of the Steiner tree problem,
+we call a solution y of the dual program (Dual-BCR) merge plan based , if there is a merge plan
+M such that Algorithm 1 outputs y for the input (I, M).
+We remark that on the instance we construct to prove Theorem 1.4, the (relevant) behavior of
+Algorithm 1 does not change under subdivision of edges. In particular, an analysis analogous to
+our proof can be applied for any subdivision of the constructed instance. Thus, considering dual
+solutions arising from Algorithm 1 applied to any subdivision of the original instance (as we did
+in the proofs of Theorem 1.1 and Theorem 1.3; see Section 4), will not yield strong enough lower
+bounds to prove an integrality gap below 12
+7 .
+The key ingredient of our construction is a Steiner tree instance that will allow us to impose an
+upper bound on the merge time of two terminals s and s′ in any merge plan that leads to a dual
+solution with high value. Lemma 7.2, which we state next, captures the important properties of
+this instance. To prove Theorem 1.4, we will then take one copy of this instance for every pair of
+terminals and combine these copies to a single new instance by identifying the terminal sets.
+Lemma 7.2. Let ε > 0, let R be a set of terminals, and let s, s′ ∈ R. Then there are an MST-
+optimal Steiner tree instance I = (G, c, R) and a vertex v of G such that
+(i) dist (x, y) ≥ 2 for all x, y ∈ R,
+(ii) dist (x, s) = 2 for all x ∈ R \ {s},
+(iii) dist (x, v) ≤ 4 for all x ∈ R, and
+(iv) for every merge plan M with mergeM (s, s′) ≥ 7
+6 + ε, at time 7
+6 + ε all active sets can reach v.
+We call v a central vertex of G.
+Before we prove Lemma 7.2, we first show that it indeed implies Theorem 1.4. To this end, we
+need a well-known fact about full components.
+Observation 7.3. Every improving component contains a full component that is also improving.
+Proof. Let K be an improving component connecting terminals X. Decompose K into maximal full
+components K1, . . . , Kk, each connecting terminals Xi. Define a sequence G1, . . . , Gk+1 of graphs
+by G1 := G and Gi+1 := Gi/Xi. Then by Observation 3.10, we have
+drop (X) = TMST G − TMSTG/X =
+kX
+i=1
+ 
+TMSTGi − TMSTGi+1
+
+=
+kX
+i=1
+dropGi(Xi)
+≤
+kX
+i=1
+drop (Xi) ,
+55
+
+===== PAGE 58 =====
+
+where dropGi(Xi) denotes the drop of Xi in the graph Gi. We conclude,
+min
+1≤i≤k
+c (Ki)
+drop (Xi) ≤
+P
+1≤i≤k c (Ki)P
+1≤i≤k drop (Xi) ≤ c (K)
+drop (X) < 1 .
+Proof of Theorem 1.4. Let R be a set of terminals with |R| ≥ 4
+ε + 1. For every pair (s, s′) ∈ R × R
+we consider the graph G(s,s′) (with its edge costs) that we obtain from Lemma 7.2 and its central
+vertex v(s,s′). We combine all these graphs G(s,s′) to a single graph G. The vertex set of G consists
+of the terminal set R and the disjoint union of the Steiner vertices of the different graphs, that is
+V (G) = R ˙∪ ˙[
+(s,s′)∈R×R
+
+V
+ 
+G(s,s′)
+
+\ R
+
+.
+The edge set of G is the disjoint union of the edge sets of the different graphs, that is
+E (G) = ˙[
+(s,s′)∈R×R
+E
+ 
+G(s,s′)
+
+.
+The instance ( G, c, R) is MST-optimal: Suppose not, then there is an improving component.
+By Observation 7.3, there has to be a full improving component. Because, the graphs G(s,s′) we
+obtained from Lemma 7.2 only overlap in the terminals, such a full component would have to be
+contained in a single graph G(s,s′). This cannot be the case, because by Lemma 7.2 the graph G(s,s′)
+is MST-optimal. Hence, every Steiner Tree in G costs at least OPT = TMST = 2 (|R| − 1), where
+the second equality follows from (i) and (ii) of Lemma 7.2.
+Fix a merge plan M =
+ 
+S t
+t≥0. The value of the dual solution we obtain by running Algorithm 1
+with merge plan M is
+dual (M) =
+Z ∞
+0
+
+S ∈ S t : S cannot reach r at time t
+	 dt ,
+where r ∈ R is the (arbitrarily chosen) root vertex. By (i) and (ii) of Lemma 7.2, in the graph G
+we have dist (x, y) = 2 for all x, y ∈ R. Thus, any two terminals that are not merged at time t = 2
+can reach each other at time t = 2. Hence, we can rewrite and upper bound the value of our dual
+solution dual (M) as follows
+Z 2
+0
+
+S ∈ S t : S cannot reach r at time t
+	 dt
+≤
+7
+6 + ε
+
+(|R| − 1) +
+Z 2
+7
+6 +ε
+
+S ∈ S t : S cannot reach r at time t
+	 dt . (47)
+We will prove that the integral on the right hand-side of (47) has value at most 4. If all
+terminals are merged already at time 7
+6 + ε, this trivially holds. Otherwise, choose s, s′ ∈ R with
+mergeM (s, s′) ≥ 7
+6 + ε and consider the subgraph G(s,s′) and its central vertex v := v(s,s′). By
+Lemma 7.2 (iii), we have dist ( v, r) ≤ 4 and from time 7
+6 + ε onward v is reachable from all active
+sets. Hence, from time 7
+6 + ε onward, all active sets that do not reach the root contribute to all
+shortest v-r-paths. This shows
+Z 2
+7
+6 +ε
+
+S ∈ S t : S cannot reach r at time t
+	 dt ≤ dist (v, r) ≤ 4 . (48)
+56
+
+===== PAGE 59 =====
+
+s∗ s
+x0
+x1
+x2k
+x2k+1
+w
+. . .
+1 − 1
+6k
+2k edges with length 1
+6k each
+1
+6
+s∗
+s
+w
+Figure 15: The left part of the figure illustrates the 3 ×-gadget from Lemma 7.4. The colors
+represent the contributions of the terminal sets containing s∗ (red) and s (blue) at time t = 7
+6
+(assuming that s and s∗ are not already merged before this time t). The right part shows an
+abstract drawing of the same gadget that we will use in all further figures to represent the 3 ×-
+gadget.
+Combining (48) and (47) yields
+dual (M)
+TMST ≤
+  7
+6 + ε
+
+(|R| − 1) + 4
+2 (|R| − 1) =
+ 7
+12 + ε
+2
+
++ 2
+|R| − 1 ≤ 7
+12 + ε
+2 + ε
+2 = 7
+12 + ε .
+We are left with proving Lemma 7.2. From now on fix ε, s, s′, and R as in Lemma 7.2 and let
+M be a merge plan with merge M (s, s′) ≥ 7
+6 + ε. Further we choose k ∈ N with 1
+6k ≤ ε.
+To obtain a corresponding graph, we will first construct some smaller gadgets. Our first gadget
+is depicted in Figure 15. The next lemma states the properties of this gadget that we will later
+need to prove Lemma 7.2. We call the graph from Lemma 7.4 a 3 ×-gadget from s∗ to w. The
+reason for the name is that the construction is similar to the example from Figure 3, where the
+distance of reachable vertices can increase effectively at speed 3.
+Lemma 7.4 (3×-gadget). For every s∗ ∈ R \ {s}, there is a connected graph, called the 3×-gadget,
+with the following properties:
+• The vertex set of the gadget consists of the terminals s, s∗, a distinguished Steiner vertex w,
+and possibly further Steiner vertices.
+• Suppose we run Algorithm 1 with merge plan M on a graph containing the 3×-gadget as a
+subgraph. If before time t = 7
+6, every tight path from some terminal to a vertex of the gadget is
+completely contained in the gadget itself, then ts→w = 7
+6 and min
+
+ts∗→w, mergeM (s∗, s)
+	
+≤ 7
+6.
+• We have dist (s, w) = 7
+6, dist (s∗, w) = 3
+2, and dist (s, s∗) = 2.
+• Every component connecting s, s∗ and w has cost at least 5
+2 − 1
+6k .
+57
+
+===== PAGE 60 =====
+
+Proof. We construct a gadget as illustrated in Figure 15. The graph we construct has vertices s,
+s∗, w, as well as further Steiner vertices x0, . . . , x2k+1. The edges are the following:
+• {xj, xj+1} for j = 0, . . . ,2k each with length 1
+6k,
+• {s∗, x0} and {s, x2j} for j = 1, . . . , k each with length 1 − 1
+6k, and
+• {x2k+1, w} with length 1
+6.
+We now show that this gadget has the claimed properties. The first property regarding the
+vertex set of the gadget is satisfied by construction.
+Next, we consider a run of Algorithm 1 on a graph containing the 3 ×-gadget as a subgraph.
+First suppose that the merge time of s and s∗ is at least 7
+6. At time 1 − 1
+6k, all edges leaving the
+terminals are tight. At time 1 both terminals meet in x1. At this time, each edge {xj, xj+1} has one
+tight orientation. Afterwards, every 1
+6k time units, the contribution of the set S∗ ∈ S t containing s∗
+makes an edge ( x2j−1, x2j) tight; the edge ( x2j, x2j+1) is already tight (since time 1). This pattern
+continues for k steps until time 7
+6. Meanwhile the contribution of the set S ∈ S t containing s makes
+the edge {x2k+1, w} tight. Thus, we have ts→w = 7
+6 and ts∗→w = 7
+6. If the merge time of s and s∗
+is at most 7
+6, then it suffices to prove ts→w = 7
+6. This is indeed the case because until time t = 7
+6,
+the set S ∈ S t containing s contributes to the s-w path of length 7
+6 and no other set does so.
+Now, we observe dist (s, w) = 7
+6, dist (w, s∗) = 3
+2, and dist (s, s∗) = 2. Indeed, the shortest s-w
+path has vertices s1, x2k, x2k+1, and w. Its length is
+ 
+1 − 1
+6k
+
++ 1
+6k + 1
+6 = 7
+6. The shortest s∗-w
+path goes through all Steiner vertices x0 to x2k+1 and has length
+ 
+1 − 1
+6k
+
++ 2k+1
+6k + 1
+6 = 3
+2. The
+shortest s∗-s path has vertices s∗, x0, x1, x2, and s and length
+ 
+1 − 1
+6k
+
++ 1
+6k + 1
+6k +
+ 
+1 − 1
+6k
+
+= 2.
+Finally, we determine the length of a shortest component connecting s, s∗, and w. If the s-w
+path in the component containss, then the component has length (at least) dist (s∗, s)+dist (s, w) =
+3+ 1
+7. Otherwise, because the shortest s∗-w-path is also the only s∗-w-path that does not contain s,
+the component consists of the shortest s∗-w-path together with one of the edges incident to s. This
+component has cost 3
+2 +
+ 
+1 − 1
+6k
+
+= 5
+2 − 1
+6k.
+Next, we use the 3 ×-gadget from Lemma 7.4 to construct another gadget, which is illustrated
+in Figure 16. Lemma 7.5 captures the properties of this gadget that we will need in the proof of
+Lemma 7.2. We will call the gadget from Lemma 7.5 a jump-gadget from s∗ to v. Recall that the
+terminals s and s′ are fixed throughout and the merge plan M is such that mergeM (s, s′) ≥ 7
+6 + ε.
+Lemma 7.5 (jump-gadget). For every s∗ ∈ R \ { s, s′}, there is a connected graph, called the
+jump-gadget with the following properties:
+• The vertex set of the gadget consists of the terminals s, s′, s∗, a distinguished Steiner vertex
+w, and possibly further Steiner vertices.
+• Suppose we run Algorithm 1 with merge plan M on a graph containing the jump-gadget as
+a subgraph. If before time t = 7
+6 + 1
+6k , every tight path from a terminal to a vertex of the
+gadget is completely contained in the gadget itself, then we have ts→w = ts′→w = 7
+6 + 1
+6k and
+min
+
+ts∗→w, mergeM (s∗, s)
+	
+≤ 7
+6 + 1
+6k .
+• The pairwise distances of any two terminals in the gadget is at least 2 and dist (s∗, s) =
+dist (s′, s) = 2.
+• We have dist (s, w) = 7
+6 + 1
+6k , dist (s′, w) = 3
+2 + 3
+6k , and dist (s∗, w) = 2 + 7
+6 + 1
+6k .
+• The only s∗-w path that does not go through another terminal costs at least 6.
+58
+
+===== PAGE 61 =====
+
+x0 x30k
+w
+s′
+s
+s∗
+. . .
+30k edges with length 1
+6k each
+s∗
+w
+Figure 16: The left part of the figure illustrates the jump-gadget from Lemma 7.5. The colors
+represent the contributions of the terminal sets containing s∗ (green), s (blue) and s′ (red) at time
+t = 7
+6 + 1
+6k (assuming that none of the terminals are merged before this time t). The right part
+shows an abstract drawing of the same gadget that we will use in the next figure to represent the
+jump-gadget.
+59
+
+===== PAGE 62 =====
+
+• Any component connecting s, s′, and s∗ has cost at least 4.
+Proof. We construct the gadget as shown in Figure 16. To construct the graph we include the
+vertices s, s′, s∗, and w, as well as additional Steiner vertices x0, . . . , x30k. Moreover, the graph
+contains the following edges:
+• {xj, xj+1} for j = 0, . . . ,30k − 1 and {x30k, w} each with length 1
+6k, and
+• {s, x2j−1} for j = 1, . . . ,15k each with length 7
+6 − 1
+6k.
+Additionally, we add a 3×-gadget from s∗ to x0 and 3×-gadgets from s′ to x2j for j = 1, . . . ,15k −1.
+We now show that this gadget has the desired properties. The first property regarding the
+vertex set of the gadget is satisfied by construction.
+Next, we consider a run of Algorithm 1 with merge planM on a graph containing the 3×-gadget
+as a subgraph. Recall that we chose the merge plan M such that mergeM (s, s′) ≥ 7
+6 + ε ≥ 7
+6 + 1
+6k.
+First suppose that merge M (s∗, s) ≥ 7
+6 + 1
+6k. Then at time t = 7
+6, the terminal s∗ reaches x0
+and s′ reaches x2j for j = 1 , . . . ,3k via paths of tight edges (by Lemma 7.4). The terminal s
+reaches all vertices xj and the set S ∈ S t containing s has already made one orientation of each
+{xj, xj+1}-edge tight, namely the direction from odd index to even index (the short blue edges in
+Figure 16, except for the edge to w). During the next 1
+6k time units, the terminal set from S t
+containing s∗ makes the edge ( x0, x1) tight (short green edge in Figure 16) and the terminal set
+from S t containing s′ makes all remaining orientations of edges {xj, xj+1} tight (short red edges
+in Figure 16). Meanwhile, the terminal set from S t containing s makes the edge ( x30k, w) tight.
+Hence, we have ts→w = ts′→w = ts∗→w = 7
+6 + 1
+6k, as desired.
+If mergeM (s∗, s) ≤ 7
+6 + 1
+6k, then it suffices to prove ts→w = ts′→w = 7
+6 + 1
+6k. This is indeed the
+case because the edges of the shortest s-w path and the shortest s′-w path become tight at exactly
+the same time as in the first case. (The contributions of sets containing s∗ but neither s nor s′,
+which are shown in green in Figure 16, do not affect this part of the gadget before time 7
+6 + 1
+6k.)
+Using Lemma 7.4, we conclude that the pairwise distance between any two terminals is at least
+2 and dist ( s∗, s) = dist (s′, s) = 2. Moreover, we next observe dist ( s, w) = 7
+6 + 1
+6k, dist (s′, w) =
+3
+2 + 3
+6k, and dist ( s∗, w) = 2 + 7
+6 + 1
+6k. Indeed, a shortest s-w path has vertices s, x30k−1, x30k, w
+and has length
+  7
+6 − 1
+6k
+
++ 1
+6k + 1
+6k = 7
+6 + 1
+6k. The shortest s′-w path uses the 3 ×-gadget from s′
+to x30k−2 and edges {x30k−2, x30k−1}, {x30k−1, x30k}, and {x30k, w}. By Lemma 7.4, its length is
+3
+2 + 3· 1
+6k. The only s∗-w path that does not go through another terminal has cost 3
+2 + 30k
+6k + 1
+6k > 6.
+Thus, a shortest s∗-w path consists of a shortest s∗-s path inside a 3 ×-gadget, which has length 2
+by Lemma 7.4, and a shortest s-w path, which has length 7
+6 + 1
+6k.
+It remains to prove that every component connecting s, s′, and s∗ has cost at least 4. Because
+the three terminals have pairwise at least 2 from each other, every component consisting of two
+disjoint paths between terminals has cost at least 4. The only other possibility to construct a
+component connecting the three terminals is to connect s to some xi and either s′ or s∗ inside some
+3×-gadget and then connect the remaining terminal via a path to xi. By Lemma 7.4, connecting s
+to xi and s′ or s∗ inside a 3×-gadget has cost at least 5
+2 − 1
+6k. However, then the shortest path from
+the remaining terminal ( s∗ or s′) to the vertex xi has length at least 3
+2 + 2
+6k (where we again used
+Lemma 7.4). Hence, also in this case the component connecting the three terminals has length at
+least 4.
+Finally, we use the jump-gadget (Lemma 7.5) to prove Lemma 7.2.
+Proof of Lemma 7.2. To obtain G, we introduce a Steiner vertex v and insert jump-gadgets Gs∗
+from each s∗ ∈ R\{s, s′} to v. See Figure 17 for an illustration. Note that each of the jump-gadgets
+60
+
+===== PAGE 63 =====
+
+s1
+v
+s2
+v
+s3
+v
+s4
+v
+s5
+v
+s6
+v
+s7
+v
+s8
+v
+r
+v
+s s′
+≤ 4
+Figure 17: An illustration of the graph G that we construct in the proof of Lemma 7.2, where the
+jump-gadgets are drawn as explained in Figure 16. Note that each of the jump-gadgets also has
+edges incident to s and s′, although this is not explicitly visible in this abstract picture. The graph
+contains a jump-gadget from r to v, but for our proof it will only be relevant that the distance
+from v to r is at most 4.
+also introduces edges incident to s and s′. It remains to show that G has the properties listed in
+Lemma 7.2.
+Property (i) follows from the bounds on pairwise distances of vertices in a jump segment from
+Lemma 7.5. Similarly, also the other distance restrictions (ii) and (iii), namely, dist ( x, s) = 2 for
+all x ∈ R \ {s} and dist (x, v) ≤ 4 for all x ∈ R follow directly from Lemma 7.5.
+Next, we prove that (iv) of Lemma 7.2 is satisfied. Our goal is to prove that at time t = 7
+6 + ε
+all sets in S t can reach the central vertex v. By Lemma 7.5, both s and s′ can reach v at time
+7
+6 + 1
+6k. Now, consider a terminal s∗ ∈ R \ {s, s′} that was merged neither with s nor with s′ at
+time 7
+6 + 1
+6k. Then, by Lemma 7.5, s∗ can reach v at time 7
+6 + 1
+6k. Hence, from time 7
+6 + 1
+6k ≤ 7
+6 + ε
+onward, all sets in S t can reach the vertex v.
+Finally, we have to show that the Steiner tree instance we constructed is indeed MST-optimal.
+Connecting all other terminals directly to s yields a terminal MST with cost 2 ( |R| − 1). Then,
+for each X ⊆ R, we have drop ( X) = 2 · (|X| − 1) and thus a component connecting ℓ terminals
+is improving if and only if its cost is strictly less than 2( ℓ − 1). Suppose for the sake of deriving
+a contradiction that the Steiner tree instance is not MST-optimal. Then let K be an improving
+component with minimum cost, and let X be the set of terminals connected by K. Then c(K) <
+2 · (|X| − 1). Because K is a minimal improving component (and thus by Observation 7.3 a full
+component), every terminal that is connected by K has degree 1 in K. Every improving component
+connects at least three terminals and thus X contains some terminal s∗ ̸= s, s′. By Lemma 7.5,
+no jump-gadget contains an improving component. Thus, the component K has to contain an
+s∗-v path that does not go through another terminal, and by Lemma 7.5 there is only one such
+path. Removing this path from the component K leaves us with a component K′ that connects
+at least all terminals in X \ {s, s′, s∗} and has cost at least 6 less than K. Moreover, we have
+61
+
+===== PAGE 64 =====
+
+c(K′) ≤ c(K) − 6 < 2 · (|X| − 1) − 6 ≤ 2 · (|X| − 3 − 1). Recall that every component connecting
+at least ℓ terminals with cost strictly less than 2( ℓ − 1) is improving. For ℓ = |X| − 3, this implies
+that the component K′ is improving, which contradicts the minimality of c(K).
+8 BCR and the Hypergraphic Relaxation
+In this section, we show that the maximum possible ratio between the Hypergraphic Relaxation
+and BCR is equal to the integrality gap of BCR restricted to MST-optimal instances.
+The Hypergraphic Relaxation has a variable for every nonempty set X of terminals and every
+vertex v ∈ X, where we think of X as the vertex set of a directed component with root v. We write
+⃗X := {(X, v): X ⊆ R, v ∈ X} .
+For a terminal set S ⊆ R, we denote by
+δ+
+⃗X (S) :=
+n
+(X, v) ∈ ⃗X : X ∩ S ̸= ∅, v /∈ S
+o
+the elements of ⃗X that leave the set S. Then the Hypergraphic Relaxation can be stated as follows:
+min
+X
+(X,v)∈ ⃗X
+cost(X) · x(X,v)
+X
+(X,v)∈δ+
+⃗X (S)
+x(X,v) ≥ 1 ∀ ∅ ̸ = S ⊆ R \ {r}
+x(X,v) ≥ 0 ∀ (X, v) ∈ ⃗X .
+(49)
+We write HYP(I) to denote the value of (49) for a Steiner Tree instance I. The goal of this section
+is to prove Theorem 1.5, which we restate here.
+Theorem 1.5. We have
+sup
+HYP(I)
+BCR(I) : I instance of Steiner Tree
+
+= sup
+OPT(I)
+BCR(I) : I MST-optimal instance of Steiner Tree
+
+.
+(1)
+We first show that the left hand-side of (1) is at least the right hand-side of (1). To this end,
+we use the “bridge lemma” from [BGRS13]. Recall that drop G (X) = MST (G) − MST (G/X).
+Lemma 8.1 (Lemma 11 in [BGRS13]) . Let (G, c, R) be an instance of Steiner Tree, and let T be
+a terminal minimum spanning tree. Then for every solution x to the Hypergraphic Relaxation, we
+have
+c(T ) ≤
+X
+(X,v)∈ ⃗X
+x(X,v) · dropG (X) .
+Using the bridge lemma, we now show that for MST-optimal instances I, we have HYP( I) =
+OPT(I), which implies one of the two directions of Theorem 1.5.
+62
+
+===== PAGE 65 =====
+
+Lemma 8.2. We have
+sup
+HYP(I)
+BCR(I) : I instance of Steiner Tree
+
+≥ sup
+OPT(I)
+BCR(I) : I MST-optimal instance of Steiner Tree
+
+.
+Proof. Let I = ( G, c, R) be an MST-optimal instance of Steiner Tree and let T be a terminal
+minimum spanning tree. It suffices to show HYP( I) = OPT(I).
+To prove this, let x be an optimal solution to the Hypergraphic Relaxation for I and suppose
+that HYP(I) < OPT(I). Then by Lemma 8.1, we have
+X
+(X,v)∈ ⃗X
+x(X,v) · cost(X) = HYP( I) < OPT(I) = c(T ) ≤
+X
+(X,v)∈ ⃗X
+x(X,v) · dropG (X) .
+Hence, there exists some X ⊆ R such that cost(X) < dropG (X), contradicting the MST-optimality
+of I. We conclude that indeed HYP( I) = OPT(I).
+To complete the proof of Theorem 1.5, we consider the dual of the Hypergraphic Relaxation:
+max
+X
+∅̸=S⊆R\{r}
+yU
+X
+S⊆R:(X,v)∈δ+
+⃗X (S)
+yS ≤ cost(X) ∀ (X, v) ∈ ⃗X
+yS ≥ 0 ∀ ∅ ̸ = S ⊆ R \ {r}
+(50)
+Using standard uncrossing techniques, we can show that (50) always has an optimum solution
+with laminar support. That is, there exists an optimum dual solution y such that for any U, W ⊆
+R \ {r} with yU > 0 and yW > 0, we have U ⊆ W , or W ⊆ U, or U ∩ W = ∅.
+Lemma 8.3. For every instance of the Steiner tree problem, the dual (50) of the Hypergraphic
+Relaxation has an optimum solution with laminar support.
+Proof. Among all optimal dual solutions let y be one that maximizes
+X
+S⊆R\{r}
+yS · |S|2 .
+We claim that y has laminar support. Suppose not. Then there are sets S1, S2 ⊆ R \ {r} with
+yS1, yS2 > 0 that are neither disjoint, nor is one ofS1 and S2 a subset of the other one. In particular,
+none of the sets S1, S2, S1 ∩ S2, and S1 ∪ S2 is empty. Moreover,
+|S1 ∪ S2|2 + |S1 ∩ S2|2 > |S1|2 + |S2|2 . (51)
+Let 0 < ε ≤ yS1, yS2, and define a dual solution y′ by y′
+S1∪S2 := yS1∪S2 + ε, y′
+S1∩S2 := yS1∩S2 + ε,
+y′
+S1 := yS1 − ε, y′
+S2 := yS2 − ε, and y′
+S := yS otherwise.
+By construction, y and y′ have the same objective value
+X
+∅̸=S⊆R\{r}
+y′
+U = 2 ε − 2ε +
+X
+∅̸=S⊆R\{r}
+yU .
+63
+
+===== PAGE 66 =====
+
+Furthermore, by (51), we have
+X
+S⊆R\{r}
+y′
+S · |S|2 >
+X
+S⊆R\{r}
+yS · |S|2 .
+Thus, to derive a contradiction to our choice of y, it remains to show that y′ is a feasible dual
+solution. Indeed, by our choice of ε, the dual solution y′ is non-negative. If a directed component
+(X, v) is contained in δ+
+⃗X (S1 ∩ S2) or in δ+
+⃗X (S1 ∪ S2), it is also contained in at least one of δ+
+⃗X (S1)
+and δ+
+⃗X (S2). If a directed component ( X, v) is contained in both δ+
+⃗X (S1 ∩ S2) and δ+
+⃗X (S1 ∪ S2), it is
+also contained in both δ+
+⃗X (S1) and δ+
+⃗X (S2). Thus, for every directed component ( X, v):
+X
+S⊆R:(X,v)∈δ+
+⃗X (S)
+y′
+S ≤
+X
+S⊆R:(X,v)∈δ+
+⃗X (S)
+yS ≤ cost(X) ,
+which implies that y′ is feasible, contradicting our choice of y.
+Next, we use Lemma 8.3 to complete the proof of Theorem 1.5, which follows directly from
+Lemmas 8.2 and 8.4.
+Lemma 8.4. We have
+sup
+HYP(I)
+BCR(I) : I instance of Steiner Tree
+
+≤ sup
+OPT(I)
+BCR(I) : I MST-optimal instance of Steiner Tree
+
+.
+Proof. Let I be an instance of Steiner Tree and let y be an optimum solution to (50) with laminar
+support, which exists by Lemma 8.3. We will construct a terminal spanning tree T ⊆
+ R
+2
+
+and a
+length function ℓ: T → R≥0 such that
+(i) ℓ(T ) = HYP(I), and
+(ii) y remains a feasible dual solution when decreasing the cost of every edge e ∈ T to ℓ(e) (or
+adding the edge e with cost ℓ(e) to the instance I).
+Then let I ′ = (G′, c′, R) be the instance arising from I by decreasing the cost of every edge e ∈ T
+to ℓ(e), where we do not change the cost if it is already at most ℓ(e) and we add the edge e (with
+cost ℓ(e)) if it is not yet part of G. Because y is a feasible solution to (50) for I ′ by (ii), we have
+HYP(I ′) ≥ HYP(I). Hence, we have c′(T ) ≤ ℓ(T ) = HYP( I) ≤ HYP(I ′) ≤ OPT(I ′), which
+implies that the instance I ′ is MST-optimal. Moreover, BCR( I ′) ≤ BCR(I) because we only
+decreased the cost of edges in the construction of I ′, and thus
+HYP(I)
+BCR(I) = c′(T )
+BCR(I) ≤ c′(T )
+BCR(I ′) = OPT(I ′)
+BCR(I ′) .
+It remains to prove the existence of the terminal spanning tree T and the function ℓ satisfying (i)
+and (ii). Let
+L :=
+
+S ⊆ R \ {r} : yS > 0
+	
+∪
+
+R
+	
+∪
+
+{v} | v ∈ R
+	
+64
+
+===== PAGE 67 =====
+
+be the support of y, together with all singleton sets and the terminal set R. Then L is a laminar
+family and every non-singleton element of L is the disjoint union of its children (its maximal strict
+subsets in L). For a v ∈ R and a set L ∈ L, we define the depth of v inside L as
+depthL(v) :=
+X
+S⊊L:v∈S
+yS,
+where we define yS := 0 for sets S containing r (which do not have a corresponding variable in the
+dual LP).
+We construct a directed spanning tree ⃗T ⊆ R × R oriented towards the root r as follows. For
+every set L ∈ L we choose a root vertex root( L) ∈ L as a vertex v ∈ L of minimal depth L(v).
+In case of equal depth, we use consistent tie-breaking and give preference to the root r. In other
+words, we number the vertices as v1 = r, v2, . . . , vn and in case of several vertices with the same
+depth, we choose root( L) among those vertices as the vertex vi with smallest index i.
+To construct the oriented tree ⃗T , we construct a tree ⃗TL ⊆ L × L spanning L and oriented
+towards root(L) for each set L ∈ L . When constructing these trees, we proceed from smaller to
+larger sets L ∈ L and in the end ⃗T will be the tree ⃗TR, which is oriented towards root( R) = r.
+For the sets L ∈ L with |L| = 1, the tree ⃗TL = ∅ has no edges. Now consider a set L ∈ L with
+|L| ≥ 2. Because of the order, in which we consider the sets from L, we have already constructed
+trees ⃗T1, . . . , ⃗Tk for the children L1, . . . , Lk of L in L, where we may assume root( L) ∈ L1. Then
+we define
+⃗TL :=
+k[
+i=1
+⃗Ti ∪
+k[
+i=2
+ 
+root(Li), root(L)
+	
+.
+Because L is the disjoint union of its children in L, this is indeed a tree spanning L and oriented
+towards root(L) = root(L1), where we used the consistent tie breaking in the choice of the roots.
+For a directed edge ⃗ e= (v, w) ∈ ⃗T = ⃗TR, we define
+ℓ(⃗ e) :=
+X
+L∈L:
+⃗ e∈δ+(L)
+yL.
+We let T be the terminal spanning tree obtained from ⃗T by omitting the orientation, and for an
+edge e of T , we define ℓ(e) := ℓ(⃗ e) for the directed edge ⃗ e∈ ⃗T corresponding to e.
+It remains to prove (i) and (ii). To prove (i), we observe that the oriented terminal minimum
+spanning tree ⃗T is constructed such that every set L ∈ L \ { R} has exactly one outgoing edge in
+⃗T . In particular, every set S in the support of y has exactly one outgoing edge in ⃗T , implying
+ℓ(T ) = ℓ( ⃗T ) =
+X
+L∈L
+yL ·
+ ⃗T ∩ δ+(L)
+ =
+X
+L∈L
+yL = HYP( I).
+Finally, we prove (ii). We observe that it suffices to prove that the dual constraints are satisfied
+for any ( X, v) ∈ ⃗X for which the cost is determined by a full Steiner tree, that is there exists a
+tree of length cost( X) whose set of leaves is exactly X. Indeed, otherwise, there is a tree of length
+cost(X) connecting X and we consider the maximal full components ⃗K1, . . . ⃗Km in this tree oriented
+towards v. Let ( X1, v1), . . .(Xm, vm) be the elements of ⃗X corresponding to these full components.
+Then
+X
+S⊆R:(X,v)∈δ+
+⃗X (S)
+yS ≤
+mX
+i=1
+X
+S⊆R:(Xi,vi)∈δ+
+⃗X (S)
+yS ≤
+mX
+i=1
+cost(Xi) = cost( X).
+65
+
+===== PAGE 68 =====
+
+Thus, it suffices to show that y satisfies the constraints of (50) for the instance I ′ for every
+(X, v) whose cost is determined by a full component. The only full components whose cost differs
+between the instances I and I ′ are the cost of full components consisting of a single edge e ∈ T .
+Thus, it suffices to show that for each edge e = {v, w} ∈ T , we have
+X
+S⊆R:(v,w)∈δ+(S)
+yS ≤ c′({v, w}) (52)
+and X
+S⊆R:(w,v)∈δ+(S)
+yS ≤ c′({v, w}), (53)
+where c′({v, w}) denotes the cost of the full component connecting v and w by a single edge. By
+definition of c′, we either have c′({v, w}) = c({v, w}) or c′({v, w}) = ℓ({v, w}). If c′({v, w}) =
+c({v, w}), (52) and (53) follow from dual feasibility of y for the original instance ( G, c, R). Thus,
+we may assume c′({v, w}) = ℓ({v, w}). Consider an edge e ∈ T , where without loss of generality
+⃗ e= (v, w) ∈ ⃗T . By definition of the function ℓ, we have
+X
+S⊆R:(v,w)∈δ+(S)
+yS = ℓ(⃗ e) = c′(e).
+Now let L ∈ L be such that ⃗ e∈ ⃗TL, but ⃗ eis not contained in ⃗TLi for any child Li of L in L.
+Then w = root(L). By the choice of root( L) as a vertex u ∈ L with minimal depth L(u), we have
+depthL(w) ≤ depthL(v), implying
+X
+S⊆R:(w,v)∈δ+(S)
+yS = depth L(w) = depth L(v) = ℓ(⃗ e) ≤ c′(e).
+66
+
+===== PAGE 69 =====
+
+References
+[Ahm+25] A. Ahmadi, I. Gholami, M. Hajiaghayi, P. Jabbarzade, and M. Mahdavi. “Breaking
+a Long-Standing Barrier: 2- ε Approximation for Steiner Forest”. In: 2025 IEEE 66th
+Annual Symposium on Foundations of Computer Science (FOCS) (2025).
+[BGRS13] J. Byrka, F. Grandoni, T. Rothvoss, and L. Sanit` a. “Steiner Tree Approximation via
+Iterative Randomized Rounding”. In: Journal of the ACM (JACM) 60.1 (2013). doi:
+10.1145/2432622.2432628.
+[BGT24] J. Byrka, F. Grandoni, and V. Traub. “The Bidirected Cut Relaxation for Steiner
+Tree has Integrality Gap Smaller Than 2”. In: 2024 IEEE 65th Annual Symposium
+on Foundations of Computer Science (FOCS) . 2024, pp. 730–753. doi: 10 . 1109 /
+FOCS61266.2024.00052.
+[BGT25] J. Byrka, F. Grandoni, and V. Traub. “On the Bidirected Cut Relaxation for Steiner
+Forest”. In: Integer Programming and Combinatorial Optimization (IPCO) . 2025,
+pp. 114–127. isbn: 978-3-031-93112-3. doi: 10.1007/978-3-031-93112-3_9 .
+[BZ15] M. Brazil and M. Zachariasen. Optimal Interconnection Trees in the Plane: Theory,
+Algorithms, and Applications. Springer International Publishing, 2015. doi: 10.1007/
+978-3-319-13915-9 .
+[CC08] M. Chleb´ ık and J. Chleb´ ıkov´ a. “The Steiner tree problem on graphs: Inapproximability
+results”. In: Theor. Comput. Sci. 406.3 (2008), pp. 207–214. doi: 10.1016/J.TCS.
+2008.06.046.
+[CDV11] D. Chakrabarty, N. R. Devanur, and V. V. Vazirani. “New geometry-inspired relax-
+ations and algorithms for the metric Steiner tree problem”. In: Math. Program. 130.1
+(2011), pp. 1–32. doi: 10.1007/s10107-009-0299-0.
+[CKP10] D. Chakrabarty, J. K¨ onemann, and D. Pritchard. “Hypergraphic LP Relaxations for
+Steiner Trees”. In: Proceedings of the 14th International Conference on Integer Pro-
+gramming and Combinatorial Optimization, (IPCO). 2010, pp. 383–396.doi: 10.1007/
+978-3-642-13036-6_29 .
+[Edm67] J. Edmonds. “Optimum Branchings”. In: Journal of Research of the National Bureau
+of Standards Section B Mathematics and Mathematical Physics (1967), B71:233–240.
+[FKOS16] A. E. Feldmann, J. K¨ onemann, N. Olver, and L. Sanit` a. “On the equivalence of the
+bidirected and hypergraphic relaxations for Steiner tree”. In: Math. Program. 160.1-2
+(2016), pp. 379–406. doi: 10.1007/S10107-016-0987-5.
+[Ful74] D. R. Fulkerson. “Packing rooted directed cuts in a weighted directed graph”. In: Math.
+Program. 6 (1974), pp. 1–13. doi: 10.1007/BF01580218.
+[GM93] M. X. Goemans and Y.-S. Myung. “A Catalog of Steiner Tree Formulations”. In:
+Networks 23 (1993), pp. 19–28. doi: 10.1002/net.3230230104.
+[GORZ12] M. X. Goemans, N. Olver, T. Rothvoß, and R. Zenklusen. “Matroids and Integrality
+Gaps for Hypergraphic Steiner Tree Relaxations”. In: Proceedings of the 44th An-
+nual ACM Symposium on Theory of Computing (STOC) . 2012, pp. 1161–1176. isbn:
+9781450312455. doi: 10.1145/2213977.2214081.
+[GT25] A. Gupta and V. Traub. Steiner Forest: A Simplified Better-Than-2 Approximation .
+2025. arXiv: 2511.18460.
+67
+
+===== PAGE 70 =====
+
+[HJS26] D. Hyatt-Denesik, A. Jabal Ameli, and L. Sanit´ a. “Finding almost tight witness trees”.
+In: Math. Program. (2026). doi: 10.1007/s10107-026-02328-2.
+[HP99] S. Hougardy and H. J. Pr¨ omel. “A 1.598 Approximation Algorithm for the Steiner
+Problem in Graphs”. In: Proceedings of the Tenth Annual ACM-SIAM Symposium on
+Discrete Algorithms (SODA). 1999, pp. 448–453.
+[HRW92] F. K. Hwang, D. S. Richards, and P. Winter. The Steiner Tree Problem . Annals of
+Discrete Mathematics, vol. 53. Amsterdam and New York: North-Holland, 1992. isbn:
+9780444890986.
+[KMB81] L. Kou, G. Markowsky, and L. Berman. “A fast algorithm for Steiner trees”. In: Acta
+Informatica 15 (1981), pp. 141–145. doi: 10.1007/BF00288961.
+[KPT11] J. K¨ onemann, D. Pritchard, and K. Tan. “A partition-based relaxation for Steiner
+trees”. In: Math. Program. 127.2 (2011), pp. 345–370. doi: 10.1007/S10107- 009-
+0289-2.
+[KZ97] M. Karpinski and A. Zelikovsky. “New Approximation Algorithms for the Steiner Tree
+Problems”. In: Journal of Combinatorial Optimization 1.1 (1997), pp. 47–65. doi:
+10.1023/A:1009758919736.
+[PS00] H. J. Pr¨ omel and A. Steger. “A New Approximation Algorithm for the Steiner Tree
+Problem with Performance Ratio 5/3”. In: Journal of Algorithms 36.1 (2000), pp. 89–
+101. doi: 10.1006/JAGM.2000.1086.
+[PS02] H. J. Pr¨ omel and A. Steger. The Steiner Tree Problem: A Tour through Graphs, Algo-
+rithms, and Complexity . 1st ed. Advanced Lectures in Mathematics. Braunschweig &
+Wiesbaden: Vieweg+Teubner Verlag, 2002, pp. VIII, 241. isbn: 978-3-528-06762-5.
+[RV99] S. Rajagopalan and V. V. Vazirani. “On the Bidirected Cut Relaxation for the Metric
+Steiner Tree Problem”. In: Proceedings of the Tenth Annual ACM-SIAM Symposium
+on Discrete Algorithms (SODA) . 1999, pp. 742–751.
+[RZ05] G. Robins and A. Zelikovsky. “Tighter Bounds for Graph Steiner Tree Approximation”.
+In: SIAM Journal on Discrete Mathematics 19.1 (2005), pp. 122–134. doi: 10.1137/
+S0895480101393155.
+[TV24] V. Traub and J. Vygen. Approximation Algorithms for Traveling Salesman Problems .
+Cambridge: Cambridge University Press, 2024.isbn: 978-1-009-44541-2. doi: 10.1017/
+9781009445436.
+[TZ25] V. Traub and R. Zenklusen. “Better-Than-2 Approximations for Weighted Tree Aug-
+mentation and Applications to Steiner Tree”. In: Journal of the ACM (JACM) 72.2
+(2025). doi: 10.1145/3722101.
+[Vic20] R. Vicari. Simplex based Steiner tree instances yield large integrality gaps for the bidi-
+rected cut relaxation. 2020. arXiv: 2002.07912.
+[Zel93] A. Zelikovsky. “An 11/6-Approximation Algorithm for the Network Steiner Problem”.
+In: Algorithmica 9.5 (1993), pp. 463–470. doi: 10.1007/BF01187035.
+[Zel96] A. Zelikovsky. Better approximation bounds for the network and Euclidean Steiner tree
+problems. Tech. rep. CS-96-06. University of Virginia, 1996.
+68
+
+===== PAGE 71 =====
+
+A Invariance under Subdivision
+Lemma 4.7. Let I = (G = (V, E), c, R) be an instance of Steiner Tree and let M be a merge plan
+for I. Then there exists a graph G′ = (V ′, E′) that arises from G by subdividing each edge at most
+once, such that instance I ′ = (G′, c, R) satisfies (i) of Definition 4.6 and any further subdivisions
+of the edges of G′ leave tX→v unchanged for all X ⊆ R and v ∈ V ′.
+Proof. To construct the desired subdivision of G = (V, E), we consider a variant of Algorithm 1.
+In this variant, we will have explicit variables C(S, ⃗ e) representing the contribution of a set S ⊆ R
+to a directed edge ⃗ e. Whenever we increase a dual variable yUS, the set S will not only contribute
+to all edges in δ+(US). It will additionally contribute to all edges ( u, w), for which an edge ( u, v)
+arising from a suitable subdivision of {u, w} would be contained in δ+(US).
+Given a solution y to (Dual-BCR), we say that a directed edge ⃗ e= (v, w) ∈ ⃗E is directed-tight if
+X
+S⊆R
+C(S, (v, w)) = c(⃗ e).
+Moreover, we say that an undirected edge e = {v, w} ∈ E is undirected-tight if
+X
+S⊆R
+C(S, (v, w)) +
+X
+S⊆R
+C(S, (w, v)) ≥ c(e).
+Then the continuous dual-growth algorithm is given by Algorithm 2.
+Algorithm 2: Continuous Growth with Merge Plan
+Input: an instance ( G, c, R) of Steiner Tree and a merge plan M =
+ 
+S t
+t≥0
+Output: a solution y to (Dual-BCR)
+1 Initialize t = 0 and yU = 0 for all U ⊆ V .
+2 Let (V, ⃗E) result from G by bidirecting all edges.
+3 while
+S t > 1 do
+4 For S ∈ S t, define
+US = {v ∈ V : v is reachable from S by a path of directed-tight edges in ( V, ⃗E)}.
+5 For S ∈ S t, let
+CS := δ+(US) ∪ {(v, w) ∈ ⃗E : v ∈ US and {v, w} is not undirected-tight}.
+6 Increase the time t, the dual variables yUS for S ∈ S t, and the the variables C(S, ⃗ e)
+with S ∈ S t and ⃗ e∈ CS at unit rate until the partition S t changes, some edge e ∈ E
+becomes undirected tight, or some edge ⃗ e∈ ⃗E becomes directed tight.
+7 end
+8 return y
+We observe that for every edge ⃗ e∈ ⃗E, we have
+X
+U:⃗ e∈δ+(U)
+yU ≤
+X
+S⊆R
+C(S, ⃗ e) ≤ c(⃗ e),
+implying that y is indeed a feasible dual solution. Next, we observe that Algorithm 2 is invariant
+under subdivision.
+69
+
+===== PAGE 72 =====
+
+Invariance of Algorithm 2 under subdivision. Suppose that we subdivide an edge {u, w}
+of G by a vertex v resulting in a graph G′. Define cu := c({u, v}) and cw := c({v, w}), where
+cu + cw = c({u, w}). Then we claim that at any time of the algorithm, the contributions C in
+Algorithm 2 applied to G and the contributions C′ in Algorithm 2 applied to G′ satisfy for every
+set S ⊆ R
+C′ 
+S, (u, v)
+
+= min
+n
+C
+ 
+S, (u, w)
+
+, c u
+o
+C′ 
+S, (v, w)
+
+= max
+n
+C
+ 
+S, (u, w)
+
+− cu, 0
+o (54)
+and symmetrically
+C′ 
+S, (w, v)
+
+= min
+n
+C
+ 
+S, (w, u)
+
+, c w
+o
+C′ 
+S, (v, u)
+
+= max
+n
+C
+ 
+S, (w, u)
+
+− cw, 0
+o
+,
+(55)
+where for all other edges ⃗ eand sets S contributions C(S, ⃗e) and C′(S, ⃗ e) are identical. In particular,
+C(S, (u, w)) = C′(S, (u, v)) + C′(S, (v, w)) and C(S, (w, u)) = C′(S, (w, v)) + C′(S, (v, u)).
+We prove that (54) and (55) are maintained throughout the algorithm. So suppose they are
+true at the current time t. Then we show that for every S ∈ S t, the sets of edges for which the
+contributions C(S, ⃗ e) or C′(S, ⃗ e) are increased are such that (54) and (55) are maintained.
+Note that to show (54) and (55) are preserved, it suffices to consider the contributions on{u, v},
+{v, w}, {u, w}. Each of these edges is contained in exactly one of G and G′. Thus, the notion of
+(directed and undirected) tightness will in the following always refer to the run of Algorithm 2 for
+the graph ( G or G′) containing this edge.
+We distinguish the following cases:
+Case 1: v /∈ US
+If none of u and w are in US, then because v is not in US, none of the contributions appearing in
+(54) and (55) changes.
+If both u and w are in US, none of the edges ( u, v) and ( w, v) is directed-tight, which by (54)
+and (55) implies that the edge {v, w} is not undirected-tight. Then C′(S, (u, v)) and C′(S, (w, v)),
+as well as C(S, (u, w)) and C(S, (w, u)) are increased, which maintains (54) and (55).
+Otherwise only one of u and w is contained in US, say u ∈ US and w /∈ US. Because also
+v /∈ US, none of the contributions appearing in (55) changes, implying that (55) is maintained.
+Moreover, because v, w /∈ US, the edges (u, v) and (u, w) are not directed-tight and the C′(S, (u, v))
+and C(S, (u, w)) increase, but C(S, (v, w)) does not change. This implies that (54) is maintained.
+Case 2: v ∈ US
+Then we may assume without loss of generality ( u, v) is directed-tight (and thus also undirected
+tight) and u ∈ US. If w /∈ US, then C(S, (u, w)) and C′(S, (v, w)) increase, but all other contri-
+butions appearing in (54) or (55) remains unchanged, implying that (54) and (55) are maintained.
+Otherwise w ∈ US. Then by (54) and (55), the edge {u, w} is undirected tight if and only if {v, w}
+is undirected tight. If both of these edges are undirected tight, none of the contributions appearing
+in (54) or (55) change. If none of these edges is undirected-tight then C(S, (u, w)) and C(S, (w, u)),
+as well as C′(S, (v, w)) and C′(S, (w, v)) are increased, whicle the other contributions in (54) and
+(55) remain unchanged. Thus, in all cases (54) and (55) are maintained.
+Constructing the desired subdivision of G. We call an instance nice, if Algorithm 2 on
+an instance that satisfies (i) of Definition 4.6. That is, whenever both endpoints of an edge are
+reachable (for Algorithm 2), one of the orientations of the edge is already directed tight.
+Observe that for any nice instance, Algorithm 2 and Algorithm 1 produce exactly the same dual
+solution, and moreover, an edge is directed-tight in Algorithm 2 if and only if it is also tight in
+70
+
+===== PAGE 73 =====
+
+Algorithm 1. This is because, for nice instances, we have throughout Algorithm 2 thatCS = δ+(US)
+for all S ∈ S t.
+Because of (54) and (55), every instance arising from a nice instance by subdivision of edges,
+is again a nice instance. Thus, because Algorithm 2 is invariant under subdivision of edges, Algo-
+rithm 1 is also invariant under subdivision of edges on nice instances.
+Hence, it suffices to prove that for every instance ( G, c, R) and a fixed merge plan M, there
+is a subdivision G′ of G such that ( G′, c, R) (with merge plan M) is nice. To this end, for every
+edge {u, w} of G, we consider the contributions C in Algorithm 2 at the time when {u, w} became
+undirected tight. Then we subdivide the edge by a vertex v and define
+c({u, v}) :=
+X
+S⊆R
+C(S, (u, w))
+c({v, w}) :=
+X
+S⊆R
+C(S, (w, u)) .
+(If this would create an edge of length 0, we do not subdivide the edge. In such cases no subdivision
+is needed anyways.) Because we consider the contributions at the time where {u, w} became
+undirected tight, these two costs indeed sum up to c({u, w}). Edges {u, w} that never become
+undirected tight are subdivided by a vertex v such that
+c({u, v}) >
+X
+S⊆R
+C(S, (u, w))
+c({v, w}) <
+X
+S⊆R
+C(S, (w, u)) .
+and c ({u, w}) = c ({u, v}) + c ({v, w}). Using the fact that the contributions after subdivision
+change according to (54) and (55) (and they do not change when subdividing further edges), we
+conclude that the resulting instance is indeed nice:
+In the new instance, each edge has one original vertex as an endpoint and one newly introduced
+vertex as the other endpoint. Each newly introduced vertex v has two incident edges. When v is
+first reachable, both its incident edges have a tight orientation (the one pointing towards v). Note
+that the new vertices we introduced on edges that never got undirected tight will never be reached,
+meaning that (i) of Definition 4.6 trivially holds for their adjacent edges.
+71
