@@ -174,7 +174,7 @@ fn test_b09_fast() {
 /// Mathematical invariant: dual bound must never exceed true optimal.
 #[test]
 fn test_dual_bounds_valid() {
-    for name in &["b01", "b04", "b08", "b09"] {
+    for name in &["b01", "b04", "b08", "b09", "b14"] {
         let path = format!("tests/B/{}.stp", name);
         let r = solve(&path, 15.0, false);
         r.print();
