@@ -42,7 +42,6 @@ impl<'a> CycleCutSeparator<'a> {
             x[i] = fwd + rev;
         }
 
-        // Build adjacency using HashMap to handle sparse node IDs
         let mut adj: HashMap<NodeId, Vec<(NodeId, usize, f64)>> = HashMap::new();
         for i in 0..num_edges {
             if x[i] < 1e-8 { continue; }
@@ -58,7 +57,6 @@ impl<'a> CycleCutSeparator<'a> {
         let mut violated_cuts = Vec::new();
         let mut used_edges: HashSet<usize> = HashSet::new();
 
-        // Only process nodes with degree >= 2
         for &v in &active_nodes {
             let neighbors = match adj.get(&v) {
                 Some(n) if n.len() >= 2 => n.clone(),
@@ -73,23 +71,41 @@ impl<'a> CycleCutSeparator<'a> {
                     if used_edges.contains(&ei) || used_edges.contains(&ej) { continue; }
                     if ei == ej { continue; }
 
-                    let path_cost = dijkstra_avoid_sparse(u, w, v, &adj);
+                    let path_result = dijkstra_with_path(u, w, v, &adj);
+
+                    let (path_cost, path_edges) = match path_result {
+                        Some(r) => r,
+                        None => continue,
+                    };
 
                     let cycle_cost = wi + wj + path_cost;
 
                     if cycle_cost < 1.0 - self.violation_tolerance {
                         let violation = 1.0 - cycle_cost;
 
-                        let arc_ids = vec![
-                            (2 * ei) as ArcId, (2 * ei + 1) as ArcId,
-                            (2 * ej) as ArcId, (2 * ej + 1) as ArcId,
-                        ];
+                        let mut all_edges: Vec<u32> = Vec::with_capacity(2 + path_edges.len());
+                        all_edges.push(ei as u32);
+                        all_edges.push(ej as u32);
+                        for &pe in &path_edges {
+                            all_edges.push(pe as u32);
+                        }
+                        all_edges.sort();
+                        all_edges.dedup();
+
+                        let mut arc_ids: Vec<ArcId> = Vec::with_capacity(all_edges.len() * 2);
+                        for &edge_idx in &all_edges {
+                            arc_ids.push(2 * edge_idx as ArcId);
+                            arc_ids.push(2 * edge_idx as ArcId + 1);
+                        }
 
                         used_edges.insert(ei);
                         used_edges.insert(ej);
+                        for &pe in &path_edges {
+                            used_edges.insert(pe);
+                        }
 
                         violated_cuts.push(CycleCut {
-                            edge_indices: vec![ei as u32, ej as u32],
+                            edge_indices: all_edges,
                             arc_ids,
                             violation,
                         });
@@ -108,37 +124,53 @@ impl<'a> CycleCutSeparator<'a> {
     }
 }
 
-fn dijkstra_avoid_sparse(
+/// Dijkstra from `source` to `target` avoiding `avoid` node.
+/// Returns (cost, edge_indices_on_path) or None if unreachable.
+fn dijkstra_with_path(
     source: NodeId,
     target: NodeId,
     avoid: NodeId,
     adj: &HashMap<NodeId, Vec<(NodeId, usize, f64)>>,
-) -> f64 {
-    if source == target { return 0.0; }
+) -> Option<(f64, Vec<usize>)> {
+    if source == target { return Some((0.0, Vec::new())); }
 
     let mut dist: HashMap<NodeId, f64> = HashMap::new();
+    let mut prev: HashMap<NodeId, (NodeId, usize)> = HashMap::new();
     let mut heap = BinaryHeap::new();
 
     dist.insert(source, 0.0);
     heap.push(DEntry { cost: 0.0, node: source });
 
     while let Some(DEntry { cost, node }) = heap.pop() {
-        if node == target { return cost; }
+        if node == target {
+            let mut path_edges = Vec::new();
+            let mut cur = target;
+            while cur != source {
+                if let Some(&(pred, edge_idx)) = prev.get(&cur) {
+                    path_edges.push(edge_idx);
+                    cur = pred;
+                } else {
+                    break;
+                }
+            }
+            return Some((cost, path_edges));
+        }
         if cost > *dist.get(&node).unwrap_or(&f64::INFINITY) + 1e-10 { continue; }
 
         if let Some(neighbors) = adj.get(&node) {
-            for &(next, _, w) in neighbors {
+            for &(next, edge_idx, w) in neighbors {
                 if next == avoid { continue; }
                 let new_cost = cost + w;
                 if new_cost < *dist.get(&next).unwrap_or(&f64::INFINITY) - 1e-10 {
                     dist.insert(next, new_cost);
+                    prev.insert(next, (node, edge_idx));
                     heap.push(DEntry { cost: new_cost, node: next });
                 }
             }
         }
     }
 
-    *dist.get(&target).unwrap_or(&f64::INFINITY)
+    None
 }
 
 #[derive(Clone, PartialEq)]

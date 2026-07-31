@@ -28,8 +28,8 @@ impl Default for SolverConfig {
             time_limit_secs: 3600.0,
             node_limit: 1_000_000,
             gap_tolerance: 1e-6,
-            cut_rounds_per_node: 10,
-            heuristic_frequency: 5,
+            cut_rounds_per_node: 20,
+            heuristic_frequency: 3,
             verbose: true,
             preprocess: true,
         }
@@ -168,7 +168,9 @@ impl BranchAndCutSolver {
             &self.terminals,
             &self.steiner_nodes,
         );
-        for &arc_id in &self.fixed_zero_arcs {
+        let mut sorted_fixed: Vec<ArcId> = self.fixed_zero_arcs.iter().copied().collect();
+        sorted_fixed.sort();
+        for &arc_id in &sorted_fixed {
             lp.fix_variable(arc_id, 0.0);
         }
         lp.snapshot_base();

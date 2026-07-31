@@ -153,24 +153,29 @@ fn find_triangle_conflicts(graph: &mut ReducibleGraph, ig: &mut ImplicationGraph
 /// available. If any alternative edge has been removed, the dominance breaks
 /// and e might be needed.
 ///
-/// So we remove e only if ALL its alternative edges are still valid.
+/// Collects all removable edges first, then removes them atomically
+/// to avoid HashMap iteration-order nondeterminism.
 fn propagate_implications(graph: &mut ReducibleGraph, ig: &ImplicationGraph) -> u32 {
-    let mut removed = 0u32;
+    let mut to_remove: Vec<EdgeId> = Vec::new();
 
-    for (eid, implied) in &ig.implications {
-        if !graph.is_edge_valid(*eid) { continue; }
+    for (&eid, implied) in &ig.implications {
+        if !graph.is_edge_valid(eid) { continue; }
         if implied.is_empty() { continue; }
 
         let all_alternatives_valid = implied.iter()
             .all(|&implied_eid| graph.is_edge_valid(implied_eid));
 
         if all_alternatives_valid {
-            graph.remove_edge(*eid);
-            removed += 1;
+            to_remove.push(eid);
         }
     }
 
-    removed
+    to_remove.sort();
+    for &eid in &to_remove {
+        graph.remove_edge(eid);
+    }
+
+    to_remove.len() as u32
 }
 
 /// Nearest special distance (NSD) reduction using the implication graph.

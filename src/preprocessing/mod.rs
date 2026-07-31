@@ -207,10 +207,11 @@ impl ReducibleGraph {
             }
         }
 
-        let terminals: Vec<NodeId> = self.terminals.iter()
+        let mut terminals: Vec<NodeId> = self.terminals.iter()
             .filter(|&&t| node_map.contains_key(&t))
             .map(|&t| node_map[&t])
             .collect();
+        terminals.sort();
 
         let root = self.root.and_then(|r| node_map.get(&r).copied());
 
@@ -301,7 +302,14 @@ pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (Reduc
             0
         };
 
-        let impl_removed = implications::implication_reductions(&mut rg);
+        // Implication reductions: triangle dominance + conflict propagation.
+        // Only run when graph has settled (no degree reductions or SD removals
+        // in this iteration), as implications depend on current graph structure.
+        let impl_removed = if deg_removed == 0 && dist_removed == 0 {
+            implications::implication_reductions(&mut rg)
+        } else {
+            0
+        };
 
         if deg_removed + dist_removed + impl_removed == 0 {
             break;

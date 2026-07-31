@@ -77,6 +77,12 @@ fn parse_args(args: &[String]) -> SolverConfig {
             "--quiet" | "-q" => {
                 config.verbose = false;
             }
+            "--no-preprocess" => {
+                config.preprocess = false;
+            }
+            "--verbose" | "-v" => {
+                config.verbose = true;
+            }
             _ => {}
         }
         i += 1;

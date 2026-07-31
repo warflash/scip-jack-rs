@@ -47,6 +47,10 @@ pub fn solve_file(path: &str, config: SolverConfig) -> SolveResult {
 
     let (undirected, root, terminals, lb_offset) = if config.preprocess {
         let (rg, pr) = preprocess(&instance, &graph);
+        if config.verbose {
+            eprintln!("[Preprocess] Removed {} nodes, {} edges | Fixed {} | LB offset: {:.1}",
+                pr.nodes_removed, pr.edges_removed, pr.edges_fixed.len(), pr.lower_bound_offset);
+        }
         let (ri, ru) = rg.to_instance();
         let r = ri.root.unwrap_or(*ri.terminals.first().expect("No terminals"));
         (ru, r, ri.terminals.clone(), pr.lower_bound_offset)
