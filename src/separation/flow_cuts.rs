@@ -4,12 +4,36 @@ use crate::graph::algorithms::MaxFlowWorkspace;
 
 /// Separates violated directed cut constraints (Steiner cuts).
 ///
-/// For each terminal t ∈ T \ {r}, compute max-flow from root to t
-/// using arc capacities from the LP solution. If flow < 1, the min-cut
-/// gives a violated Steiner cut constraint: y(δ+(W)) ≥ 1.
+/// For each terminal `t` other than the root, compute the maximum flow from the
+/// root to `t` with arc capacities taken from the LP solution. If the flow is
+/// below one, the corresponding minimum cut is a violated Steiner cut
+/// `y(delta+(W)) >= 1`.
 ///
-/// This is the core separation routine for the branch-and-cut algorithm.
-/// The separated constraints are facets of the Steiner tree polytope.
+/// # Getting more than one cut per flow
+///
+/// The naive routine emits one inequality per terminal per round, which makes
+/// the cut loop converge very slowly: on PACE instance141 thirty rounds moved
+/// the bound by a tenth of the remaining gap while each round's LP re-solve cost
+/// tens of milliseconds. Two standard devices (Koch and Martin, *Solving Steiner
+/// tree problems in graphs to optimality*, Networks 32, 1998) multiply the yield:
+///
+/// - **Back cuts.** When the minimum cut is not unique, the one nearest the root
+///   and the one nearest the terminal are different inequalities. Both come out
+///   of the same residual graph, so the second is free.
+/// - **Nested cuts.** After emitting a cut, raise the capacity of its arcs to one
+///   and recompute the flow. The next minimum cut is a *different* violated
+///   inequality, and because raising capacities can only raise the flow, a cut
+///   found this way has capacity below one under the original solution too - so
+///   it is genuinely violated by the point being separated.
+///
+/// Every inequality emitted is checked against the true LP values before being
+/// returned, so the modified capacities can never smuggle in a satisfied row.
+///
+/// # Creep flow
+///
+/// Capacities carry a tiny additive epsilon. Among the many minimum cuts of a
+/// degenerate solution this biases the search towards the one with fewest arcs,
+/// which is both a sparser row for the LP and a stronger inequality.
 pub struct FlowCutSeparator<'a> {
     pub graph: &'a DirectedGraph,
     pub root: NodeId,
@@ -18,7 +42,14 @@ pub struct FlowCutSeparator<'a> {
     pub total_cuts_generated: u32,
     pub violation_tolerance: f64,
     workspace: Option<MaxFlowWorkspace>,
+    capacities: Vec<f64>,
 }
+
+/// Cuts emitted per terminal before moving on. Nested cuts are disjoint by
+/// construction, so a handful per terminal is already a large family.
+const MAX_NESTED: usize = 4;
+/// Additive capacity bias that steers the minimum cut towards fewer arcs.
+const CREEP: f64 = 1e-6;
 
 /// A separated Steiner cut constraint.
 #[derive(Debug, Clone)]
@@ -43,6 +74,7 @@ impl<'a> FlowCutSeparator<'a> {
             total_cuts_generated: 0,
             violation_tolerance: 1e-6,
             workspace: None,
+            capacities: Vec::new(),
         }
     }
 
@@ -59,30 +91,68 @@ impl<'a> FlowCutSeparator<'a> {
         if self.workspace.is_none() {
             self.workspace = Some(MaxFlowWorkspace::new(self.graph));
         }
-        let ws = self.workspace.as_mut().unwrap();
+        let num_arcs = self.graph.arcs.len();
+        self.capacities.clear();
+        self.capacities
+            .extend(lp_solution.iter().take(num_arcs).map(|&y| y + CREEP));
+        self.capacities.resize(num_arcs, CREEP);
 
-        // Standard terminal separation with early termination.
-        // Once we find enough violated cuts, stop computing max-flows for
-        // the remaining terminals. The solver only adds ~30 per round anyway.
-        let max_violated = 50;
-        for &terminal in self.terminals {
+        // Stop once the round has enough material: the solver installs a bounded
+        // number per round, and further max-flows are wasted work.
+        let max_violated = 200;
+        let mut seen: std::collections::HashSet<Vec<ArcId>> = std::collections::HashSet::new();
+
+        'terminals: for &terminal in self.terminals {
             if terminal == self.root {
                 continue;
             }
 
-            let result = ws.compute(self.root, terminal, lp_solution, &self.graph.arcs);
-
-            if result.flow_value < 1.0 - self.violation_tolerance {
-                let violation = 1.0 - result.flow_value;
-                violated_cuts.push(SteinerCut {
-                    cut_set: result.source_side,
-                    cut_arcs: result.cut_arcs,
-                    separated_terminal: terminal,
-                    violation,
-                });
-                if violated_cuts.len() >= max_violated {
+            for _ in 0..MAX_NESTED {
+                let ws = self.workspace.as_mut().unwrap();
+                let result = ws.compute(self.root, terminal, &self.capacities, &self.graph.arcs);
+                if result.flow_value >= 1.0 - self.violation_tolerance {
                     break;
                 }
+
+                let source_side = result.source_side;
+                let mut emitted = false;
+                for arcs in [result.cut_arcs, result.sink_cut_arcs] {
+                    if arcs.is_empty() {
+                        continue;
+                    }
+                    // Score against the true LP values, never the creeping ones.
+                    let load: f64 = arcs
+                        .iter()
+                        .map(|&a| lp_solution.get(a as usize).copied().unwrap_or(0.0))
+                        .sum();
+                    if load >= 1.0 - self.violation_tolerance {
+                        continue;
+                    }
+                    let mut key = arcs.clone();
+                    key.sort_unstable();
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    // Saturating the emitted arcs is what makes the next flow
+                    // find a different cut.
+                    for &a in &arcs {
+                        self.capacities[a as usize] = 1.0;
+                    }
+                    violated_cuts.push(SteinerCut {
+                        cut_set: source_side.clone(),
+                        cut_arcs: arcs,
+                        separated_terminal: terminal,
+                        violation: 1.0 - load,
+                    });
+                    emitted = true;
+                }
+
+                if !emitted || violated_cuts.len() >= max_violated {
+                    break;
+                }
+            }
+            if violated_cuts.len() >= max_violated {
+                break 'terminals;
             }
         }
 
@@ -111,6 +181,7 @@ impl<'a> FlowCutSeparator<'a> {
                 frac_a.partial_cmp(&frac_b).unwrap_or(std::cmp::Ordering::Equal)
             });
 
+            let ws = self.workspace.as_mut().unwrap();
             for &(node, in_flow) in steiner_candidates.iter().take(10) {
                 let result = ws.compute(self.root, node, lp_solution, &self.graph.arcs);
                 if result.flow_value < in_flow - self.violation_tolerance {
@@ -194,13 +265,45 @@ mod tests {
         let terminals = vec![1, 4];
         let mut separator = FlowCutSeparator::new(&g, 1, &terminals);
 
-        // Infeasible LP: all arcs at 0.3, total flow to 4 = 0.6 < 1
+        // Infeasible LP: all arcs at 0.3, total flow to 4 = 0.6 < 1.
+        // The root-side cut is `delta+({1}) = {0, 1}` and the terminal-side cut
+        // is `delta-({4}) = {2, 3}`; both are separated from one flow.
         let lp = vec![0.3, 0.3, 0.3, 0.3];
         let cuts = separator.find_violated_cuts(&lp);
 
-        assert_eq!(cuts.len(), 1);
-        assert_eq!(cuts[0].separated_terminal, 4);
-        assert!(cuts[0].violation > 0.3);
+        assert_eq!(cuts.len(), 2, "root-side and terminal-side cuts");
+        for cut in &cuts {
+            assert_eq!(cut.separated_terminal, 4);
+            let load: f64 = cut.cut_arcs.iter().map(|&a| lp[a as usize]).sum();
+            assert!(load < 1.0 - 1e-9, "emitted a satisfied cut, load {load}");
+            assert!((cut.violation - (1.0 - load)).abs() < 1e-9);
+        }
+        let mut families: Vec<Vec<ArcId>> = cuts.iter().map(|c| c.cut_arcs.clone()).collect();
+        families.iter_mut().for_each(|f| f.sort_unstable());
+        families.sort();
+        assert_eq!(families, vec![vec![0, 1], vec![2, 3]]);
+    }
+
+    /// The nested loop raises capacities as it goes, so the guard that every
+    /// emitted row is scored against the *original* solution is what keeps it
+    /// honest. This pins that guard.
+    #[test]
+    fn every_emitted_cut_is_violated_by_the_point_being_separated() {
+        let g = build_stp_graph();
+        let terminals = vec![1, 4];
+        let mut separator = FlowCutSeparator::new(&g, 1, &terminals);
+
+        for lp in [
+            vec![0.3, 0.3, 0.3, 0.3],
+            vec![0.9, 0.05, 0.9, 0.05],
+            vec![0.5, 0.5, 0.4, 0.4],
+            vec![1.0, 0.0, 0.6, 0.0],
+        ] {
+            for cut in separator.find_violated_cuts(&lp) {
+                let load: f64 = cut.cut_arcs.iter().map(|&a| lp[a as usize]).sum();
+                assert!(load < 1.0 - 1e-9, "cut {:?} has load {load} on {lp:?}", cut.cut_arcs);
+            }
+        }
     }
 
     #[test]

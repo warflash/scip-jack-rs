@@ -10,6 +10,11 @@ pub struct MaxFlowResult {
     pub source_side: Vec<NodeId>,
     /// Arcs crossing the cut (from source_side to its complement).
     pub cut_arcs: Vec<ArcId>,
+    /// Arcs crossing the min cut *closest to the sink*: the complement of the
+    /// set of vertices that can reach the sink in the residual graph. When the
+    /// min cut is not unique this is a different inequality from `cut_arcs`, and
+    /// separating both halves doubles the yield of each max-flow computation.
+    pub sink_cut_arcs: Vec<ArcId>,
 }
 
 /// Pre-allocated workspace for repeated max-flow computations on the same graph.
@@ -20,6 +25,7 @@ pub struct MaxFlowWorkspace {
     level: Vec<i32>,
     iter_ptr: Vec<usize>,
     reachable: Vec<bool>,
+    sink_reachable: Vec<bool>,
     queue: VecDeque<NodeId>,
     num_arcs: usize,
     num_nodes: usize,
@@ -48,10 +54,17 @@ impl MaxFlowWorkspace {
             level: vec![0i32; num_nodes],
             iter_ptr: vec![0; num_nodes],
             reachable: vec![false; num_nodes],
+            sink_reachable: vec![false; num_nodes],
             queue: VecDeque::with_capacity(num_nodes),
             num_arcs,
             num_nodes,
         }
+    }
+
+    /// The residual twin of an edge: forward edge `i` pairs with `i + num_arcs`.
+    #[inline]
+    fn partner(&self, eid: usize) -> usize {
+        if eid < self.num_arcs { eid + self.num_arcs } else { eid - self.num_arcs }
     }
 
     pub fn compute(&mut self, source: NodeId, sink: NodeId, capacities: &[f64], arcs: &[crate::graph::Arc]) -> MaxFlowResult {
@@ -120,7 +133,35 @@ impl MaxFlowWorkspace {
             .map(|(i, _)| i as ArcId)
             .collect();
 
-        MaxFlowResult { flow_value: total_flow, source_side, cut_arcs }
+        // Backward residual reachability from the sink. `sink_reachable[v]` means
+        // `v` can still reach the sink, so the complement of that set is the
+        // source side of the min cut lying closest to the sink.
+        for r in self.sink_reachable.iter_mut() {
+            *r = false;
+        }
+        self.sink_reachable[sink as usize] = true;
+        self.queue.clear();
+        self.queue.push_back(sink);
+        while let Some(v) = self.queue.pop_front() {
+            for &eid in &self.adj[v as usize] {
+                let w = self.head_node[eid];
+                let back = self.partner(eid);
+                if self.cap[back] > 1e-10 && !self.sink_reachable[w as usize] {
+                    self.sink_reachable[w as usize] = true;
+                    self.queue.push_back(w);
+                }
+            }
+        }
+        let sink_cut_arcs: Vec<ArcId> = arcs
+            .iter()
+            .enumerate()
+            .filter(|(_, arc)| {
+                !self.sink_reachable[arc.tail as usize] && self.sink_reachable[arc.head as usize]
+            })
+            .map(|(i, _)| i as ArcId)
+            .collect();
+
+        MaxFlowResult { flow_value: total_flow, source_side, cut_arcs, sink_cut_arcs }
     }
 }
 

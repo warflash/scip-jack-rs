@@ -72,6 +72,11 @@ fn parse_args(args: &[String]) -> SolverConfig {
             "--no-preprocess" => {
                 config.preprocess = false;
             }
+            // Separator switches, for attributing runtime and bound strength to
+            // a specific cut family on a specific instance.
+            "--no-cycle-cuts" => config.cycle_cuts = false,
+            "--no-partition-cuts" => config.partition_cuts = false,
+            "--no-tf-cuts" => config.tf_cuts = false,
             "--verbose" | "-v" => {
                 config.verbose = true;
             }
