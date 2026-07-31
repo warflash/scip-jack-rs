@@ -321,3 +321,133 @@ The project should not call itself mathematically proven until Phase 1 is comple
 ## 9. Collected papers
 
 The PDF files and converted raw text are indexed in [`papers/PAPER_INDEX.md`](papers/PAPER_INDEX.md). The raw text is in UTF-8 text files under `papers/extracted/`, with page separators and the source filename preserved. The original PDFs are under `papers/downloads/`, except for the two papers already present at the top level of `papers/`.
+
+## 10. Second-pass gap analysis
+
+This section separates three different meanings of “open”: an open theorem in the literature, an implementation omission that the literature already tells us how to attack, and a solver-specific correctness gap that can be closed without new theory.
+
+### 10.1 Open problems explicitly identified by the papers
+
+#### The BCR integrality gap is still not characterized
+
+The old survey described a better-than-2 upper bound for the directed/bidirected cut relaxation as open. That part has since been partially resolved: Byrka, Grandoni, and Traub prove 1.9988, and Paschmanns and Traub improve the bound to 1.898. The latter paper also proves that the broad class of moat-growing dual certificates cannot certify a bound below 12/7.
+
+This is a real mathematical frontier, not a missing code feature. The useful consequence for this project is a change of attack: do not spend effort trying to obtain the next improvement by merely tuning moat growth. The likely routes are a non-moat dual, a hybrid with the hypergraphic relaxation, or a structural theorem restricting the remaining bad instances.
+
+#### Hypergraphic formulations are stronger but not yet a practical generic kernel
+
+The survey explicitly calls for advanced implementations and decomposition techniques for hypergraphic formulations. The hypergraphic LP paper gives an important structural fact: although the formulation has exponentially many variables, basic solutions have sparse support, and partition/hypergraphic formulations have deep equivalences with directed-cut formulations.
+
+The practical gap is branch-and-price-and-cut. A restricted primal master is not automatically a lower bound for the original STP, because omitting components can make a minimization problem artificially expensive. Certification must instead come from a feasible dual together with an exact pricing/separation proof for all omitted components. For small terminal subsets, Dreyfus-Wagner or Dijkstra-Steiner can provide that pricing proof; for general instances, this remains a difficult research problem.
+
+#### The flow-formulation hierarchies have not been fully compared
+
+The survey identifies an unfinished comparison between common-flow models and the path-length `MCF-lambda` hierarchy. The papers already show that neither family dominates the other in full generality. This is a good computational-mathematics target: enumerate small graphs, compute exact STP values and each LP value, and search for minimal separating examples. The resulting motifs can then guide a solver portfolio instead of forcing a false single-model choice.
+
+#### Weighted Cut&Count remains a specialized parameterized gap
+
+The PACE report notes that submissions largely avoided Cut&Count on edge-weighted instances and calls for practical or theoretical weighted versions. This is relevant to a treewidth-based dispatcher, but not to the main general-graph branch-and-cut engine. Rank-based dynamic programming is the more immediate deterministic path; weighted Cut&Count is a separate research project.
+
+#### Exact reduction power for directed and variant models is less mature
+
+The survey points out that the Steiner arborescence problem, especially with negative arc weights, has fewer advanced reduction techniques than undirected STP. This matters directly for PCSTP/RPCSTP/MWCSP transformations: a reduction valid in the original undirected instance is not automatically valid after adding artificial nodes, prizes, or negative transformed costs. The reduction library must carry a model-specific proof, not just a graph-level flag.
+
+### 10.2 Gaps that look genuinely attackable here
+
+#### A. Implement the stronger special distance, not just the weak bottleneck path
+
+The current bottleneck reduction computes a path bottleneck through one original terminal. Rehfeldt and Koch define the bottleneck Steiner distance using the additive shortest-path metric on `T` together with the two edge endpoints:
+
+```text
+D = complete metric graph on T union {u,v}
+s(u,v) = bottleneck distance from u to v in D
+delete {u,v} if s(u,v) < c({u,v})
+```
+
+The current code is a valid but weaker test. Implementing `s(u,v)` is a concrete, theorem-backed improvement. A practical implementation can use shortest-path distances plus bottleneck queries on the metric closure, with caching over terminal subsets and edge endpoints. The first proof obligation is not difficult: any metric-closure path expands to a walk in the original graph, and the replacement argument from the paper preserves terminal connectivity.
+
+The 2023 paper goes further and explicitly says that two criteria based on the implied bottleneck distance were not implemented. Those are an especially good target because the mathematical statements and proof strategy already exist; the work is faithful formalization, efficient data structures, and exhaustive small-instance validation.
+
+#### B. Turn implications and conflicts into a certified cut system
+
+The paper derives conflict sets from reduction ancestry and says they can generate IP cuts. The natural implementation is:
+
+```text
+pair conflict {e,f}:       x_e + x_f <= 1
+conflict clique Q:         sum(x_e for e in Q) <= 1
+implication e -> f:        x_e <= x_f
+```
+
+The subtlety is that some reduction statements preserve at least one optimum rather than every feasible integer solution. Therefore the solver should normalize the model with a lexicographic “minimum-cost, then minimum-support, acyclic” objective or attach the reduction certificate to the transformed instance. Once that boundary is explicit, conflict propagation becomes both safe and useful for branching.
+
+#### C. Add a lower-bound certificate independent of the LP backend
+
+This is the most promising near-term mathematical addition. Let `C_i` be any valid root-terminal cut, so every feasible directed solution satisfies
+
+```text
+sum(y_a for a in C_i) >= 1.
+```
+
+For nonnegative multipliers `lambda_i` satisfying
+
+```text
+sum(lambda_i for i with a in C_i) <= c_a       for every arc a,
+```
+
+we obtain the independently checkable lower bound
+
+```text
+LB = sum(lambda_i) <= sum(c_a y_a).
+```
+
+The proof is one line: multiply each cut inequality by `lambda_i`, sum, and dominate the resulting coefficient of every `y_a` by `c_a`. This is a valid dual packing certificate even if HiGHS is treated as an untrusted floating-point oracle. It can be stored with rational `lambda_i` and replayed exactly.
+
+This does not replace the full LP bound, but it gives the project a reliable proof mode immediately. It also suggests a new separation objective: choose a small, high-value, low-overlap cut family rather than indiscriminately adding every violated cut.
+
+#### D. Build a finite polyhedral microscope
+
+For graphs with perhaps up to 8-10 vertices, enumerate connected graphs, terminal sets, and small integer edge costs. Compute:
+
+1. the exact Steiner optimum by exhaustive tree/subgraph enumeration;
+2. the current directed-cut LP;
+3. common-flow and path-hierarchy LPs;
+4. selected hypergraphic/partition bounds;
+5. the cut-packing certificate value.
+
+Canonicalize graphs up to isomorphism and store the smallest counterexample for every conjectured dominance relation. This will answer concrete questions that the papers leave broad: which constraints close the current model’s gap, which motifs defeat each hierarchy, and whether the solver’s hard benchmark instances are actually exhibiting known fractional obstructions. It is realistic to complete this experimentally and use it to formulate new theorems.
+
+#### E. Finish the extended-reduction search rather than stopping at depth-first extension
+
+The 2023 paper states that its implementation extends only from farthest leaves in a depth-first manner, while full backtracking is stronger but more expensive. That is an explicit accuracy/performance tradeoff. A solver-specific improvement is best-first extension with a proof budget:
+
+```text
+priority = lower bound on the cheapest completion of the partial extension
+expand only while the proof can still beat the incumbent
+memoize (contracted boundary, terminal pattern, ancestor-conflict state)
+```
+
+This keeps the reduction theorem unchanged while improving the amount of the search tree that can be ruled out. It is safer and more promising than inventing an unproved new reduction rule.
+
+#### F. Use root choice correctly
+
+The survey reports that the DCUT/MCF LP quality is invariant under the choice of root. Therefore root selection is not a route to a stronger mathematical bound for the current relaxation. It can still change separation order, cache behavior, branching symmetry, and primal heuristics. Root selection should be optimized for runtime and certificate sparsity, not evaluated as if it strengthens the LP polyhedron.
+
+### 10.3 A concrete new theorem/program for this repository
+
+The first research result I would try to establish is:
+
+> **Cut-packing certificate theorem.** For every finite family of valid directed terminal cuts and every nonnegative rational packing of those cuts whose arc load does not exceed the arc cost, the packed value is a certified lower bound on STP.
+
+The theorem itself is elementary; the novelty is turning it into a reusable certificate layer and combining it with implication/conflict-generated cuts. The program would be:
+
+1. generate flow cuts;
+2. solve a small rational cut-packing problem;
+3. verify the arc-load inequalities exactly;
+4. use the packed bound for pruning and for reduced-cost-style edge fixing;
+5. compare its value and cost against HiGHS dual bounds on SteinLib/DIMACS instances.
+
+If the gap is large, add valid conflict and partition cuts and repeat. This produces a measurable research curve before attempting a major hypergraphic pricing engine.
+
+### 10.4 What I would not claim solved yet
+
+I would not claim that the exact BCR gap, the full HYP-vs-DCUT relationship, or a general weighted Cut&Count algorithm has been solved by reasoning alone. Those require new proofs and likely new ideas beyond the current codebase. What we can solve now is the bridge between their results and a certifiable solver: implement the omitted reductions, add proof-carrying cut packing, mine minimal fractional obstructions, and use those obstructions to select or design stronger relaxations.

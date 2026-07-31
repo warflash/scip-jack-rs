@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::graph::{DirectedGraph, NodeId, ArcId, Cost};
+use crate::graph::algorithms::{dual_ascent, reduced_cost_fixable_arcs};
 use crate::model::{LpRelaxation, SteinerSolution};
 use crate::separation::FlowCutSeparator;
 use crate::heuristics::{ConstructiveHeuristic, LocalSearchHeuristic, PrimalHeuristic};
@@ -63,6 +64,8 @@ pub struct BranchAndCutSolver {
     pseudo_costs: PseudoCosts,
     /// Global cut pool: Steiner cuts discovered at any node, valid everywhere.
     global_cut_pool: Vec<PoolCut>,
+    /// Arcs fixed to 0 by reduced-cost fixing (valid globally).
+    fixed_zero_arcs: HashSet<ArcId>,
     /// Running statistics
     total_cuts_added: u64,
     total_lp_solves: u64,
@@ -93,6 +96,7 @@ impl BranchAndCutSolver {
             branching_rule: BranchingRule::default_reliability(),
             pseudo_costs: PseudoCosts::new(num_arcs),
             global_cut_pool: Vec::new(),
+            fixed_zero_arcs: HashSet::new(),
             total_cuts_added: 0,
             total_lp_solves: 0,
         }
@@ -108,8 +112,25 @@ impl BranchAndCutSolver {
 
         self.run_initial_heuristic();
 
+        // Dual ascent: fast lower bound + reduced-cost fixing (Wong 1984)
+        let da_result = dual_ascent(&self.graph, self.root, &self.terminals);
+        if da_result.lower_bound > self.tree.global_dual_bound {
+            self.tree.global_dual_bound = da_result.lower_bound;
+        }
+
+        // Reduced-cost fixing: fix arcs where LB + reduced_cost > UB
+        if self.tree.global_primal_bound < f64::INFINITY {
+            let fixable = reduced_cost_fixable_arcs(&da_result, self.tree.global_primal_bound);
+            for arc_id in fixable {
+                self.fixed_zero_arcs.insert(arc_id);
+            }
+        }
+
         if self.config.verbose {
-            eprintln!("[B&C] Initial primal bound: {:.6}", self.tree.global_primal_bound);
+            eprintln!(
+                "[B&C] Initial primal: {:.1} | DA lower bound: {:.1} | Fixed arcs: {}",
+                self.tree.global_primal_bound, da_result.lower_bound, self.fixed_zero_arcs.len(),
+            );
         }
 
         let root_node = BbNode {
@@ -222,6 +243,12 @@ impl BranchAndCutSolver {
         // Inherit all global cuts (valid at every node)
         for pool_cut in &self.global_cut_pool {
             lp.add_steiner_cut(&pool_cut.cut_arcs);
+        }
+
+        // Apply globally fixed arcs from reduced-cost fixing
+        for &arc_id in &self.fixed_zero_arcs {
+            lp.add_cut(&[arc_id], &[1.0], 0.0);
+            lp.add_cut(&[arc_id], &[-1.0], 0.0);
         }
 
         for &(arc_id, value) in &fixings {

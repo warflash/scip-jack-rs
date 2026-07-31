@@ -1,0 +1,1532 @@
+﻿SOURCE: ChakrabartyKonemannPritchard2011_HypergraphicLP.pdf
+PAGES: 25
+EXTRACTOR: pypdf 6.10.0 (Unicode text), pdfplumber fallback
+
+
+===== PAGE 1 =====
+
+Hypergraphic LP Relaxations for Steiner Trees
+Deeparnab Chakrabarty Jochen K¨ onemann David Pritchard
+University of Waterloo ∗
+Abstract
+We investigate hypergraphic LP relaxations for the Steiner tree problem, primarily the par-
+tition LP relaxation introduced by K¨ onemann et al. [Math. P rogramming, 2009]. Speciﬁcally,
+we are interested in proving upper bounds on the integrality gap of this LP, and studying its
+relation to other linear relaxations. First, we show uncrossing techniques apply to the LP. This
+implies structural properties, e.g. for any basic feasible solution, the number of positive vari-
+ables is at most the number of terminals. Second, we show the e quivalence of the partition LP
+relaxation with other known hypergraphic relaxations. We a lso show that these hypergraphic
+relaxations are equivalent to the well studied bidirected c ut relaxation, if the instance is qua-
+sibipartite. Third, we give integrality gap upper bounds: a n online algorithm gives an upper
+bound of
+√
+3 .= 1 . 729; and in uniformly quasibipartite instances, a greedy al gorithm gives an
+improved upper bound of 73 / 60 .= 1. 216.
+1 Introduction
+In the Steiner tree problem, we are given an undirected graph G = ( V, E ), non-negative costs ce
+for all edges e ∈ E, and a set of terminal vertices R ⊆ V . The goal is to ﬁnd a minimum-cost tree
+T spanning R, and possibly some Steiner vertices from V \R. We can assume that the graph is
+complete and that the costs induce a metric. The problem take s a central place in the theory of
+combinatorial optimization and has numerous practical app lications. Since the Steiner tree problem
+is NP-hard
+1 we are interested in approximation algorithms for it. The be st approximation algorithm
+for the Steiner tree problem is a recent result of Byrka, Gran doni, Rothvoß and Sanit` a [ 3], which
+for any ﬁxed ǫ > 0, achieves a performance ratio of ln(4) + ǫ .= 1 . 39 in polynomial time. Their
+result is based on one of the linear programming (LP) relaxat ions we will later discuss.
+Numerous LP formulations are known for the Steiner tree prob lem (e.g., see [ 1, 9, 10, 12, 13, 20,
+26, 27, 37, 38]), and they have led to impressive running time improvement s for integer programming
+based methods. The integrality gap of a relaxation — a common measure of its strength — is the
+maximum ratio of the cost of integral and fractional optima, over all instances. Byrka et al. [ 3]
+prove an integrality gap bound of 1.55 (see also a short proof in [ 6]), breaking a barrier of 2 − o(1)
+which had previously stood for long time 2. A small modiﬁcation to the proof gives an integrality
+gap of 1.28 on so-called quasibipartite instances (where Steiner vertices form an independent set) .
+∗Supported by NSERC grant no. 288340 and by an Early Research A ward. Email: (deepc, jochen, dagpritc
+@uwaterloo.ca)
+1Chleb ´ ık and Chleb ´ ıkov´ a show that no (96/ 95 − ǫ)-approximation algorithm can exist for any positive ǫ unless
+P=NP [7].
+2Achieving an integrality gap of 2 is relatively easy for most relaxations by showing that the minimum spanning
+tree restricted on the terminals is within a factor 2 of the LP .
+1
+
+===== PAGE 2 =====
+
+A Steiner tree relaxation of particular interest is the bidirected cut relaxation [13, 38] (precise
+deﬁnitions will follow in Section 1.2). This relaxation has a ﬂow formulation using O(|E||R|)
+variables and constraints, which is much more compact than t he other relaxations we study. It is
+widely believed to have an integrality gap signiﬁcantly sma ller than 2 (e.g., see [ 4, 30, 36]) but this
+remains an open question. The largest lower bound on the inte grality gap known is 8 / 7 (by Martin
+Skutella, reported in [ 25]), and Chakrabarty et al. [ 4] prove an upper bound of 4 / 3 in the special
+case of quasi-bipartite instances.
+Another class of formulations are the so called hypergraphic LP relaxations for the Steiner tree
+problem. These relaxations are inspired by the observation that the minimum Steiner tree problem
+can be encoded as a minimum cost hyper-spanning tree (see Sec tion 1.2.2) of a certain hypergraph
+on the terminals. They are known to be stronger than the bidir ected cut relaxation [ 28].
+1.1 Our Results and Techniques
+There are three classes of results in this paper: structural results, equivalence results, and integrality
+gap upper bounds.
+Structural results , Section
+2: We show that the uncrossing technique applies to the partition
+formulation [25] of the hypergraphic LP, and we use it to prove structural pro perties. For example,
+we show that any basic feasible solution to the partition LP h as at most ( |R| −1) positive variables
+(even though it can have an exponentially large number of var iables and constraints).
+Equivalence results, Section 3: In addition to the partition LP, two other hypergraphic LPs have
+been studied before: one based on subtour elimination due to Warme [37], and a directed hypergraph
+relaxation of Polzin and Vahdati Daneshmand [ 28]; these two are known to be equivalent [ 28]. We
+give two proofs showing each one is equivalent to the partition LP (that is, they have the same
+objective value for any Steiner tree instance). We give this formally redundant pair of proofs for
+completeness and to highlight their techniques, one using p artition uncrossing techniques, the other
+using hypergraph orientation results of Frank et al. [ 16].
+We also show that, on quasibipartite instances , the hypergraphic and the bidirected cut LP
+relaxations are equivalent. Note, by the 1.28 integrality g ap bound [ 3, 6] mentioned earlier, this
+improves the integrality gap of bidirected cut on quasibipa rtite instances from 4 / 3 to 1.28. We ﬁnd
+this equivalence surprising for the following reasons. Fir stly, some instances are known where the
+hypergraph relaxations is strictly stronger than the bidirected cut relaxation [ 28]. Secondly, the
+bidirected cut relaxations seems to resist uncrossing tech niques; e.g. even in quasi-bipartite graphs
+extreme points for bidirected cut can have as many as Ω( |V |2) positive variables [ 29, Sec. 4.9].
+Thirdly, the known approaches to exploiting the bidirected cut relaxation (mostly primal-dual and
+local search algorithms [ 30, 4]) are very diﬀerent from the combinatorial hypergraphic al gorithms
+for the Steiner tree problem (almost all of them employ greed y strategies). In short, there is no
+qualitative similarity to suggest why the two relaxations s hould be equivalent! We believe a better
+understanding of the bidirected cut relaxation is importan t because it is central in theory and
+practical for implementation.
+Improved integrality gap upper bounds , Section
+4: For uniformly quasibipartite instances
+(quasibipartite instances where for each Steiner vertex, a ll incident edges have the same cost), we
+show that the integrality gap of the hypergraphic LP relaxat ions is upper bounded by 73 / 60 .= 1. 216.
+Our proof uses the approximation algorithm of Gr¨ opl et al. [ 22] which achieves the same ratio with
+respect to the (integral) optimum. We show, via a simple dual ﬁtting argument, that this ratio is
+also valid with respect to the LP value. To the best of our know ledge this is the only nontrivial
+class of instances where the best currently known approxima tion ratio and integrality gap upper
+2
+
+===== PAGE 3 =====
+
+bound are the same.
+For general graphs, we give simple upper bounds of 2
+√
+2 − 1 .= 1 . 83 and
+√
+3 .= 1 . 729 on the
+integrality gap of the hypergraph relaxation. Compared to t he stronger 1.55 bound of Byrka et
+al. [ 3], we use a diﬀerent collection of techniques, and we show the result holds even if the full
+components are revealed in an online manner. Call a graph gainless if the minimum spanning tree
+of the terminals is the optimal Steiner tree. To obtain these integrality gap upper bounds, we use
+the following key property of the hypergraphic relaxation w hich was implicit in [ 25]: on gainless
+instances (instances where the optimum terminal spanning t ree is the optimal Steiner tree), the LP
+value equals the minimum spanning tree and the integrality g ap is 1. Such a theorem was known
+for quasibipartite instances and the bidirected cut relaxa tion (implicitly in [ 30], explicitly in [ 4]);
+we extend techniques of [ 4] to obtain improved integrality gaps on all instances.
+1.2 Bidirected Cut and Hypergraphic Relaxations
+1.2.1 The Bidirected Cut Relaxation
+The ﬁrst bidirected LP was given by Edmonds [
+13] as an exact formulation for the spanning tree
+problem. Wong [ 38] later extended this to obtain the bidirected cut relaxatio n for the Steiner tree
+problem, and gave a dual ascent heuristic based on the relaxa tion. For this relaxation, introduce
+two arcs ( u, v ) and ( v, u ) for each edge uv ∈ E, and let both of their costs be cuv. Fix an arbitrary
+terminal r ∈ R as the root. Call a subset U ⊆ V valid if it contains a terminal but not the root,
+and let valid( V ) be the family of all valid sets. Clearly, the in-tree rooted at r (the directed tree
+with all vertices but the root having out-degree exactly 1) o f a Steiner tree T must have at least one
+arc with tail in U and head outside U , for all valid U . This leads to the bidirected cut relaxation
+(B) (shown in Figure 1 with dual) which has a variable for each arc a ∈ A, and a constraint for
+every valid set U . Here and later, δ out(U ) denotes the set of arcs in A whose tail is in U and whose
+head lies in V \U . When there are no Steiner vertices, Edmonds’ work [ 13] implies this relaxation
+is exact.
+min
+∑
+a∈A
+caxa : x ∈ RA
+≥ 0 (B)
+∑
+a∈δ out(U )
+xa ≥ 1, ∀U ∈ valid(V ) (1)
+max
+∑
+U
+zU : z ∈ Rvalid(V )
+≥ 0 (BD)
+∑
+U :a∈δ out(U )
+zU ≤ ca, ∀a ∈ A (2)
+Figure 1: The bidirected cut relaxation ( B) and its dual ( BD).
+Goemans & Myung [ 20] made signiﬁcant progress in understanding the LP, by showi ng that
+the bidirected cut LP has the same value independent of which terminal is chosen as the root, and
+by showing that a whole “catalogue” of very diﬀerent-lookin g LPs also has the same value; later
+Goemans [ 19] showed that if the graph is series-parallel, the relaxatio n is exact. Rajagopalan and
+Vazirani [30] were the ﬁrst to show a non-trivial integrality gap upper bo und of 3/ 2 on quasibipartite
+graphs; this was subsequently improved to 4 / 3 by Chakrabarty et al. [ 4], who gave another alternate
+formulation for ( B).
+1.2.2 Hypergraphic Relaxations
+Given a Steiner tree T , a full component of T is a maximal subtree of T all of whose leaves are
+terminals and all of whose internal nodes are Steiner nodes. The edge set of any Steiner tree can
+3
+
+===== PAGE 4 =====
+
+be partitioned in a unique way into full components by splitting at internal terminals ; see Figure 2
+for an example.
+Figure 2: Black nodes are terminals and white nodes are Steiner nodes. Left: a Steiner tree for this instance.
+Middle: the Steiner tree’s edges are partitioned into full c omponents; there are four full components. Right:
+the hyperedges corresponding to these full components.
+Let K be the set of all nonempty subsets of terminals ( hyperedges). We associate with each
+K ∈ K a ﬁxed full component spanning the terminals in K, and let CK be its cost 3. The problem
+of ﬁnding a minimum-cost Steiner tree spanning R now reduces to that of ﬁnding a minimum-cost
+hyper-spanning tree in the hypergraph ( R, K).
+Spanning trees in (normal) graphs are well understood and th ere are many diﬀerent exact LP
+relaxations for this problem. These exact LP relaxations fo r spanning trees in graphs inspire the
+hypergraphic relaxations for the Steiner tree problem. Such relaxations have a variab le xK for every4
+K ∈ K, and the diﬀerent relaxations are based on the constraints u sed to capture a hyper-spanning
+tree, just as constraints on edges are used to capture a spann ing tree in a graph.
+The oldest hypergraphic LP relaxation is the subtour LP intr oduced by Warme [ 37] which is
+inspired by Edmonds’ subtour elimination LP relaxation [ 14] for the spanning tree polytope. This
+LP relaxation uses the fact that there are no hypercycles in a hyper-spanning tree, and that it is
+spanning. More formally, let ρ (X) := max(0 , |X|−1) be the rank of a set X of vertices. Then a sub-
+hypergraph ( R, K′) is a hyper-spanning tree iﬀ ∑
+K∈K′ρ (K) = ρ (R) and ∑
+K∈K′ρ (K ∩ S) ≤ ρ (S)
+for every subset S of R. The corresponding LP relaxation, denoted below as ( S), is called the
+subtour elimination LP relaxation.
+min
+{ ∑
+K∈K
+CKxK : x ∈ RK
+≥ 0,
+∑
+K∈K
+xKρ (K) = ρ (R), (S)
+∑
+K∈K
+xK ρ (K ∩ S) ≤ ρ (S), ∀S ⊂ R
+}
+Warme showed that if the maximum hyperedge size r is bounded by a constant, the LP can be
+solved in polynomial time.
+The next hypergraphic LP introduced for Steiner tree was a di rected hypergraph formulation
+(
+D), introduced by Polzin and Vahdati Daneshmand [ 28], and inspired by the bidirected cut relax-
+ation. It was independently rediscovered in the work of Byrk a et al. [ 3], where they use it to give
+a 1.39-approximation algorithm based on iterated randomiz ed rounding. Given a full component
+K and a terminal i ∈ K, let K i denote the arborescence obtained by directing all the edges of
+3We choose the minimum cost full component if there are many. I f there is no full component spanning K, we let
+CK be inﬁnity. Such a minimum cost component can be found in poly nomial time, if |K| is a constant.
+4Observe that there could be exponentially many hyperedges. This computational issue is circumvented by
+considering hyperedges of size at most r, for some constant r. By a result of Borchers and Du [ 2], this leads to only
+a (1 + Θ(1 / log r)) factor increase in the optimal Steiner tree cost.
+4
+
+===== PAGE 5 =====
+
+K towards i. Think of this as directing the hyperedge K towards i to get the directed hyperedge
+K i. Vertex i is called the head of K i while the terminals in K \ i are the tails of K. The cost
+of each directed hyperedge K i is the cost of the corresponding undirected hyperedge K. In the
+directed hypergraph formulation, there is a variable xK i for every directed hyperedge K i. As in
+the bidirected cut relaxation, there is a vertex r ∈ R which is a root, and as described above, a
+subset U ⊆ R of terminals is valid if it does not contain the root but conta ins at least one vertex
+in R. We let ∆ out(U ) be the set of directed full components coming out of U , that is all K i such
+that U ∩ K ̸= ∅ but i / ∈ U . Let − →K be the set of all directed hyperedges. We show the directed
+hypergraph relaxation and its dual in Figure 3.
+min
+{ ∑
+K∈K,i ∈K
+CK xK i : x ∈ R
+− →K
+≥ 0 (D)
+∑
+K i∈∆out(U )
+xK i ≥ 1, ∀ valid U ⊆ R
+}
+(3)
+max
+{ ∑
+U
+zU : z ∈ Rvalid(R)
+≥ 0 (DD)
+∑
+U :K∩U ̸=∅,i / ∈U
+zU ≤ CK , ∀K ∈ K, ∀i ∈ K
+}
+(4)
+Figure 3: The directed hypergraph relaxation ( D) and its dual ( DD).
+Polzin & Vahdati Daneshmand [ 28] showed that OPT ( D) = OPT ( S). Moreover they observed
+that this directed hypergraphic relaxation strengthens th e bidirected cut relaxation.
+Lemma 1.1 ([28]). For any instance, OPT (D) ≥ OPT (B).
+Proof sketch. It suﬃces to show that any solution x of ( D) can be converted to a feasible solution
+x′of ( B) of the same cost. For each arc a, let x′
+a be the sum of xK i over all directed full components
+K i that (when viewed as an arborescence) contain a. Now for any valid subset U of V , it is not
+hard to see that every directed full component leaving R ∩ U has at least one arc leaving U , hence∑
+a∈δ out(U ) x′a ≥ ∑
+K i∈∆out(R∩U ) xK i ≥ 1 and x′is feasible as needed.
+See [ 28] for an example where the strict inequality OPT ( D) > OPT (B) holds.
+K¨ onemann et al. [25], inspired by the work of Chopra [ 8], described a partition-based relax-
+ation which captures that given any partition of the termina ls, any hyper-spanning tree must
+have suﬃciently many “cross hyperedges”. More formally, a p artition, π , is a collection of pair-
+wise disjoint nonempty terminal sets ( π 1, . . . , π q) whose union equals R. The number of parts q
+of π is referred to as the partition’s rank and denoted as r(π ). Let Π R be the set of all parti-
+tions of R. Given a partition π = {π 1, . . . , π q}, deﬁne the rank contribution rcπ
+K of hyperedge
+K ∈ K for π as the rank reduction of π obtained by merging the parts of π that are touched
+by K; i.e., rcπ
+K := |{i : K ∩ π i ̸= ∅}| −1. Then a hyper-spanning tree ( R, K′) must satisfy∑
+K∈K′rcπ
+K ≥ r(π ) − 1. The partition based LP of [
+25] and its dual are given in Figure 4.
+min
+{ ∑
+K∈K
+CKxK : x ∈ RK
+≥ 0 (P)
+∑
+K∈K
+xKrcπ
+K ≥ r(π ) − 1, ∀π ∈ ΠR
+}
+(5)
+max
+{ ∑
+π
+(r(π ) − 1) · yπ : y ∈ RΠR
+≥ 0 (PD)
+∑
+π ∈ΠR
+yπ rcπ
+K ≤ CK, ∀K ∈ K
+}
+(6)
+Figure 4: The unbounded partition relaxation (
+P) and its dual ( PD).
+The feasible region of ( P) is unbounded, since if x is a feasible solution for ( P) then so is any
+5
+
+===== PAGE 6 =====
+
+x′≥ x. We obtain a bounded partition LP relaxation, denoted by ( P ′) and shown below, by adding
+a valid equality constraint to the LP.
+min
+{ ∑
+K∈K
+CKxK : x ∈ (P),
+∑
+K∈K
+xK(|K| −1) = |R| −1
+}
+(P ′)
+1.2.3 Discussion of Computational Issues
+The bidirected cut relaxation is very attractive from a pers pective of computational implementation.
+Although the formulation given in Section
+1.2.1 has an exponential number of constraints, an
+equivalent compact ﬂow formulation with O(|E||R|) variables and constraints is well-known.
+What is known regarding solving the hypergraphic LPs? They a re good enough to get theo-
+retical results but less attractive in practice, as we now ex plain. Using a separation oracle, Warme
+showed [37] that for any chosen family K of full components, the subtour LP can be optimized in
+time poly( |V |, |K|). For the common r-restricted setting of K to be all possible full components
+of size at most r for constant r, we have K ≤
+( |R|
+r
+)
+. This is polynomial for any ﬁxed r, and the
+relative error caused by this choice of r is at most the r-Steiner ratio ρ r = 1 + Θ(1/ log r) [ 2]. But
+this is not so practical: to get relative error 1 + ǫ, we apply the ellipsoid algorithm to an LP with
+|R|exp(Θ(1/ǫ )) variables!
+In the unrestricted setting where K contains all possible full components without regard to siz e,
+it is an open problem to optimize any of the hypergraphic LPs e xactly in polynomial time. We make
+some progress here: in quasibipartite instances, the proof method of our hypergraphic-bidirected
+equivalence theorem (Section 3.4) implies that one can exactly compute the LP optimal value, a nd
+a dual optimal solution. Regarding this open problem, we not e that the r-restricted LP optimum
+is at most ρ r times the unrestricted optimum, and wonder whether there mi ght be some advantage
+gained by using the fact that the hypergraphic LPs have spars e optima.
+We reiterate our feeling that it is important to obtain pract ical algorithms and understand the
+bidirected cut relaxation as well as possible, e.g. a direct proof that it has an integrality gap of at
+most 1.28 on quasi-bipartite instances could give new insig hts.
+1.2.4 Other Related W ork
+In the special case of r-restricted instances for r = 3, the partition hypergraphic LP is essentially
+a special case of an LP introduced by Vande Vate [
+35] for matroid matching, which is totally dual
+half-integral [ 18]. Additional facts about the hypergraphic relaxations app ear in the thesis of the
+third author [ 29], e.g. a combinatorial “gainless tree formulation” for the LPs similar in ﬂavour to
+the “1-tree bound” for the Held-Karp TSP relaxation.
+2 Uncrossing Partitions
+In this section we are interested in uncrossing a minimal set of tight partitions that uniquely deﬁne
+a basic feasible solution to (
+P). We start with a few preliminaries from combinatorial latt ice
+theory [ 34].
+2.1 Preliminaries
+Deﬁnition 2.1. We say that a partition π ′reﬁnes another partition π if each part of π ′is contained
+in some part of π . We also say π coarsens π ′. Two partitions cross if neither reﬁnes the other.
+6
+
+===== PAGE 7 =====
+
+A family of partitions forms a chain if no pair of them cross. Equivalently, a chain is any family
+π 1, π 2, . . . , π t such that π i reﬁnes π i− 1 for each 1 < i ≤ t.
+The family Π R of all partitions of R forms a lattice with a meet operator ∧ : Π 2
+R → ΠR and a
+join operator ∨ : Π 2
+R → ΠR. The meet π ∧ π ′is the coarsest partition that reﬁnes both π and π ′,
+and the join π ∨ π ′is the most reﬁned partition that coarsens both π and π ′. See Figure
+5 for an
+illustration.
+Deﬁnition 2.2 (Meet of partitions) . Let the parts of π be π 1, . . . , π t and let the parts of π ′ be
+π ′
+1, . . . , π ′
+u. Then the parts of the meet π ∧ π ′are the nonempty intersections of parts of π with parts
+of π ′,
+π ∧ π ′= {π i ∩ π ′
+j |1 ≤ i ≤ t, 1 ≤ j ≤ u and π i ∩ π ′
+j ̸= ∅}.
+Given a graph G and a partition π of V (G), we say that G induces π if the parts of π are the vertex
+sets of the connected components of G.
+Deﬁnition 2.3 (Join of partitions) . Let (R, E ) be a graph that induces π , and let (R, E ′) be a
+graph that induces π ′. Then the graph (R, E ∪ E′) induces π ∨ π ′.
+(a) (b) (c)
+Figure 5: Illustrations of some partitions. The black dots are the ter minal set R. (a): two partitions;
+neither reﬁnes the other. (b): the meet of the partitions fro m (a). (c): the join of the partitions from (a).
+Given a feasible solution x to ( P), a partition π is tight if ∑
+K∈K xK rcπ
+K = r(π ) − 1. Let
+tight(x) be the set of all tight partitions. We are interested in uncrossing this set of partitions.
+More precisely, we wish to ﬁnd a cross-free set of partitions (chain) which uniquely deﬁnes x. One
+way would be to prove the following.
+Property 2.4. If two crossing partitions π and π ′are in tight(x), then so are π ∧ π ′and π ∨ π ′.
+This type of property is already well-used [
+11, 15, 23, 33] for sets (with meets and joins replaced
+by unions and intersections respectively), and the standar d approach is the following. The typical
+proof considers the constraints in ( P) corresponding to π and π ′ and uses the “supermodularity”
+of the RHS and the “submodularity” of the coeﬃcients in the LH S. In particular, if the following
+is true,
+∀π, π ′: r(π ∨ π ′) + r(π ∧ π ′) ≥ r(π ) + r(π ′) (7)
+∀K, π, π ′: rcπ
+K + rcπ ′
+K ≥ rcπ ∨π ′
+K + rcπ ∧π ′
+K (8)
+then Property
+2.4 can be proved easily by writing a string of inequalities. 5
+5In this hypothetical scenario we get r(π ) + r(π ′) − 2 = P
+K xK(rcπ
+K + rcπ′
+K ) ≥ P
+K xK(rcπ∧ π′
+K + rcπ∨ π′
+K ) ≥
+r(π ∧ π ′) + r(π ∨ π ′) − 2 ≥ r(π ) + r(π ′) − 2; thus the inequalities hold with equality, and the middle o ne shows π ∧ π ′
+and π ∨ π ′ are tight.
+7
+
+===== PAGE 8 =====
+
+Inequality (7) is indeed true (see, for example, [ 34]), but unfortunately inequality ( 8) is not true
+in general, as the following example shows.
+Example 2.5. Let R = {1, 2, 3, 4}, π = {{1, 2}, {3, 4}}and π ′= {{1, 3}, {2, 4}}. Let K denote the
+full component {1, 2, 3, 4}. Then rcπ
+K + rcπ ′
+K = 1 + 1 < 0 + 3 = rcπ ∨π ′
+K + rcπ ∧π ′
+K .
+Nevertheless, Property
+2.4 is true; its correct proof is given in Section 2.2. Given tight partitions
+π and π ′, we describe a procedure to obtain two other tight partition s. Applying this procedure
+iteratively leads us to deduce that the joins and meets are ti ght. We let π denote {R}, the unique
+partition with (minimal) rank 1; later we use π to denote {{r} |r ∈ R}, the unique partition with
+(maximal) rank |R|.
+Theorem 1. Let x∗ be a basic feasible solution of (P), and let C be an inclusion-wise maximal
+chain in tight(x∗)\π . Then x∗ is uniquely deﬁned by
+∑
+K∈K
+rcπ
+Kx∗
+K = r(π ) − 1 ∀π ∈ C . (9)
+Any chain of distinct partitions of R that does not contain π
+has size at most |R| −1, and
+this is an upper bound on the rank of the system in ( 9). Elementary linear programming theory
+immediately yields the following corollary.
+Corollary 2.6. Any basic solution x∗ of (
+P) has at most |R| −1 non-zero coordinates.
+2.2 Partition Uncrossing
+In this section we prove Property
+2.4. In the original version of this work [ 5] we used an interesting
+extension of typical uncrossing methods: rather than combi ning/uncrossing just two inequalities
+at a time, we used several. Here, we give a shorter view of the s ame results, expressed using a type
+of uncrossing from Schrijver [ 32, §48.2,49.6]. We need the following lemma that relates the ran k of
+sets and the rank contribution of partitions. Recall ρ (X) := max(0 , |X| −1).
+Lemma 2.7. For a partition π = {π 1, . . . , π t} of R, where t = r(π ), and for any K ⊆ R, we have
+rcπ
+K = ρ (K) −
+t∑
+i=1
+ρ (K ∩ π i).
+Proof. By deﬁnition, K ∩ π i ̸= ∅ for exactly 1 + rcπ
+K values of i. Also, ρ (K ∩ π i) = 0 for all other
+i. Hence
+t∑
+i=1
+ρ (K ∩ π i) =
+∑
+i:K∩π i̸=∅
+(|K ∩ π i| −1) =
+
+ ∑
+i:K∩π i̸=∅
+|K ∩ π i|
+
+ − (rcπ
+K + 1). (10)
+Observe that ∑
+i:K∩π i̸=∅ |K ∩ π i|= |K|= ρ (K) + 1; using this fact together with Equation (
+10) we
+obtain
+t∑
+i=1
+ρ (K ∩ π i) =
+
+ ∑
+i:K∩π i̸=∅
+|K ∩ π i|
+
+ − (rcπ
+K + 1) = ρ (K) − 1 + (rcπ
+K + 1).
+Rearranging, the proof of Lemma
+2.7 is complete.
+8
+
+===== PAGE 9 =====
+
+Now we give a procedure which maps two tight partitions to two other tight partitions. Say
+two sets A and B cross if A ∩ B, A c ∩ Bc, A ∩ Bc, A c ∩ B are all nonempty. A family of sets (with
+possible repetition of the same set) is k-regular if every element lies in exactly k sets. We need
+that a regular family with no two crossing sets is the disjoin t union of k partitions (e.g. see [ 16]).
+In the following algorithm, we view each partition as a set fa mily on R, take their disjoint union
+to get a 2-regular family on R, convert it to a family without crossing sets, and then decom pose it
+back into partitions.
+Procedure Uncross-and-Decompose(π, π ′)
+1: Create a 2-regular family F := π ⊎ π ′.
+2: As long as F has two crossing sets S and T , replace them with S ∩ T and S ∪ T .
+3: Decompose the 2-regular F into two partitions φ, γ with φ reﬁning γ . (I.e., for any x, of the
+two sets of F containing x, φ gets the smaller and γ the larger.)
+4: Output φ and γ .
+Note the output depends on the choice of sets to uncross. Here is an example of one execution;
+use abc · · · as an abbreviation for {a, b, c, . . . }. Consider input partitions {12, 34} and {13, 24}.
+Initially F = {12, 34, 13, 24}. Uncrossing of 12 and 13 yields {123, 1, 34, 24}. Now, if we uncross
+123 and 34, we get {1234, 1, 3, 24}, which implies φ = {1, 24, 3} and γ = {1234}. On the other
+hand, we could’ve uncrossed 34 and 24 to get {123, 1, 234, 4}, and then uncrossing 123 and 234
+would lead to {1234, 1, 23, 4} implying φ = {1, 23, 4} and γ = {1234}. Regardless of which sets are
+chosen, we show now that the following statements hold.
+(i) The algorithm terminates. To see this observe that ∑
+S∈F |S|2 increases each iteration.
+(ii) Both φ and γ coarsen π ∧ π ′. To see this, suppose u, v are in the same part of π and also in
+the same part of π ′; then all sets of F containing u also contain v throughout the algorithm.
+(iii) We have γ equals π ∨ π ′. First, consider u and v which are in the same part of π , and observe
+that F always has some set containing both u and v; the same holds for π ′. Second, note
+that all sets in F always are subsets of some part of π ∨ π ′.
+(iv) We have r(π ) + r(π ′) = r(φ ) + r(γ ). To see this, note that the ﬁrst is the initial cardinality
+of F and the last is the ﬁnal cardinality of F, and that this cardinality is invariant.
+(v) For any K, rcπ
+K + +rcπ ′
+K ≥ rcφ
+K + rcγ
+K. To see this, it suﬃces from Lemma
+2.7 to show∑
+P ∈φ ⊎γ ρ (K ∩ P ) ≥ ∑
+P ∈π ⊎π ′ρ (K ∩ P ), which follows from the supermodularity of the ρ ()
+function.
+Proposition 2.8. Let x be feasible for (P) and let π, π ′ be tight for x. Then the outputs φ, γ of
+Uncross-and-Decompose(π, π ′) are tight for x.
+Proof.
+r(π ) + r(π ′) − 2 =
+∑
+K
+xK(rcπ
+K + rcπ ′
+K ) ≥
+∑
+K
+xK (rcφ
+K + rcγ
+K ) ≥ r(φ ) + r(γ ) − 2 (11)
+where the inequality follows from (v). By (iv) we have equali ty throughout, so φ and γ are tight.
+Now we prove that tight partitions are closed under meet and j oin.
+9
+
+===== PAGE 10 =====
+
+Proof of Property 2.4. Proposition 2.8 and (iii) immediately give that tight partitions are closed
+under the join ∨. Suppose for the sake of contradiction there exist tight par titions π and π ′ such
+that their meet π ∧π ′is not tight; pick such a pair with r(π )+ r(π ′) maximal. Let φ be the partition
+obtained via the above procedure. Note that r(φ ) > max{r(π ), r (π ′)} since π and π ′cross. By our
+choice of π, π ′of maximal sum of ranks, we then have π ∧φ is tight (since φ is tight), and ( π ∧φ )∧π ′
+is tight. However, this is π ∧ π ′since φ coarsens π ∧ π ′(due to (ii)).
+2.3 Sparsity of Basic Feasible Solutions: Proof of Theorem 1
+Proof. Let supp(x∗) be the full components K with x∗
+K > 0. Consider the constraint submatrix
+with rows corresponding to the tight partitions and columns corresponding to the full components
+in supp(x∗). Since x∗ is a basic feasible solution, any full-rank subset of rows un iquely deﬁnes x∗.
+We now show that any maximal chain C in tight(x∗) corresponds to such a subset.
+Let row(π ) ∈ Rsupp(x∗) denote the row corresponding to partition π of this matrix, i.e., row(π )K =
+rcπ
+K , and given a collection R of partitions (rows), let span(R) denote the linear span of the rows in
+R. We now prove that for any tight partition π / ∈ C , we have row(π ) ∈ span(C); this will complete
+the proof of the theorem.
+For sake of contradiction, suppose row(π ) ̸∈ span(C) and choose such a tight π with r(π )
+maximal. Then, since C is inclusion-maximal, π must cross some partition σ in C; let σ be a partition
+in C which crosses π , with r(σ ) minimal. Run Uncross-and-Decompose(π, σ ), obtaining outputs
+φ, γ where γ = π ∨ σ .
+Claim 2.9. We have row(π ) + row(σ ) = row(φ ) + row(γ ).
+Proof. This follows by a more detailed look at the proof of Propositi on
+2.8. Due to (v), the only
+problem would be that rcπ
+K + rcσ
+K > rcφ
+K + rcγ
+K for some K with xK > 0. But this contradicts
+the fact that (
+11) holds with equality.
+Since row(π ) /∈ span(C) and row(σ ) ∈ span(C), Claim 2.9 puts us in one of the following two cases.
+Case 1: row(φ ) /∈ span(C). This contradicts our choice of π since we could have picked the tight
+partition φ instead and r(φ ) > r (π ).
+Case 2: row(γ ) ̸∈ span(C). By the maximality of C, there is a partition σ ′ ∈ C which crosses
+γ = π ∨ σ . Note that σ reﬁnes σ ′(otherwise σ coarsens σ ′and thus π ∨ σ coarsens σ ′, but the
+latter pair cross). Moreover since σ ̸= σ ′, r(σ ′) < r (σ ). Note that π and σ ′cross (on the one
+hand, if π coarsens σ ′then π coarsens σ ; on the other hand, if π reﬁnes σ ′then π ∨ σ reﬁnes
+σ ′). Thus σ ′contradicts our choice of σ .
+This completes the proof of Theorem 1.
+3 Equivalence of Formulations
+In this section we describe our equivalence results. A summa ry of the known and new results is
+given in Figure
+6.
+10
+
+===== PAGE 11 =====
+
+OPT (S)
+OPT(P)
+OPT(P ′) OPT(D) OPT(B)
+= [Sec. 3.1]
+= [Sec. 3.2] = [ 28]
+= [Sec. 3.3] ≥ [Lemma 1.1],[28]
+≤ in quasi-bipartite [Sec. 3.4]
+Figure 6: Summary of relations among various LP relaxations
+3.1 Bounded and Unbounded Partition Relaxations
+Theorem 2. The LPs (
+P ′) and (P) have the same optimal value.
+We actually prove a stronger statement.
+Deﬁnition 3.1. The collection K of hyperedges is down-closed if whenever S ∈ K and ∅ ̸= T ⊂ S,
+then T ∈ K . For down-closed K, the cost function C : K → R+ is non-decreasing if CS ≤ CT
+whenever S ⊂ T .
+Theorem 3. If the set of hyperedges is down-closed and the cost function is non-decreasing, then
+(
+P ′) and (P) have the same optimal value.
+Theorem 3 implies Theorem 2 since the hypergraph and cost function derived from instanc es
+of the Steiner tree problem are down-closed and non-decreas ing (e.g. C{k} = 0 for every k ∈ R;
+we remark that the variables x{k} act just as placeholders). Our proof of Theorem 2 relies on the
+following operation which we call shrinking.
+Deﬁnition 3.2. Given an assignment x : K → R+ to the full components, suppose xK > 0 for
+some K. The operation Shrink(x, K, K ′, δ ), where K ′ ⊆ K, |K ′|= |K| −1 and 0 < δ ≤ xK,
+changes x to x′ by decreasing x′
+K := xK − δ and increasing x′
+K ′ := xK ′ + δ .
+Note that shrinking is deﬁned only for down-closed hypergra phs. Also note that on perform-
+ing a shrinking operation, the cost of the solution cannot in crease, if the cost function is non-
+decreasing. The theorem is proved by taking the optimum solu tion to (
+P) which minimizes the
+sum ∑
+K∈K xK|K|, and then showing that this must satisfy the equality in ( P ′), or a shrinking
+operation can be performed. Now we give the details.
+Proof of Theorem
+3. It suﬃces to exhibit an optimum solution of ( P) which satisﬁes the equality
+in ( P ′). Let x be an optimal solution to ( P) which minimizes the sum ∑
+K∈K xK|K|.
+Claim 3.3. For every K with xK > 0 and for every r ∈ K, there exists a tight partition (w.r.t. x)
+π such that the part of π containing r contains no other vertex of K.
+Proof. Let K ′ = K \ {r}. If the above is not true, then this implies that for every tig ht par-
+tition π , we have rcπ
+K = rcπ
+K ′. We now claim that there is a δ > 0 such that we can perform
+Shrink(x, K, K ′, δ ) while retaining feasibility in (
+P). This is a contradiction since the shrink oper-
+ation strictly reduces ∑
+K |K|xK and doesn’t increase cost. Speciﬁcally, take
+11
+
+===== PAGE 12 =====
+
+δ := min{xK , minπ :rcπ
+K′̸=rcπ
+K
+∑
+K rcπ
+K xK − r(π ) + 1}
+which is positive since for tight partitions we have rcπ
+K = rcπ
+K ′.
+Let tight(x) be the set of tight partitions, and π ∗ := ⋀{π |π ∈ tight(x)} the meet of all
+tight partitions. By Property 2.4, π ∗ is tight. By Claim 3.3, for any K with xK > 0, we have
+rcπ ∗
+K = |K| −1. Thus, r(π ∗) − 1 = ∑
+K∈K xK rcπ ∗
+K = ∑
+K∈K xK(|K| −1) ≥ r(π ) − 1. But since π is
+the unique maximal-rank partition, this implies π ∗ = π . Thus π is tight. This implies x ∈ (P ′).
+3.2 Partition and Subtour Elimination Relaxations
+Theorem 4. The feasible regions of (
+P ′) and (S) are the same.
+Proof. Let x be any feasible solution to the LP ( S). Note that the equality constraint of ( P ′) is
+the same as that of ( S). We now show that x satisﬁes ( 5). Fix a partition π = {π 1, . . . , π t}, so
+t = r(π ). For each 1 ≤ i ≤ t, subtract the inequality constraint in ( S) with S = π i, from the
+equality constraint in ( S) to obtain
+∑
+K∈K
+xK
+(
+ρ (K) −
+t∑
+i=1
+ρ (K ∩ π i)
+)
+≥ ρ (R) −
+t∑
+i=1
+ρ (π i). (12)
+From Lemma 2.7, ρ (K) − ∑t
+i=1 ρ (K ∩ π i) = rcπ
+K. We also have ρ (R) − ∑t
+i=1 ρ (π i) = |R| −1 −
+(|R| −r(π )) = r(π ) − 1. Thus x is a feasible solution to the LP (
+P ′).
+Now, let x be a feasible solution to ( P ′) and it suﬃces to show that it satisﬁes the inequality
+constraints of ( S). Fix a set S ⊂ R. Note when S = ∅ that inequality constraint is vacuously true
+so we may assume S ̸= ∅. Let R\S = {r1, . . . , r u}. Consider the partition π = {{r1}, . . . , {ru}, S }.
+Subtract ( 5) for this π from the equality constraint in ( P ′), to obtain
+∑
+K∈K
+xK(ρ (K) − rcπ
+K ) ≤ ρ (R) − r(π ) + 1. (13)
+Using Lemma
+2.7 and the fact that ρ (K ∩ {rj}) = 0 (the set is either empty or a singleton), we
+get ρ (K) − rcπ
+K = ρ (K ∩ S). Finally, as ρ (R) − r(π ) + 1 = |R| −1 − (|R\S|+ 1) + 1 = ρ (S), the
+inequality (
+13) is the same as the constraint needed. Thus x is a feasible solution to ( S), proving
+the theorem.
+3.3 Directed Hypergraph LP Relaxation
+Theorem 5. For any Steiner tree instance, OPT (
+P) = OPT ( D).
+Proof. First, we show OPT ( P) ≤ OPT (D). Consider a feasible solution x to ( D), and deﬁne a
+solution x′to (P) by x′
+K = ∑
+i∈K xK i; informally, x′is obtained from x by ignoring the orientation
+of the hyperedges. Clearly x′ and x have the same objective value. Further, x′ is feasible for
+(
+P); to see this, for any partition π , note that ( 5) is implied by the sum of constraints ( 3) over U
+set to those parts of π not containing the root — any orientation of a full component with rank
+contribution t must leave at least t parts.
+To obtain the reverse direction OPT ( D) ≤ OPT (P), we use a similar strategy. We require
+some notation and a hypergraph orientation theorem of Frank et al. [ 16]. For any U ⊂ R we say
+that a directed hyperedge K i lies in ∆in(U ) if i ∈ U and K\U ̸= ∅, i.e. if K i ∈ ∆out(R\U ). Two
+12
+
+===== PAGE 13 =====
+
+subsets U and W of R are called crossing if all four sets U \W , W \U , U ∩ W , and R \(U ∪ W )
+are non-empty. A set-function p : 2R → Z is a crossing supermodular function if
+p(U ) + p(W ) ≤ p(U ∩ W ) + p(U ∪ W )
+for all crossing sets U and W . A directed hypergraph is said to cover p if |∆in(U )| ≥ p(U ) for all
+U ⊂ R. Here is the needed result.
+Theorem 6 (Frank, Kir´ aly & Kir´ aly [16]). Given a hypergraph H = ( R, X ), and a crossing
+supermodular function p, the hypergraph has an orientation covering p if and only if for every
+partition π of R,
+(a) ∑
+K∈X min{1, rcπ
+K} ≥ ∑
+π i∈π p(π i), and, (b) ∑
+K∈X rcπ
+K ≥ ∑
+π i∈π p(R \π i).
+We will show every rational solution x to (
+P) can be fractionally oriented to get a feasible
+solution for ( D), which will complete the proof of Theorem 5. Let M be the smallest integer such
+that the vector M x is integral. Let X be a multi-set of hyperedges which contains M xK copies of
+each K. Deﬁne the function p by p(U ) = M if r ∈ U ̸= R, and p(U ) = 0 otherwise; i.e. p(U ) = M
+iﬀ R\U is valid.
+Claim 3.4. H = (R, X ) satisﬁes conditions (a) and (b).
+Proof. Note ∑
+π i∈π p(R \π i) = M (r(π ) − 1) since all parts of π are valid except the part containing
+the root r. Thus condition (b), upon scaling by 1
+M , is a restatement of constraint ( 5), which holds
+since x is feasible for ( P).
+For this p, condition (a) follows from (b) in the following sense. Fix a partition π , and let π 1
+be the part of π containing r. If π 1 = R then (a) is vacuously true, so assume π 1 ̸= R. Let σ be
+the rank-2 partition {π 1, R \π 1}. Then it is easy to check that min {1, rcπ
+K } ≥ rcσ
+K for all K, and
+consequently ∑
+K∈X min{1, rcπ
+K} ≥ ∑
+K∈X rcσ
+K and ∑
+π i∈σ p(R \π i) = M = ∑
+π i∈π p(π i). Thus,
+(a) for π follows from (b) for σ .
+It is not hard to check that p is crossing supermodular. Now using Theorem 6, take an orien-
+tation of X that covers p.
+For each K ∈ K and each i ∈ K, let nK i denote the number of the M xK copies of K that are
+oriented as K i, i.e. directed towards i. So, ∑
+i∈K nK i = M xK . Let x′
+K i := nKi
+M for all K i. Hence∑
+i x′
+K i = xK and x′has the same objective value as x.
+To complete the proof, we show x′is feasible for (
+D). Fix a valid subset U and consider condition
+(3) for a valid set U . Note that p(R\U ) = M . Therefore, since the orientation covers p, we get
+∑
+K i∈∆out(U )
+x′
+K i = 1
+M
+∑
+K i∈∆out(U )
+nK i = 1
+M
+∑
+K i∈∆in(R\U )
+nK i ≥ 1
+M p(R\U ) = 1
+M M = 1
+as needed.
+3.4 Partition and Bidirected Cut Relaxations in Quasibipar tite Instances
+Theorem 7. On quasibipartite Steiner tree instances, OPT (B) ≥ OPT (D).
+To prove Theorem 7, we look at the duals of the two LPs and we show OPT ( BD) ≥ OPT (DD)
+in quasibipartite instances. Recall that the support of a so lution to ( DD) is the family of sets with
+positive zU . A family of sets is called laminar if for any two of its sets A, B we have A ⊆ B, B ⊆ A,
+or A ∩ B = ∅.
+13
+
+===== PAGE 14 =====
+
+Lemma 3.5. There exists an optimal solution to (DD) whose support is a laminar family of sets.
+Proof. Choose an optimal solution z to ( DD) which maximizes ∑
+U zU |U |2 among all optimal so-
+lutions. We claim that the support of this solution is lamina r. Suppose not and there exists U and
+U ′ with U ∩ U ′̸= ∅ and zU > 0 and zU ′ > 0. Deﬁne z′ to be the same as z except z′
+U = zU − δ ,
+z′
+U ′ = zU ′− δ , z′
+U ∪U ′ = zU ∪U ′+ δ and z′
+U ∩U ′ = zU ∩U ′+ δ ; we will show for small δ > 0, z′is feasible.
+Note that U ∩ U ′ is not empty and U ∪ U ′ doesn’t contain r, and the objective value remains
+unchanged. Also note that for any K and i ∈ K, if zU ∪U ′ or zU ∩U ′ appears in the summand of a
+constraint, then at least one of zU or zU ′ also appears. If both zU ∪U ′ and zU ∩U ′ appears, then both
+zU and zU ′ appears. Thus z′ is an optimal solution and ∑
+U z′
+U |U |2 > ∑
+U zU |U |2, contradicting
+the choice of z.
+Lemma 3.6. For quasibipartite instances, given a solution of (DD) with laminar support, we can
+get a feasible solution to (BD) of the same value.
+Proof. This lemma is the heart of the theorem, and is a little technic al to prove. We ﬁrst give a
+sketch of how we convert a feasible solution z of ( DD) into a feasible solution to ( BD) of the same
+value.
+Comparing ( DD) and ( BD) one ﬁrst notes that the former has a variable for every valid subset
+of the terminals, while the latter assigns values to all vali d subsets of the entire vertex set. We
+say that an edge uv is satisﬁed for a candidate solution z, if both a) ∑
+U :u∈U,v / ∈U zU ≤ cuv and b)∑
+U :v∈U,u /∈U zU ≤ cuv hold; z is then feasible for ( BD) if all edges are satisﬁed.
+Let z be a feasible solution to ( DD). One easily veriﬁes that all terminal-terminal edges are
+satisﬁed. On the other hand, terminal-Steiner edges may ini tially not be satisﬁed. To see this
+consider the Steiner vertex v and its neighbours depicted in Figure 7 below. Initially, none of the
+sets in z’s support contains v, and the load on the edges incident to v is quite skewed: the left-hand
+side of condition a) above may be large, while the left-hand s ide of condition b) is initially 0.
+To construct a valid solution for ( BD), we therefore lift the initial value zS of each terminal
+subset S to supersets of S, by adding Steiner vertices. The lifting procedure process es each Steiner
+vertex v one at a time; when processing v, we change z by moving dual from some sets U to
+U ∪ {v}. Such a dual transfer decreases the left-hand side of condit ion a) for edge uv, and increases
+the (initially 0) left-hand sides of condition b) for edges c onnecting v to neighbours other than v.
+We will soon see that there is a way of carefully lifting duals around v that ensures that all
+edges incident to v become satisﬁed. The deﬁnition of our procedure will ensure that these edges
+remain satisﬁed for the rest of the lifting procedure. Since there are no Steiner-Steiner edges, all
+edges will be satisﬁed once all Steiner vertices are process ed.
+U
+v
+u
+U’ u’ 
+Figure 7: Lifting variable zU .
+Throughout the lifting procedure, we will maintain that z
+remains unchanged, when projected to the terminals. Formal ly,
+we maintain the following crucial projection invariant:
+The quantity ∑
+U :S⊆ U ⊆ S∪(V \R) zU
+remains constant, for all terminal sets S.
+(PI)
+This invariant leads to two observations: ﬁrst, the constra int (4)
+is satisﬁed by z at all times, even when it is deﬁned on subsets
+of all vertices; second, ∑
+U ⊆ V zU is constant throughout, and
+the objective value of z in ( BD) is not aﬀected by the lifting.
+The existence of a lifting of duals around Steiner vertex v such
+that ( PI) is maintained, and such that all edges incident to v are satisﬁed can be phrased as a
+14
+
+===== PAGE 15 =====
+
+feasibility problem for a linear system of inequalities. We will use Farkas’ lemma and the feasibility
+of z for ( 4) to complete the proof.
+We now ﬁll in the proof details. Let Γ( v) denote the set of neighbours of vertex v in the given
+graph G. In each iteration, where we process Steiner node v, let
+Uv := {U : zU > 0 and U ∩ Γ(v) ̸= ∅}
+be the sets in z’s support that contain neighbours of v. Note that U ∈ U v could contain Steiner
+vertices on which the lifting procedure has already taken pl ace. However, by ( PI) and by Lemma
+3.5 the multi-family {U ∩ R : U ∈ U v} is laminar. In the lifting process, we will transfer xU units
+of the zU units of dual of each set U ∈ U v to the set U ′ = U ∪ {v}; this decreases the dual load
+(LHS of ( 2)) on arcs from U ∩ Γ(v) to v (e.g. uv in Figure 7) and increases the dual load on arcs
+from v to Γ( v)\U (e.g. vu′in the ﬁgure). The following system of inequalities describ es the set of
+feasible liftings.
+∀U ∈ Uv : xU ≤ zU (L1)
+∀u ∈ Γ(v) :
+∑
+U :u∈U
+(zU − xU ) ≤ cuv (L2)
+∀u ∈ Γ(v) :
+∑
+U :u /∈U
+xU ≤ cuv (L3)
+Claim 3.7. If (L1), (L2), (L3) have a feasible solution x ≥ 0, then the lifting procedure can be
+performed at Steiner vertex v, while maintaining the projection invariant property.
+Proof. Deﬁne the new solution to be zU := zU − xU , and, z(U ∪v) := xU , for all U ∈ U v, and zU
+remains unchanged for all other U . It is easy to check that all edges which were satisﬁed remain
+satisﬁed, and ( L2) and ( L3) imply that all edges incident to v are satisﬁed. Also note that the
+projection invariant property is maintained.
+By Farkas’ lemma, if ( L1), ( L2), ( L3) do not have a feasible solution x ≥ 0, then there exist
+non-negative multipliers — λ U for all U ∈ Uv, and α u, β u for all u ∈ Γ(v) — satisfying the following
+dual set of linear inequalities:
+∑
+U ∈Uv
+λ U zU +
+∑
+u∈Γ(v)
+α u
+(
+cuv −
+∑
+U :u∈U
+zU
+)
++
+∑
+u∈Γ(v)
+β ucuv < 0 (D1)
+∀U ∈ Uv : λ U −
+∑
+u∈U
+α u +
+∑
+u /∈U
+β u ≥ 0 (D2)
+As a technicality, note that the sub-system {(L1), (L2), x ≥ 0} is feasible — take x = z. Thus
+any α, β, λ satisfying ( D1) and ( D2) has ∑
+u β u > 0, so by dividing all α, β, λ by ∑
+i β i, we may
+assume without loss of generality that
+∑
+u∈Γ(v)
+β u = 1. (D3)
+Subtracting ( D3) from ( D2) allows us to rewrite the latter set of constraints convenie ntly as
+∀U ∈ Uv : λ U −
+∑
+u∈U
+(α u + β u) + 1 ≥ 0. (D2’)
+The following claim shows that ( L1), (L2), (L3) does have a feasible solution, and thus by Claim
+3.7, lifting can be done, which completes the proof of Lemma 3.6.
+15
+
+===== PAGE 16 =====
+
+Claim 3.8. There exists no feasible solution to {α, β, λ ≥ 0 : ( D1), (D2’), and (D3)}.
+Proof. Consider the linear program which minimizes the LHS of ( D1) subject to the constraints
+(D2’) and ( D3). We show that the LP has value at least 0, which will complete the proof.
+Let (λ ∗, α ∗, β ∗) be an optimal solution to the LP. In Lemma 3.9 we will show that the constraint
+matrix of the LP is totally unimodular; hence, since the righ t-hand side of the given system is
+integral, we may assume that λ ∗, α ∗, and β ∗ are non-negative and integral. From ( D3) we infer
+There is a unique ¯u ∈ Γ(v) for which β ∗
+¯u = 1; for all u ̸= ¯u, β ∗
+u = 0. (14)
+Moreover, since each λ U appears only in the two constraints (
+D2’) and λ U ≥ 0, and since λ U has
+nonnegative coeﬃcient in the objective, we may assume
+λ ∗
+U = λ ∗
+U (α ∗, β ∗) := max {
+∑
+u∈U
+(α ∗
+u + β ∗
+u) − 1, 0} (15)
+for all U .
+Next, we establish the following:
+α ∗
+u + β ∗
+u ∈ {0, 1} for all u ∈ Γ(v). (16)
+Suppose for the sake of contradiction that property (
+16) does not hold for our solution. Let u be
+such that α ∗
+u + β ∗
+u ≥ 2. By (
+14), α ∗
+u ≥ 1. We propose the following update to our solution: decrease
+α ∗
+u by 1 (which by (
+15) will decrease λ ∗
+U by 1 for all U ∈ U v). This maintains the feasibility of
+(
+D2’), and the objective value decreases by
+∑
+U ∈Uv:u∈U
+zU + (cuv −
+∑
+u∈U
+zU )
+which is non-negative as c ≥ 0. By repeating this operation, we may clearly ensure proper ty ( 16).
+Let K ⊆ Γ(v) be the set {u |α ∗
+u + β ∗
+u = 1 } and recall ¯u is the unique terminal with β ∗
+¯u = 1; ¯u
+is clearly a member of K. At ( α ∗, β ∗, λ ∗), we evaluate the objective and collect like terms to get
+value
+∑
+U ∈Uv
+zU ρ (U ∩ K) +
+∑
+u∈K\¯u
+(cuv −
+∑
+U :u∈U
+zU ) + c¯uv =
+∑
+u∈K
+cuv +
+∑
+U ∈Uv
+zU (ρ (U ∩ K) − |(K\¯u) ∩ U |)
+=
+∑
+u∈K
+cuv −
+∑
+U ∈Uv:U ∩K̸=∅, ¯u̸∈U
+zU
+where the last equality follows by considering cases. Final ly, combining the fact that ∑
+u∈K cuv ≥
+CK (since these edges form one possible full component on termi nal set K) together with (
+4) for
+the pair ( K, ¯u), it follows that the LP’s optimal value is non-negative as n eeded.
+Lemma 3.9. The incidence matrix deﬁned by (D2’) and (D3) is totally unimodular.
+Proof. The incidence matrix has |Uv|+ 1 rows ( |Uv|corresponding to ( D2’) and one last row corre-
+sponding to ( D3)) and |Uv|+ 2|Γ(v)|columns. Furthermore, the columns corresponding to α u’s are
+same as those corresponding to β u’s, except for the last row, where there are 0’s in the α -columns
+and 1’s in the β -columns.
+To show that this matrix is totally unimodular we use Ghouila -Houri’s characterization of total
+unimodularity (e.g. see [ 31, Thm. 19.3]):
+16
+
+===== PAGE 17 =====
+
+Theorem 8 (Ghouila-Houri 1962). A matrix is totally unimodular iﬀ the following holds for every
+subset R of rows: we can assign weights wr ∈ {−1, +1} to each row r ∈ R such that ∑
+r∈R wrr is
+a {0, ± 1}-vector.
+Note that we can safely ignore the columns corresponding to v ariables λ U for sets U ∈ Uv, since
+each of them contains a single 1 occurring in constraint ( D2’) for set U .
+The row subset R corresponds to a subset of Uv — which we will denote R ∩ U v — plus
+possibly the single row corresponding to ( D3). Each row in R ∩ U v has its values determined by
+the characteristic vector of U ∩ Γ(v). So long as any set appears more than once in {U ∩ Γ(v) |U ∈
+R ∩ U v} we can assign one copy weight +1 and the other copy weight − 1; these rows cancel out.
+Thus, henceforth we assume {U ∩ Γ(v) |U ∈ R ∩ U v} has no duplicate sets.
+There is a standard representation of a laminar family as a fo rest of rooted trees, where there
+is a node corresponding to each set, with containment in the f amily corresponding to ancestry in
+the forest. Given the forest for the laminar family {U ∩ Γ(v) |U ∈ R ∩ U v}, the assignment of
+weights to the rows of the matrix is as follows. Let the root no des of all trees be at height 0 with
+height increasing as one goes to children nodes. Give weight − 1 to rows corresponding to nodes at
+even height, and weight +1 to rows corresponding to nodes at o dd height. If R contains the row
+corresponding to ( D3), give it weight +1.
+Finally, let us argue that these weights have the needed prop erty. Consider ﬁrst a column
+corresponding to α u for any u. The rows of R with 1 in this column form a path, from the largest
+set containing u (which is a root node) to the smallest set containing u. The weighted sum in this
+column is an alternating sum − 1+1 − 1+1 · · · , which is either − 1 or 0, which is in {0, ± 1}as needed.
+Second, in a column for some β u, if R doesn’t contain (resp. contains) the row corresponding to
+(D3), the weighted sum is the same as for α u (resp. plus 1); in either case its weighted sum is in
+{0, ± 1} as needed.
+This ﬁnishes the proof of Lemma 3.6, and hence also that of Theorem 7.
+4 Improved Integrality Gap Upper Bounds
+We ﬁrst show the improved bound of 73 / 60 for uniformly quasibipartite graphs. We then show the
+(2
+√
+2− 1) .= 1. 828 upper bound on general graphs, which contains the main id eas, and subsequently
+we give the
+√
+3 .= 1. 729 upper bound.
+4.1 Uniformly Quasibipartite Instances
+Uniformly quasibipartite instances of the Steiner tree pro blem are quasibipartite graphs where the
+cost of edges incident on a Steiner vertex are the same. They w ere ﬁrst studied by Gr¨ opl et al. [
+22],
+who gave a 73 / 60 factor approximation algorithm. In the following, we sho w that the cost of the
+returned tree is no more than than 73
+60 OPT (P), which upper-bounds the integrality gap by 73
+60 .
+We start by describing the algorithm of Gr¨ opl et al. [22] in terms of full components. A collection
+K′ of full components is acyclic if there is no list of t > 1 distinct terminals and hyperedges in K′
+of the form r1 ∈ K1 ∋ r2 ∈ K2 · · · ∋ rt ∈ Kt ∋ r1 — i.e. there are no hypercycles.
+17
+
+===== PAGE 18 =====
+
+Procedure RatioGreedy
+1: Initialize the set of acyclic components L to ∅.
+2: Let L∗ be a minimizer of CL
+|L|−1 over all full components L such that |L| ≥ 2 and L ∪ L is
+acyclic.
+3: Add L∗ to L.
+4: Continue until ( R, L) is a hyper-spanning tree and return L.
+Theorem 9. On a uniformly quasibipartite instance RatioGreedy returns a Steiner tree of cost
+at most 73
+60 OPT (P).
+Proof. Let t denote the number of iterations and L := {L1, . . . , L t} be the ordered sequence of
+full components obtained. We now deﬁne a dual solution to ( PD). Let π (i) denote the partition
+induced by the connected components of {L1, . . . , L i}. Let θ (i) denote CLi/ (|Li| −1) and note that
+θ is nondecreasing. Deﬁne θ (0) = 0 for convenience. We deﬁne a dual solution y with
+yπ (i) = θ (i + 1) − θ (i)
+for 0 ≤ i < t , and all other coordinates of y set to zero; y is not generally feasible, but we
+will scale it down to make it so. By evaluating a telescoping s um, it is not hard to ﬁnd that∑
+i yπ (i)(r(π (i)) − 1) = C(L). In the rest of the proof we will show for any K ∈ K, ∑
+i yπ (i)rcπ (i)
+K ≤
+73/ 60 · CK — by scaling, this also proves that 60
+73 y is a feasible dual solution, and hence completes
+the proof.
+Fix any K ∈ K and let |K|= k. Since the instance in question is uniformly quasi-biparti te,
+the full component K is a star with a Steiner centre and edges of a ﬁxed cost c to each terminal in
+K. For 1 ≤ i < k , let τ (i) denote the last iteration j in which rcπ (j)
+K ≥ k − i. Let Ki denote any
+subset of K of size k − i + 1 such that Ki contains at most one element from each part of π (τ (i));
+i.e., |Ki|= k − i + 1 and rcπ (τ (i))
+Ki = k − i.
+Our analysis hinges on the fact that Ki was a valid choice for Lτ (i)+1. More speciﬁcally, note
+that {L1, . . . , L τ (i), K i} is acyclic, hence by the greedy nature of the algorithm, for a ny 1 ≤ i < k,
+θ (τ (i) + 1) = CLτ (i)+1/ (|Lτ (i)+1| −1) ≤ CKi/ (|Ki| −1) ≤ c · (k − i + 1)
+k − i .
+Moreover, using the deﬁnition of τ and telescoping we compute
+∑
+π
+yπ rcπ
+K =
+t− 1∑
+i=0
+(θ (i + 1)− θ (i))rcπ (i)
+K =
+k− 1∑
+i=1
+θ (τ (i) + 1) ≤
+k− 1∑
+i=1
+c · (k − i + 1)
+k − i = c · (k − 1 +H(k − 1)),
+where H(·) denotes the harmonic series. Finally, note that ( k − 1 + H(k − 1)) ≤ 73
+60 k for all k ≥ 2
+(achieved at k = 5). Therefore, 60
+73 y is a valid solution to ( PD).
+4.2 General graphs
+We start with a few deﬁnitions and notations in order to prove the 2
+√
+2 − 1 and
+√
+3 integrality
+gap bounds on ( P). Both results use similar algorithms, and the latter is a mo re complex version
+of the former. For conciseness we let a “graph” be a triple G = ( V, E, R ) where R ⊂ V are G’s
+terminals. In the following, we let mtst(G; c) denote the minimum terminal spanning tree , i.e. the
+minimum spanning tree of the terminal-induced subgraph G[R] under edge-costs c : E → R. We
+will abuse notation and let mtst(G; c) mean both the tree and its cost under c.
+18
+
+===== PAGE 19 =====
+
+When contracting an edge uv in a graph, the new merged node resulting from contraction is
+deﬁned to be a terminal iﬀ at least one of u or v was a terminal; this is natural since a Steiner tree
+in the new graph is a minimal set of edges which, together with uv, connects all terminals in the
+old graph. Our algorithm performs contraction, which may in troduce parallel edges, but one may
+delete all but the cheapest edge from each parallel class wit hout aﬀecting the analysis.
+Our ﬁrst algorithm proceeds in stages. In each stage we apply the operation G ↦→ G/K
+which denotes contracting all edges in some full component K. To describe and analyze the
+algorithm we introduce some notation. For a minimum termina l spanning tree T = mtst(G; c)
+deﬁne dropT (K; c) := c(T ) − mtst(G/K ; c). We also deﬁne gainT (K; c) := dropT (K) − c(K),
+where c(K) is the cost of full component K. A tree T is called gainless if for every full component
+K we have gainT (K; c) ≤ 0. The following useful fact is implicit in [ 25]; we give a full proof in
+Section 4.3.
+Theorem 10 (Implicit in [25]). If mtst(G; c) is gainless, then OPT (P) equals the cost of mtst(G; c).
+We now give the ﬁrst algorithm and its analysis, which uses a r educed cost trick introduced by
+Chakrabarty et al.[ 4].
+Procedure Reduced One-Pass Heuristic
+1: Deﬁne costs c′
+e by c′
+e := ce/
+√
+2 for all terminal-terminal edges e, and c′
+e = ce for all other
+edges. Let G1 := G, T i := mtst(Gi; c′), and i := 1.
+2: The algorithm considers the full components in any order. Wh en we examine a full component
+K, if gainTi(K; c′) > 0, let Ki := K, Gi+1 := Gi/K i, Ti+1 := mtst(Gi+1; c′), and i := i + 1.
+3: Let f be the ﬁnal value of i. Return the tree Talg := Tf ∪ ⋃f − 1
+i=1 Ki.
+Note that the full components are scanned in any order and they are not examined a priori. Hence
+the algorithm works just as well if the full components arriv e “online,” which might be useful for
+some applications.
+Theorem 11. c(Talg) ≤ (2
+√
+2 − 1) OPT (P).
+Proof. First we claim that gainTf (K; c′) ≤ 0 for all K. To see this there are two cases. If K = Ki
+for some i, then we immediately see that dropTj (K) = 0 for all j > i so gainTf (K) = − c(K) ≤ 0.
+Otherwise (if for all i, K ̸= Ki) K had nonpositive gain when examined by the algorithm; and
+the well-known contraction lemma (e.g., see [ 21, §1.5]) immediately implies that gainTi(K) is
+nonincreasing in i, so gainTf (K) ≤ 0.
+By Theorem 10, c′(Tf ) equals the value of ( P) on the graph Gf with costs c′. Since c′≤ c, and
+since at each step we only contract terminals, the value of th is optimum must be at most OPT ( P).
+Using the fact that c(Tf ) =
+√
+2c′(Tf ), we get
+c(Tf ) =
+√
+2c′(Tf ) ≤
+√
+2 OPT (P) (17)
+Furthermore, for every i we have gainTi(Ki; c′) > 0, that is, dropTi(Ki; c′) > c ′(K) = c(K).
+The equality follows since K contains no terminal-terminal edges. However, dropTi(Ki; c′) =
+1√
+2 dropTi(Ki; c) because all edges of Ti are terminal-terminal. Thus, we get for every i = 1 to
+f , dropTi(Ki; c) >
+√
+2 · c(Ki).
+Since dropTi(Ki; c) := mtst(Gi; c) − mtst(Gi+1; c), we have
+f − 1∑
+i=1
+dropTi(Ki; c) = mtst(G; c) − c(Tf ).
+19
+
+===== PAGE 20 =====
+
+Thus, we have
+f − 1∑
+i=1
+c(Ki) ≤ 1√
+2
+f∑
+i=1
+dropTi(Ki; c) = 1√
+2
+(mtst(G; c) − c(Tf )) ≤ 1√
+2
+(2 OPT (P) − c(Tf ))
+where we use the fact that mtst(G, c ) is at most twice OPT ( P)6. Therefore
+c(Talg) = c(Tf ) +
+f − 1∑
+i=1
+c(Ki) ≤
+(
+1 − 1√
+2
+)
+c(Tf ) +
+√
+2 OPT (P).
+Finally, using c(Tf ) ≤
+√
+2 OPT (P) from ( 17), the proof of Theorem 11 is complete.
+4.2.1 Improving to
+√
+3
+To get the improved factor of
+√
+3, we use a more reﬁned iterated contraction approach. The
+crucial new concept is that of the loss of a full component, introduced by Karpinski and Zelikovsky
+[24]. The intuition is as follows. In each iteration, the (2
+√
+2 − 1)-factor algorithm contracts a full
+component K, and thus commits to include K in the ﬁnal solution; the new algorithm makes a
+smaller commitment, by contracting a subset of K’s edges, which allows for a possibility of better
+recovery later.
+Given a full component K (viewed as a tree with leaf set K and internal Steiner nodes),
+loss(K) is deﬁned to be the minimum-cost subset of E(K) such that ( V (K), loss(K)) has at
+least one terminal per connected component — i.e. the cheape st way in K to connect each Steiner
+node to the terminal set. We also use loss(K) to denote the total cost of these edges. Note that
+no two terminals are connected by loss(K). A very useful theorem of Karpinski and Zelikovsky
+[24] is that for any full component K, loss(K) ≤ c(K)/ 2.
+Now we have the ingredients to give our new algorithm. In the d escription below, α > 1 is a
+parameter (which will be set to
+√
+3). In each iteration, the algorithm contracts the loss of a s ingle
+full component K (we note it follows that the terminal set has constant size ov er all iterations).
+Procedure Reduced One-Pass Loss-Contracting Heuristic
+1: Initially G1 := G, T1 := mtst(G; c), and i := 1.
+2: The algorithm considers the full components in any order. Wh en we examine a full component
+K, if
+gainTi(K; c) > (α − 1)loss(K),
+let Ki := K, Gi+1 := Gi/ loss(Ki), Ti+1 := mtst(Gi+1; c), and i := i + 1.
+3: Let f be the ﬁnal value of i. Return the tree Talg := Tf ∪ ⋃f − 1
+i=1 loss(Ki).
+We now analyze the algorithm.
+Claim 4.1. c(Tf ) ≤ ( 1+α
+2 ) OPT (P).
+Proof. Using the contraction lemma again, gainTf (K; c) ≤ (α − 1)loss(K) for all K, so
+dropTf (K; c) ≤ c(K) + (α − 1)loss(K) = c(K) + (α − 1)loss(K) ≤
+( 1 + α
+2
+)
+c(K) (18)
+6This follows using standard arguments, and can be seen, for i nstance, by applying Theorem 10 to the cost-function
+with all terminal-terminal costs divided by 2, and using sho rt-cutting.
+20
+
+===== PAGE 21 =====
+
+since loss(K) ≤ c(K)/ 2.
+To ﬁnish the proof of Claim 4.1, we proceed as in the proof of Equation ( 17). Deﬁne c′
+e :=
+ce/ ( 1+α
+2 ) for all edges e which join two vertices of the original terminal set R, and c′
+e = ce for all
+other edges. Note that (
+18) implies that Tf is gainless with respect to c′. Thus, by Theorem 10,
+the value of LP ( P) on ( Gf , c ′) equals c′(Tf ). Since we only reduce costs (as α ≥ 1), this optimum
+is no more than the original OPT ( P) giving us c′(Tf ) ≤ OPT (P). Now using the deﬁnition of c′,
+the proof of the claim is complete.
+Claim 4.2. For any i ≥ 1, we have c(Ti) − c(Ti+1) ≥ gainTi(Ki; c) + loss(Ki).
+Proof. Recall that Ti+1 is a minimum terminal spanning tree of Gi+1 under c. Consider the following
+other terminal spanning tree T of Gi+1: take T to be the union of Ki/ loss(Ki) with mtst(Gi/K i; c).
+Hence c(Ti+1) ≤ c(T ) = mtst(Gi/K i; c) + c(Ki) − loss(Ki). Rearranging, and using the deﬁnition
+of gain, we obtain:
+c(Ti) − c(Ti+1) ≥ c(Ti) − mtst(Gi/K i; c) − c(Ki) + loss(Ki) = gainTi(Ki; c) + loss(Ki),
+and this completes the proof.
+Now we are ready to prove the integrality gap upper bound of
+√
+3.
+Theorem 12. c(Talg) ≤
+√
+3 OPT (P).
+Proof. By the algorithm, we have for all i that gainTi(Ki) ≥ (α − 1)loss(Ki), and thus gainTi(Ki; c)+
+loss(Ki) ≥ α loss(Ki). Thus, from Claim 4.2, we get
+f − 1∑
+i=1
+loss(Ki) ≤ 1
+α
+f − 1∑
+i=1
+(
+c(Ti) − c(Ti+1)
+)
+The right-hand sum telescopes to give us c(T1) − c(Tf ) = mtst(G; c) − c(Tf ). Thus,
+c(Talg) = c(Tf ) +
+f − 1∑
+i=1
+loss(Ki) ≤ c(Tf ) + 1
+α (mtst(G; c) − c(Tf )) = 1
+α mtst(G; c) + α − 1
+α c(Tf )
+≤
+( 2
+α + (α − 1)(1 + α )
+2α
+)
+OPT (P) =
+( α 2 + 3
+2α
+)
+OPT (P)
+which follows from mtst(G; c) ≤ 2 OPT (P) and Claim 4.1. Setting α =
+√
+3, the proof of the
+theorem is complete.
+4.3 Gainless MSTs and Hypergraphic Relaxations
+Theorem 10 (Implicit in [
+25]). If the MST induced by the terminals is gainless, then OPT (P)
+equals the cost of that MST.
+Proof. Let Π be the set of all partitions of the terminal set. As befor e, we let r(π ) be the rank of
+a partition π ∈ Π, and we use Eπ for the set of edges in our graph that cross the partition; i.e., Eπ
+contains all edges whose endpoints lie in diﬀerent parts of π . Fulkerson’s [
+17] formulation of the
+spanning tree polyhedron and its dual are as follows.
+The high-level overview of the proof is as follows. We ﬁrst gi ve a brief sketch of a folklore primal-
+dual interpretation of Kruskal’s minimum-spanning tree al gorithm with respect to Fulkerson’s LP
+21
+
+===== PAGE 22 =====
+
+min
+{ ∑
+e∈E
+cexe : x ∈ RE
+≥ 0 (M)
+∑
+e∈Eπ
+xe ≥ r(π ) − 1 ∀π ∈ Π
+}
+(19)
+max
+{ ∑
+π
+(r(π ) − 1) · yπ : y ∈ RΠ
+≥ 0 (MD)
+∑
+π :e∈Eπ
+yπ ≤ ce, ∀e ∈ E
+}
+(20)
+(for more information see, e.g., [
+25]). Running Kruskal’s algorithm on the terminal set then ret urns
+a minimum spanning tree T and a feasible dual y to Equation ( MD) such that
+c(T ) =
+∑
+π
+(r(π ) − 1)yπ .
+The ﬁnal step will be to show that, if the returned MST is gainl ess, then the spanning tree dual y
+is feasible for ( PD), and its value is c(T ) as well. Weak duality and the fact that the optimal value
+of ( P) is at most c(T ) imply the theorem.
+Kruskal’s algorithm can be viewed as a process over time. For each time τ ≥ 0, the algorithm
+keeps a forest T τ , and a feasible dual solution yτ ; initially T 0 = (V, ∅) and y0 = 0. Let π τ be the
+partition induced by the connected components of T τ . If T τ is not a spanning tree, Kruskal’s algo-
+rithm grows the dual variable yπ τ corresponding to the current partition until constraint Eq uation
+(MD)e: for some edge e prevents any further increase. The algorithm then adds e to the partial
+tree and continues. The algorithm stops at the ﬁrst time τ ∗ where T τ ∗
+is a spanning tree.
+Let T be the gainless spanning tree returned by Kruskal, and let y be the corresponding dual.
+We claim that y is feasible for ( PD). To see this, consider a full component K. Clearly, the rank
+contribution rcπ 0
+K of K to the initial partition π 0 is |K| −1; similarly, the ﬁnal rank contribution
+rcπ τ ∗
+K is 0. Every edge that is added during the algorithm’s run eith er leaves the rank contribution
+of K unchanged, or it decreases it by 1. Let e1, . . . , e |K|−1 be the edges of the ﬁnal tree T whose
+addition to T decreases K’s rank contribution. Also let
+0 ≤ τ 1 ≤ τ 2 ≤ . . . ≤ τ |K|−1 ≤ τ ∗
+be the times where these edges are added. Note that, by deﬁnit ion, we must have cei = τ i for all i.
+We therefore have
+|K|−1∑
+i=1
+cei =
+|K|−1∑
+i=1
+τ i. (21)
+The right-hand side of this equality is easily checked to be e qual to
+∫ τ ∗
+0
+rcπ τ
+K dτ,
+which in turn is equal to ∑
+π rcπ
+Kyπ , by the deﬁnition of Kruskal’s algorithm. It is not hard to se e
+that the left-hand side of (
+21) is the drop dropT (K) induced by K. Together with the fact that T
+is gainless, we obtain
+cK ≥ dropT (K) =
+∑
+π
+rcπ
+Kyπ .
+Now observe that the right-hand side of this equation is the l eft-hand side of (
+6). It follows that y
+is feasible for ( PD).
+22
+
+===== PAGE 23 =====
+
+5 Conclusion
+In this paper we looked at several hypergraphic LP relaxatio ns for the Steiner tree problem, and
+showed they all have the same objective value. Furthermore, we noted some connections to the
+bidirected cut relaxation for Steiner trees: although hype rgraphic relaxations are stronger than the
+bidirected cut relaxation in general, in quasibipartite gr aphs all these relaxations are equivalent. We
+obtained structural results about the hypergraphic relaxa tions showing that basic feasible solutions
+have sparse support. We also showed good upper bounds on the i ntegrality gaps on the hypergraphic
+relaxations via simple algorithms.
+Reiterating the comments in Section
+1.2.3, the hypergraphic LPs are powerful (e.g. as evidenced
+by Byrka et al. [3]) but may not be manageable for computational implementati on. Some interesting
+areas for future work include: non-ellipsoid-based algori thms to solve the hypergraphic LPs in
+the r-restricted setting; resolving the complexity of optimizi ng them in the unrestricted setting;
+and directly using the bidirected cut relaxation to achieve good results (e.g. in quasi-bipartite
+instances).
+References
+[1] Y. P. Aneja. An integer linear programming approach to th e Steiner problem in graphs.
+Networks, 10:167–178, 1980.
+[2] A. Borchers and D. Du. The k-Steiner ratio in graphs. SIAM J. Comput. , 26(3):857–869, 1997.
+[3] J. Byrka, F. Grandoni, T. Rothvoß, and L. Sanit` a. An impr oved LP-based approximation for
+Steiner tree. To appear in Proc. 42nd STOC, 2010.
+[4] D. Chakrabarty, N. R. Devanur, and V. V. Vazirani. New geo metry-inspired relaxations and
+algorithms for the metric Steiner tree problem. In IPCO, pages 344–358, 2008.
+[5] D. Chakrabarty, J. K¨ onemann, and D. Pritchard. Hypergr aphic LP relaxations for Steiner
+trees. In Proc. 14th IPCO , pages 383–396, 2010. Full version at arXiv:0910.0281.
+[6] D. Chakrabarty, J. K¨ onemann, and D. Pritchard. Integrality gap of the hypergraphic relaxation
+of Steiner trees: a short proof of a 1.55 upper bound. arXiv:1 006.2249, 2010.
+[7] M. Chleb ´ ık and J. Chleb ´ ıkov´ a. Approximation hardness of the Steiner tree problem on graphs.
+In Proceedings, Scandinavian Workshop on Algorithm Theory , pages 170–179, 2002.
+[8] S. Chopra. On the spanning tree polyhedron. Operations Research Letters, 8:25–29, 1989.
+[9] S. Chopra and M. R. Rao. The Steiner tree problem 1: Formul ations, compositions, and
+extension of facets. Mathematical Programming, 64:209–229, 1994.
+[10] S. Chopra and M. R. Rao. The Steiner tree problem 2: Prope rties and classes of facets.
+Mathematical Programming, 64:231–246, 1994.
+[11] G. Cornu´ ejols, D. Naddef, and J. Fonlupt. The travelin g salesman problem on a graph and
+some related integer polyhedra. Math. Programming, 33:1–27, 1985.
+[12] M. Didi Biha, H. Kerivin, and A. R. Mahjoub. Steiner tree s and polyhedra. Discrete Applied
+Mathematics, 112(1-3):101–120, 2001.
+23
+
+===== PAGE 24 =====
+
+[13] J. Edmonds. Optimum branchings. Journal of Research of the National Bureau of Standards
+B, 71B:233–240, 1967.
+[14] J. Edmonds. Matroids and the greedy algorithm. Math. Programming, 1:127–136, 1971.
+[15] J. Edmonds and R. Giles. A min-max relation for submodul ar functions on graphs. Annals of
+Discrete Mathematics, 1:185–204, 1977.
+[16] A. Frank, T. Kir´ aly, and Z. Kir´ aly. On the orientation of graphs and hypergraphs. Discrete
+Appl. Math. , 131(2):385–400, 2003.
+[17] D. R. Fulkerson. Blocking and anti-blocking pairs of po lyhedra. Math. Programming, 1:168–
+194, 1971.
+[18] D. Gijswijt and G. Pap. An algorithm for weighted fracti onal matroid matching.
+arXiv:0806.1818, 2008.
+[19] M. X. Goemans. The Steiner tree polytope and related pol yhedra. Math. Program., 63(2):157–
+182, 1994.
+[20] M. X. Goemans and Y. Myung. A catalog of Steiner tree form ulations. Networks, 23:19–28,
+1993.
+[21] C. Gr¨ opl, S. Hougardy, T. Nierhoﬀ, and H. J. Pr¨ omel. Ap proximation algorithms for the
+Steiner tree problem in graphs. In X. Cheng and D. Du, editors , Steiner trees in industries ,
+pages 235–279. Kluwer Academic Publishers, Norvell, Massa chusetts, 2001.
+[22] C. Gr¨ opl, S. Hougardy, T. Nierhoﬀ, and H. J. Pr¨ omel. St einer trees in uniformly quasi-
+bipartite graphs. Inform. Process. Lett. , 83(4):195–200, 2002. Preliminary version appeared
+as a Technical Report at TU Berlin, 2001.
+[23] K. Jain. A factor 2 approximation algorithm for the gene ralized Steiner network problem.
+Combinatorica, 21(1):39–60, 2001. Preliminary version appeared in Proc. 39th FOCS , pages
+448–457, 1998.
+[24] M. Karpinski and A. Zelikovsky. New approximation algo rithms for the Steiner tree problems.
+J. Combinatorial Optimization , 1(1):47–65, 1997.
+[25] J. K¨ onemann, D. Pritchard, and K. Tan. A partition-bas ed relaxation for Steiner trees. Math.
+Programming, 2009. [In press].
+[26] T. Polzin. Algorithms for the Steiner Problem in Networks . PhD thesis, Universit¨ at des
+Saarlandes, February 2003.
+[27] T. Polzin and S. Vahdati Daneshmand. A comparison of Ste iner tree relaxations. Discrete
+Applied Mathematics, 112(1-3):241–261, 2001. Preliminary version appeared at COS 1998.
+[28] T. Polzin and S. Vahdati Daneshmand. On Steiner trees an d minimum spanning trees in
+hypergraphs. Oper. Res. Lett. , 31(1):12–20, 2003.
+[29] D. Pritchard. Linear Programming Tools & Approximation Algorithms for Co mbinatorial
+Optimization. PhD thesis, University of Waterloo, 2009.
+24
+
+===== PAGE 25 =====
+
+[30] S. Rajagopalan and V. V. Vazirani. On the bidirected cut relaxation for the metric Steiner
+tree problem. In Proceedings, ACM-SIAM Symposium on Discrete Algorithms , pages 742–751,
+1999.
+[31] A. Schrijver. Theory of Linear and Integer Programming . Wiley, Chichester, 1986.
+[32] A. Schrijver. Combinatorial optimization . Springer, New York, 2003.
+[33] M. Singh and L. C. Lau. Approximating minimum bounded de gree spanning trees to within
+one of optimal. In Proc. 39th STOC , pages 661–670, 2007.
+[34] R. P. Stanley. Enumerative Combinatorics, volume 1. Wadsworth & Brooks/Cole, 1986.
+[35] J. H. V. Vate. Fractional matroid matchings. J. Comb. Theory, Ser. B , 55(1):133–145, 1992.
+[36] V. Vazirani. Recent results on approximating the Stein er tree problem and its generalizations.
+Theoret. Comput. Sci. , 235(1):205–216, 2000.
+[37] D. Warme. Spanning Trees in Hypergraphs with Applications to Steiner Trees. PhD thesis,
+University of Virginia, 1998.
+[38] R. T. Wong. A dual ascent approach for Steiner tree probl ems on a directed graph. Math.
+Programming, 28:271–287, 1984.
+25
