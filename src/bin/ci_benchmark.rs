@@ -99,6 +99,9 @@ fn solve_case(
         heuristic_frequency: 3,
         verbose: false,
         preprocess: true,
+        cycle_cuts: true,
+        partition_cuts: true,
+        tf_cuts: true,
     };
 
     let result = solve_file(path, config);

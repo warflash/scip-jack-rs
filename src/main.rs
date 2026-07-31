@@ -1,16 +1,7 @@
-pub mod graph;
-pub mod model;
-pub mod preprocessing;
-pub mod separation;
-pub mod heuristics;
-pub mod branch_and_bound;
-pub mod transformations;
-pub mod io;
-pub mod solver;
-
 use std::env;
-use branch_and_bound::SolverConfig;
-use solver::SolveMethod;
+
+use scip_jack::branch_and_bound::SolverConfig;
+use scip_jack::solver::{self, SolveMethod};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -31,6 +22,7 @@ fn main() {
 
     let method_name = match result.method {
         SolveMethod::DreyfusWagner => "Dreyfus-Wagner DP",
+        SolveMethod::AscendAndPrune => "Ascend-and-Prune (root)",
         SolveMethod::BranchAndCut => "Branch-and-Cut",
     };
 

@@ -6,6 +6,7 @@ pub mod heuristics;
 pub mod branch_and_bound;
 pub mod transformations;
 pub mod io;
+pub mod root_reduce;
 pub mod solver;
 
 pub use branch_and_bound::SolverConfig;

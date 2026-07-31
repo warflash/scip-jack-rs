@@ -134,6 +134,15 @@ impl<'a> CycleCutSeparator<'a> {
                         arc_ids.push(2 * ei as ArcId + 1);
                     }
 
+                    // `x(C) <= |C| - 1` is valid only when C really is a simple
+                    // cycle; for a path it would forbid a tree from using every
+                    // edge of that path. The reconstruction below is only correct
+                    // because the u-w path avoids v, so the three pieces are
+                    // vertex-disjoint apart from their endpoints.
+                    debug_assert!(
+                        is_simple_cycle(&edge_indices, self.graph),
+                        "cycle separator emitted a non-cycle: {edge_indices:?}"
+                    );
                     violated_cuts.push(CycleCut {
                         edge_indices,
                         arc_ids,
@@ -147,6 +156,41 @@ impl<'a> CycleCutSeparator<'a> {
         self.cuts_found = violated_cuts.len() as u32;
         violated_cuts
     }
+}
+
+/// True when `edges` (undirected edge indices) form one simple cycle: connected,
+/// every incident vertex of degree exactly two, and as many vertices as edges.
+pub(crate) fn is_simple_cycle(edges: &[u32], graph: &DirectedGraph) -> bool {
+    if edges.len() < 3 {
+        return false;
+    }
+    let mut degree: std::collections::HashMap<NodeId, u32> = std::collections::HashMap::new();
+    let mut adj: std::collections::HashMap<NodeId, Vec<NodeId>> = std::collections::HashMap::new();
+    for &e in edges {
+        let arc = &graph.arcs[2 * e as usize];
+        *degree.entry(arc.tail).or_insert(0) += 1;
+        *degree.entry(arc.head).or_insert(0) += 1;
+        adj.entry(arc.tail).or_default().push(arc.head);
+        adj.entry(arc.head).or_default().push(arc.tail);
+    }
+    if degree.len() != edges.len() {
+        return false;
+    }
+    if degree.values().any(|&d| d != 2) {
+        return false;
+    }
+    // Connectivity.
+    let start = *degree.keys().next().unwrap();
+    let mut seen = std::collections::HashSet::from([start]);
+    let mut stack = vec![start];
+    while let Some(v) = stack.pop() {
+        for &u in adj.get(&v).map(|v| v.as_slice()).unwrap_or(&[]) {
+            if seen.insert(u) {
+                stack.push(u);
+            }
+        }
+    }
+    seen.len() == degree.len()
 }
 
 /// Find the shortest cycle through node v by running Dijkstra from each of v's
@@ -292,4 +336,88 @@ impl Ord for DEntry {
 }
 impl PartialOrd for DEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{NodeType, UndirectedGraph};
+
+    /// Square with both diagonals, so several cycles pass through every vertex.
+    fn square_with_diagonals() -> DirectedGraph {
+        let mut g = UndirectedGraph::new(4);
+        for v in 1..=4u32 {
+            g.add_node(v, NodeType::Steiner, 0.0);
+        }
+        g.add_edge(1, 2, 1.0);
+        g.add_edge(2, 3, 1.0);
+        g.add_edge(3, 4, 1.0);
+        g.add_edge(4, 1, 1.0);
+        g.add_edge(1, 3, 1.0);
+        g.add_edge(2, 4, 1.0);
+        DirectedGraph::from_undirected(&g)
+    }
+
+    #[test]
+    fn every_emitted_cut_is_a_simple_cycle() {
+        // `x(C) <= |C| - 1` is only valid for a cycle. If the separator ever
+        // returned a path instead, the inequality would forbid a tree from using
+        // all of that path's edges and the dual bound would become unsound.
+        let g = square_with_diagonals();
+        let mut sep = CycleCutSeparator::new(&g);
+        // x_e = 0.8 on every edge, so w_e = 0.2 and any triangle weighs 0.6 < 1.
+        let lp = vec![0.4; g.arcs.len()];
+        let cuts = sep.find_violated_cuts(&lp);
+        assert!(!cuts.is_empty(), "expected violated cycle inequalities");
+        for c in &cuts {
+            assert!(
+                is_simple_cycle(&c.edge_indices, &g),
+                "emitted a non-cycle: {:?}",
+                c.edge_indices
+            );
+        }
+    }
+
+    #[test]
+    fn a_spanning_tree_satisfies_every_emitted_cut() {
+        // Direct check of validity: the inequality must not cut off any tree.
+        let g = square_with_diagonals();
+        let mut sep = CycleCutSeparator::new(&g);
+        let lp = vec![0.4; g.arcs.len()];
+        let cuts = sep.find_violated_cuts(&lp);
+
+        // Star tree on {1,2,3,4}: edges 1-2, 1-4, 1-3 (indices 0, 3, 4).
+        let tree_edges = [0usize, 3, 4];
+        for c in &cuts {
+            let used = c
+                .edge_indices
+                .iter()
+                .filter(|e| tree_edges.contains(&(**e as usize)))
+                .count();
+            assert!(
+                used <= c.edge_indices.len() - 1,
+                "cycle cut over {:?} is violated by a spanning tree",
+                c.edge_indices
+            );
+        }
+    }
+
+    #[test]
+    fn no_cuts_when_the_support_is_a_tree() {
+        let g = square_with_diagonals();
+        let mut sep = CycleCutSeparator::new(&g);
+        let mut lp = vec![0.0; g.arcs.len()];
+        for e in [0usize, 3, 4] {
+            lp[2 * e] = 1.0;
+        }
+        assert!(sep.find_violated_cuts(&lp).is_empty());
+    }
+
+    #[test]
+    fn rejects_non_cycles() {
+        let g = square_with_diagonals();
+        assert!(is_simple_cycle(&[0, 1, 2, 3], &g), "1-2-3-4-1 is a cycle");
+        assert!(!is_simple_cycle(&[0, 1], &g), "a two-edge path is not a cycle");
+        assert!(!is_simple_cycle(&[0, 1, 2], &g), "1-2-3-4 is a path, not a cycle");
+    }
 }

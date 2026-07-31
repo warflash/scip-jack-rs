@@ -2,7 +2,10 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::graph::{DirectedGraph, NodeId, ArcId, Cost};
-use crate::graph::algorithms::{dual_ascent, reduced_cost_fixable_arcs};
+use crate::graph::algorithms::{
+    dual_ascent, dual_ascent_masked, reduced_cost_distances, reduced_cost_fixable_arcs,
+    reduced_cost_fixings, ArcIndex,
+};
 use crate::model::{LpRelaxation, SteinerSolution};
 use crate::separation::{FlowCutSeparator, CycleCutSeparator, PartitionSeparator, TfCutSeparator};
 use crate::heuristics::{ConstructiveHeuristic, LocalSearchHeuristic, RecombinationHeuristic, PrimalHeuristic};
@@ -20,6 +23,12 @@ pub struct SolverConfig {
     pub heuristic_frequency: u32,
     pub verbose: bool,
     pub preprocess: bool,
+    /// Separate cycle closure inequalities `x(C) <= |C| - 1`.
+    pub cycle_cuts: bool,
+    /// Separate terminal-partition inequalities.
+    pub partition_cuts: bool,
+    /// Separate terminal-free boundary inequalities `x(delta(S)) >= 2 x_e`.
+    pub tf_cuts: bool,
 }
 
 impl Default for SolverConfig {
@@ -32,6 +41,9 @@ impl Default for SolverConfig {
             heuristic_frequency: 3,
             verbose: true,
             preprocess: true,
+            cycle_cuts: true,
+            partition_cuts: true,
+            tf_cuts: true,
         }
     }
 }
@@ -68,9 +80,13 @@ pub struct BranchAndCutSolver {
     da_reduced_costs: Vec<f64>,
     /// Recombination heuristic with solution pool
     recombination: RecombinationHeuristic,
+    /// CSR arc index, reused by every node-level dual ascent.
+    arc_index: Option<ArcIndex>,
     /// Running statistics
     total_cuts_added: u64,
     total_lp_solves: u64,
+    /// Nodes pruned by the dual-ascent bound without solving an LP.
+    da_prunes: u64,
 }
 
 impl BranchAndCutSolver {
@@ -105,8 +121,10 @@ impl BranchAndCutSolver {
             cut_signatures: HashSet::new(),
             fixed_zero_arcs: HashSet::new(),
             recombination,
+            arc_index: None,
             total_cuts_added: 0,
             total_lp_solves: 0,
+            da_prunes: 0,
         }
     }
 
@@ -115,9 +133,24 @@ impl BranchAndCutSolver {
         self
     }
 
+    /// Seed the search with bounds already proved at the root by ascend-and-prune.
+    ///
+    /// The primal bound is a *cutoff* only: the corresponding solution lives in a
+    /// graph this solver no longer sees, so no incumbent is installed. Nodes whose
+    /// dual bound reaches the cutoff can still be pruned, which is the point.
+    pub fn seed_bounds(&mut self, lower: f64, upper: f64) {
+        if lower > self.tree.global_dual_bound {
+            self.tree.global_dual_bound = lower;
+        }
+        if upper < self.tree.global_primal_bound {
+            self.tree.global_primal_bound = upper;
+        }
+    }
+
     pub fn solve(&mut self) -> (Option<SteinerSolution>, SolverStats) {
         let start_time = Instant::now();
 
+        self.arc_index = Some(ArcIndex::new(&self.graph));
         self.run_initial_heuristic();
 
         // Dual ascent: fast lower bound + reduced-cost fixing (Wong 1984)
@@ -292,11 +325,20 @@ impl BranchAndCutSolver {
         let elapsed = start_time.elapsed().as_secs_f64();
 
         if self.config.verbose {
+            let (lp_secs, rows) = self
+                .base_lp
+                .as_ref()
+                .map_or((0.0, 0), |lp| (lp.solve_time_secs, lp.num_constraints()));
             eprintln!(
-                "[B&C] Done. Status: {:?} | Nodes: {} | Cuts: {} | LPs: {} | Time: {:.2}s | Gap: {:.6}%",
-                self.tree.status, self.tree.nodes_processed,
+                "[B&C] Done. Status: {:?} | Nodes: {} (DA-pruned {}) | Cuts: {} | LPs: {} | Time: {:.2}s | \
+                 LP time: {:.2}s ({:.1}ms/solve, {} rows) | Gap: {:.6}%",
+                self.tree.status, self.tree.nodes_processed, self.da_prunes,
                 self.total_cuts_added, self.total_lp_solves,
-                elapsed, self.tree.gap() * 100.0,
+                elapsed,
+                lp_secs,
+                if self.total_lp_solves > 0 { lp_secs * 1000.0 / self.total_lp_solves as f64 } else { 0.0 },
+                rows,
+                self.tree.gap() * 100.0,
             );
         }
 
@@ -314,16 +356,66 @@ impl BranchAndCutSolver {
         (self.tree.best_solution.clone(), stats)
     }
 
+    /// Dual ascent on the arcs this node still allows.
+    ///
+    /// The node's feasible set is contained in that of the relaxation obtained by
+    /// simply deleting every arc branched to zero — the arcs branched to *one* are
+    /// only ignored, which weakens the bound but keeps it valid. So the ascent's
+    /// value is a legitimate lower bound for the node, and it costs about a
+    /// millisecond against roughly a hundred for an LP solve.
+    ///
+    /// Returns the bound and the arcs its reduced costs rule out at this node.
+    fn node_dual_ascent(&mut self, fixings: &[(ArcId, f64)]) -> (f64, Vec<ArcId>) {
+        let idx = match self.arc_index.as_ref() {
+            Some(i) => i,
+            None => return (f64::NEG_INFINITY, Vec::new()),
+        };
+        let mut active = vec![true; idx.num_arcs()];
+        for &a in &self.fixed_zero_arcs {
+            active[a as usize] = false;
+        }
+        for &(a, v) in fixings {
+            if v == 0.0 {
+                active[a as usize] = false;
+            }
+        }
+
+        let da = dual_ascent_masked(idx, self.root, &self.terminals, &active);
+        let cutoff = self.tree.global_primal_bound;
+        if !cutoff.is_finite() {
+            return (da.lower_bound, Vec::new());
+        }
+        let dists = reduced_cost_distances(idx, self.root, &self.terminals, &da.reduced_costs, &active);
+        let fix = reduced_cost_fixings(
+            idx, self.root, &self.terminals, &da, &dists, &active, cutoff,
+        );
+        (da.lower_bound, fix.arcs)
+    }
+
     fn process_node(&mut self, node_id: u64) -> NodeResult {
         let node = &self.tree.nodes[node_id as usize];
         let fixings = node.fixings.clone();
         let is_root_node = node.depth == 0;
+
+        // Cheap dual bound first: if the ascent already reaches the cutoff there
+        // is no reason to touch the LP at all.
+        let (da_bound, da_fixable) = self.node_dual_ascent(&fixings);
+        if da_bound >= self.tree.global_primal_bound - self.config.gap_tolerance {
+            self.tree.nodes[node_id as usize].dual_bound = da_bound;
+            self.da_prunes += 1;
+            return NodeResult::Pruned;
+        }
 
         {
             let lp = self.base_lp.as_mut().unwrap();
             lp.reset_to_base();
             for &(arc_id, value) in &fixings {
                 lp.fix_variable(arc_id, value);
+            }
+            // Node-local eliminations from the ascent's reduced costs. These are
+            // undone by `reset_to_base` when the next node is processed.
+            for &a in &da_fixable {
+                lp.fix_variable(a, 0.0);
             }
         }
 
@@ -349,16 +441,43 @@ impl BranchAndCutSolver {
         );
         let mut tf_sep = TfCutSeparator::new(&self.graph, &self.terminals);
 
+        let no_cycle = !self.config.cycle_cuts;
+        let no_partition = !self.config.partition_cuts;
+        let no_tf = !self.config.tf_cuts;
+
         let mut prev_bound = f64::NEG_INFINITY;
         let mut stall_rounds = 0u32;
 
         for _round in 0..max_rounds {
-            let obj = self.base_lp.as_mut().unwrap().solve();
+            let mut obj = self.base_lp.as_mut().unwrap().solve();
             self.total_lp_solves += 1;
 
             if !self.base_lp.as_ref().unwrap().is_optimal() {
                 return NodeResult::Pruned;
             }
+
+            // Complete the model before doing anything with the solution: the
+            // held-back structural rows are part of the relaxation, not optional
+            // strengthening, so iterate to a fixpoint. Doing this inside the cut
+            // round (rather than consuming one) keeps node bounds identical to
+            // the fully resident model while the working LP stays small.
+            for _ in 0..64 {
+                let added = self.base_lp.as_mut().unwrap().separate_structural(500);
+                if added == 0 {
+                    break;
+                }
+                self.total_cuts_added += added as u64;
+                obj = self.base_lp.as_mut().unwrap().solve();
+                self.total_lp_solves += 1;
+                if !self.base_lp.as_ref().unwrap().is_optimal() {
+                    return NodeResult::Pruned;
+                }
+            }
+
+            // Age the global cut pool against this solution and drop cuts that
+            // have been slack for a while. Without this the model grows
+            // monotonically and the LP comes to dominate the whole runtime.
+            self.base_lp.as_mut().unwrap().prune_cuts();
 
             node_dual_bound = obj;
 
@@ -389,18 +508,22 @@ impl BranchAndCutSolver {
             lp_solution = self.base_lp.as_ref().unwrap().get_solution().to_vec();
 
             let flow_cuts = separator.find_violated_cuts(&lp_solution);
-            let cycle_cuts = cycle_sep.find_violated_cuts(&lp_solution);
+            let cycle_cuts = if no_cycle {
+                Vec::new()
+            } else {
+                cycle_sep.find_violated_cuts(&lp_solution)
+            };
 
             // Partition cuts: run when flow/cycle cuts are exhausted or sparse,
             // as they target multi-component fractional solutions.
-            let partition_cuts = if flow_cuts.len() < 3 {
+            let partition_cuts = if flow_cuts.len() < 3 && !no_partition {
                 partition_sep.find_violated_cuts(&lp_solution)
             } else {
                 Vec::new()
             };
 
             // TF set cuts: for terminal-free sets with dead-branch structure
-            let tf_cuts = if flow_cuts.len() < 5 {
+            let tf_cuts = if flow_cuts.len() < 5 && !no_tf {
                 tf_sep.find_violated_cuts(&lp_solution)
             } else {
                 Vec::new()
@@ -491,7 +614,6 @@ impl BranchAndCutSolver {
             for (arcs, coeffs) in &new_tf_cuts {
                 lp.add_cut(arcs, coeffs, 0.0);
             }
-            lp.base_constraint_count = lp.num_constraints();
         }
 
         self.tree.nodes[node_id as usize].dual_bound = node_dual_bound;
@@ -598,28 +720,12 @@ impl BranchAndCutSolver {
         parent_bound: f64,
     ) -> Option<ArcId> {
         let num_arcs = self.graph.num_arcs() as usize;
-        let num_edges = num_arcs / 2;
 
-        // Collect candidate edges (fractional z_e = y_fwd + y_rev)
-        let mut candidates: Vec<(ArcId, f64)> = Vec::new();
-        for e in 0..num_edges {
-            let y_fwd = lp_solution[e * 2];
-            let y_rev = lp_solution[e * 2 + 1];
-            let z = y_fwd + y_rev;
-            let frac = (z - z.round()).abs();
-            if frac > 1e-6 {
-                candidates.push(((e * 2) as ArcId, frac));
-            }
-        }
-
+        let mut candidates = super::branching::fractional_candidates(lp_solution, num_arcs);
         if candidates.is_empty() {
             return None;
         }
-
-        // Sort by fractionality (most fractional first) and take top candidates
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let max_candidates = 8.min(candidates.len());
-        candidates.truncate(max_candidates);
+        candidates.truncate(8);
 
         let mut best_score = f64::NEG_INFINITY;
         let mut best_var: Option<ArcId> = None;
@@ -630,50 +736,38 @@ impl BranchAndCutSolver {
         let saved_ub: Vec<f64> = lp.var_ub.clone();
 
         for &(arc_id, _frac) in &candidates {
-            let reverse_arc = arc_id + 1;
             let aid = arc_id as usize;
-            let rid = reverse_arc as usize;
+            let value = lp_solution[aid];
 
-            // Down-branch probe: fix edge to 0 (both arcs)
+            // Probe y_a = 0.
             let lp = self.base_lp.as_mut().unwrap();
             lp.fix_variable(arc_id, 0.0);
-            if rid < num_arcs {
-                lp.fix_variable(reverse_arc, 0.0);
-            }
             let down_obj = lp.solve();
             self.total_lp_solves += 1;
             let down_bound = if lp.is_optimal() { down_obj } else { f64::INFINITY };
-
-            // Restore to saved bounds
-            let lp = self.base_lp.as_mut().unwrap();
             lp.change_variable_bounds(arc_id, saved_lb[aid], saved_ub[aid]);
-            if rid < num_arcs {
-                lp.change_variable_bounds(reverse_arc, saved_lb[rid], saved_ub[rid]);
-            }
 
-            // Up-branch probe: fix forward arc to 1
+            // Probe y_a = 1.
             let lp = self.base_lp.as_mut().unwrap();
             lp.fix_variable(arc_id, 1.0);
             let up_obj = lp.solve();
             self.total_lp_solves += 1;
             let up_bound = if lp.is_optimal() { up_obj } else { f64::INFINITY };
-
-            // Restore to saved bounds
-            let lp = self.base_lp.as_mut().unwrap();
             lp.change_variable_bounds(arc_id, saved_lb[aid], saved_ub[aid]);
 
-            // Compute score: product rule (SCIP-style)
+            // Product score (SCIP-style): favour candidates whose weaker side
+            // still improves the bound.
             let down_gain = (down_bound - parent_bound).max(1e-6);
             let up_gain = (up_bound - parent_bound).max(1e-6);
             let score = (1.0 - 1e-6) * down_gain.min(up_gain) + 1e-6 * down_gain.max(up_gain);
 
-            // Update pseudo-costs with real strong branching data
-            let z_val = lp_solution[aid] + lp_solution.get(rid).copied().unwrap_or(0.0);
+            // Feed the measurements back as pseudo-costs, normalised per unit of
+            // variable movement so they transfer to other nodes.
             if down_bound < f64::INFINITY && down_gain > 1e-6 {
-                self.pseudo_costs.record_down(arc_id, down_gain / z_val.max(1e-6));
+                self.pseudo_costs.record_down(arc_id, down_gain / value.max(1e-6));
             }
             if up_bound < f64::INFINITY && up_gain > 1e-6 {
-                self.pseudo_costs.record_up(arc_id, up_gain / (1.0 - z_val).max(1e-6));
+                self.pseudo_costs.record_up(arc_id, up_gain / (1.0 - value).max(1e-6));
             }
 
             if score > best_score {
@@ -800,18 +894,14 @@ impl BranchAndCutSolver {
         let parent_depth = parent.depth;
         let parent_fixings = parent.fixings.clone();
 
-        // Symmetry-aware branching: branch_var is the first arc in a pair.
-        // Fix BOTH anti-parallel arcs (undirected edge branching).
-        let reverse_arc = branch_var + 1;
-        let has_reverse = (reverse_arc as usize) < self.graph.arcs.len();
+        // Branch on a single arc: {y_a = 0} and {y_a = 1} partition the feasible
+        // set. Fixing both anti-parallel arcs in the down child would leave the
+        // case y_a = 0, y_reverse = 1 in neither child and lose optima.
 
-        // Child 0: fix edge to 0 (both arcs to 0)
+        // Child 0: y_a = 0
         let child0_id = self.tree.nodes.len() as u64;
         let mut fixings0 = parent_fixings.clone();
         fixings0.push((branch_var, 0.0));
-        if has_reverse {
-            fixings0.push((reverse_arc, 0.0));
-        }
         self.tree.nodes.push(BbNode {
             id: child0_id,
             parent: Some(parent_id),
@@ -822,8 +912,7 @@ impl BranchAndCutSolver {
         });
         self.tree.open_nodes.push(child0_id);
 
-        // Child 1: fix edge to 1 (at least one arc must be 1)
-        // We fix the forward arc to 1 (the reverse may still be 0 or 1)
+        // Child 1: y_a = 1
         let child1_id = self.tree.nodes.len() as u64;
         let mut fixings1 = parent_fixings;
         fixings1.push((branch_var, 1.0));

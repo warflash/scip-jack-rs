@@ -1,12 +1,46 @@
-use crate::graph::{DirectedGraph, NodeId, ArcId, Cost};
-use highs::{RowProblem, Col, Sense, HighsModelStatus, Model as HModel};
+//! LP relaxation of the directed cut formulation, with a managed global cut pool.
+//!
+//! # Why the model is described as data
+//!
+//! Separated cuts are globally valid, so the natural implementation keeps one
+//! persistent HiGHS model and appends rows to it. Left alone, that model grows
+//! without bound: on SteinLib `c13` the branch-and-cut appended 7,635 cuts to a
+//! 1,236-variable problem, reaching 11,821 rows and 176 ms per solve, and 98% of
+//! total runtime was spent inside the LP.
+//!
+//! Cuts therefore need to be *removed* once they stop binding, and the HiGHS
+//! wrapper exposes no row deletion. So this type owns a plain-data description of
+//! every column and row and treats the HiGHS handle as a cache it can rebuild.
+//! Cuts that sit slack for several consecutive solves are aged out of the pool and
+//! the model is rebuilt without them. Rebuilds cost one model construction and
+//! discard the simplex basis, so they are triggered only when the row count
+//! actually exceeds its budget.
 
-/// LP relaxation of the directed cut formulation for the Steiner arborescence problem.
-///
-/// Uses a **persistent HiGHS model**: the model is built once with structural
-/// constraints and then incrementally modified (add rows, change column bounds)
-/// without ever being rebuilt from scratch. This avoids O(constraints) rebuild
-/// overhead on every LP solve.
+use crate::graph::{ArcId, Cost, DirectedGraph, NodeId};
+use highs::{Col, HighsModelStatus, Model as HModel, RowProblem, Sense};
+
+/// A row: `lo <= sum coeff * x <= hi`, with infinite bounds allowed.
+#[derive(Debug, Clone)]
+struct RowData {
+    entries: Vec<(u32, f64)>,
+    lo: f64,
+    hi: f64,
+}
+
+#[derive(Debug, Clone)]
+struct CutRow {
+    row: RowData,
+    /// Consecutive solves this cut has been slack for.
+    age: u32,
+    /// Index into `lazy` when this row came from the lazy structural pool.
+    lazy_index: Option<u32>,
+}
+
+/// A cut is considered slack when its activity is this far from the binding side.
+const SLACK_EPS: f64 = 1e-6;
+/// Cuts slack for this many consecutive solves become removable.
+const MAX_AGE: u32 = 12;
+
 pub struct LpRelaxation {
     pub num_vars: u32,
     pub objective: Vec<Cost>,
@@ -16,10 +50,30 @@ pub struct LpRelaxation {
     pub status: LpStatus,
     pub solve_count: u64,
     pub base_constraint_count: usize,
+    pub solve_time_secs: f64,
+    /// Number of model rebuilds triggered by cut-pool pruning.
+    pub rebuilds: u64,
+
+    /// Column description: (objective coefficient, lower bound, upper bound).
+    col_cost: Vec<f64>,
+    col_lb_base: Vec<f64>,
+    col_ub_base: Vec<f64>,
+    /// Structural rows; never removed.
+    structural: Vec<RowData>,
+    /// Valid structural rows held back and added only when violated. These are
+    /// the two families whose count is proportional to the arc count — the
+    /// Steiner continuation rows and the edge-vertex coupling rows. Keeping all
+    /// of them resident makes the model an order of magnitude larger than the
+    /// number of variables while only a handful are ever binding.
+    lazy: Vec<RowData>,
+    lazy_resident: Vec<bool>,
+    /// Separated cuts, subject to ageing.
+    cuts: Vec<CutRow>,
+    /// Row budget before pruning is attempted.
+    row_budget: usize,
 
     model: Option<HModel>,
     cols: Vec<Col>,
-    current_row_count: usize,
     base_var_lb: Vec<f64>,
     base_var_ub: Vec<f64>,
     pub var_lb: Vec<f64>,
@@ -35,264 +89,257 @@ pub enum LpStatus {
     Error,
 }
 
+/// Accumulates the model description before it is handed to HiGHS.
+struct Builder {
+    col_cost: Vec<f64>,
+    col_lb: Vec<f64>,
+    col_ub: Vec<f64>,
+    rows: Vec<RowData>,
+    lazy: Vec<RowData>,
+}
+
+impl Builder {
+    fn new() -> Self {
+        Self {
+            col_cost: Vec::new(),
+            col_lb: Vec::new(),
+            col_ub: Vec::new(),
+            rows: Vec::new(),
+            lazy: Vec::new(),
+        }
+    }
+
+    fn add_col(&mut self, cost: f64, lb: f64, ub: f64) -> u32 {
+        self.col_cost.push(cost);
+        self.col_lb.push(lb);
+        self.col_ub.push(ub);
+        (self.col_cost.len() - 1) as u32
+    }
+
+    fn add_row(&mut self, lo: f64, hi: f64, entries: Vec<(u32, f64)>) {
+        if entries.is_empty() {
+            return;
+        }
+        self.rows.push(RowData { entries, lo, hi });
+    }
+
+    fn add_lazy(&mut self, lo: f64, hi: f64, entries: Vec<(u32, f64)>) {
+        if entries.is_empty() {
+            return;
+        }
+        self.lazy.push(RowData { entries, lo, hi });
+    }
+}
+
 impl LpRelaxation {
-    /// Create a new LP relaxation from the directed cut formulation.
+    /// Build the rooted directed-cut model.
     ///
-    /// Builds the persistent HiGHS model with:
-    /// - Variables y_a in [0, 1] for each arc
-    /// - Objective: min sum c(a) * y_a
-    /// - Flow conservation constraints (3a, 3b, 3c)
-    /// - Flow balance constraints (4)
-    /// - Arc coupling constraints (5)
-    /// - Anti-symmetry constraints: y_{uv} + y_{vu} <= 1 for each edge pair
-    pub fn from_formulation(graph: &DirectedGraph, root: NodeId, terminals: &[NodeId], steiner_nodes: &[NodeId]) -> Self {
+    /// Structural rows:
+    /// - `y(delta^-(r)) = 0`, `y(delta^-(t)) = 1` for terminals, `y(delta^-(v)) <= 1` else;
+    /// - flow balance `y(delta^-(v)) <= y(delta^+(v))` for Steiner nodes;
+    /// - continuation `y(delta^-(v)) >= y_a` for every `a` leaving a Steiner node;
+    /// - anti-symmetry `y_uv + y_vu <= 1`;
+    /// - the FC-BCR block (activation variables, vertex counting, no-leaf,
+    ///   edge-vertex coupling) from section 11.1 of the research memo.
+    pub fn from_formulation(
+        graph: &DirectedGraph,
+        root: NodeId,
+        terminals: &[NodeId],
+        steiner_nodes: &[NodeId],
+    ) -> Self {
         let num_arcs = graph.num_arcs();
         let objective: Vec<Cost> = graph.arcs.iter().map(|a| a.cost).collect();
-
-        let mut pb = RowProblem::default();
-        let cols: Vec<Col> = (0..num_arcs as usize)
-            .map(|i| pb.add_column(objective[i], 0.0..=1.0))
-            .collect();
-
-        // (3a) y(delta^-(root)) = 0
-        let in_root: Vec<(Col, f64)> = graph.delta_minus(root).iter()
-            .map(|&(_, arc_id)| (cols[arc_id as usize], 1.0))
-            .collect();
-        if !in_root.is_empty() {
-            pb.add_row(0.0..=0.0, &in_root);
-        }
-
-        // (3b) y(delta^-(t)) = 1 for each terminal t != root
-        for &t in terminals {
-            if t == root { continue; }
-            let in_t: Vec<(Col, f64)> = graph.delta_minus(t).iter()
-                .map(|&(_, arc_id)| (cols[arc_id as usize], 1.0))
-                .collect();
-            if !in_t.is_empty() {
-                pb.add_row(1.0..=1.0, &in_t);
-            }
-        }
-
-        // (3c) y(delta^-(v)) <= 1 for each Steiner node v
-        for &v in steiner_nodes {
-            let in_v: Vec<(Col, f64)> = graph.delta_minus(v).iter()
-                .map(|&(_, arc_id)| (cols[arc_id as usize], 1.0))
-                .collect();
-            if !in_v.is_empty() {
-                pb.add_row(0.0..=1.0, &in_v);
-            }
-        }
-
-        // (4) y(delta^-(v)) <= y(delta^+(v)) for each Steiner node v
-        for &v in steiner_nodes {
-            let mut row: Vec<(Col, f64)> = Vec::new();
-            for &(_, arc_id) in graph.delta_minus(v) {
-                row.push((cols[arc_id as usize], 1.0));
-            }
-            for &(_, arc_id) in graph.delta_plus(v) {
-                row.push((cols[arc_id as usize], -1.0));
-            }
-            if !row.is_empty() {
-                pb.add_row(..=0.0, &row);
-            }
-        }
-
-        // (5) y(delta^-(v)) >= y_a for each a in delta^+(v), for Steiner nodes v
-        // For dense graphs (>3000 arcs), these generate O(|S|*degree) rows which
-        // makes the LP too large. In that case, omit them initially and rely on
-        // the flow balance (4) + no-leaf + separation to enforce the property.
-        // Constraint (5) is essential for LP strength - always include.
-        {
-            for &v in steiner_nodes {
-                let in_arcs: Vec<ArcId> = graph.delta_minus(v).iter()
-                    .map(|&(_, arc_id)| arc_id)
-                    .collect();
-                for &(_, out_arc) in graph.delta_plus(v) {
-                    let mut row: Vec<(Col, f64)> = Vec::new();
-                    for &in_arc in &in_arcs {
-                        row.push((cols[in_arc as usize], 1.0));
-                    }
-                    row.push((cols[out_arc as usize], -1.0));
-                    if !row.is_empty() {
-                        pb.add_row(0.0.., &row);
-                    }
-                }
-            }
-        }
-
-        // Anti-symmetry: y_{2i} + y_{2i+1} <= 1 for each undirected edge pair.
-        // In a valid arborescence at most one direction of each edge is used.
         let num_pairs = num_arcs as usize / 2;
-        for p in 0..num_pairs {
-            let fwd = 2 * p;
-            let rev = 2 * p + 1;
-            pb.add_row(..=1.0, &[(cols[fwd], 1.0), (cols[rev], 1.0)]);
+
+        let mut b = Builder::new();
+        for i in 0..num_arcs as usize {
+            b.add_col(objective[i], 0.0, 1.0);
         }
 
-        // TF singleton cuts (Terminal-Free degree constraints):
-        // For dense graphs (> 4000 arcs), omit these (O(|S|*degree) rows).
-        // The no-leaf constraint covers the same property, and TF set cut
-        // separation handles the non-singleton case dynamically.
-        if num_arcs < 4000 {
-            for &v in steiner_nodes {
-                let in_arcs: Vec<ArcId> = graph.delta_minus(v).iter().map(|&(_, a)| a).collect();
-                let out_arcs: Vec<ArcId> = graph.delta_plus(v).iter().map(|&(_, a)| a).collect();
-                let all_arcs: Vec<ArcId> = in_arcs.iter().chain(out_arcs.iter()).copied().collect();
-                if all_arcs.len() < 4 { continue; }
+        let in_arcs = |v: NodeId| -> Vec<u32> {
+            graph.delta_minus(v).iter().map(|&(_, a)| a).collect()
+        };
+        let out_arcs = |v: NodeId| -> Vec<u32> {
+            graph.delta_plus(v).iter().map(|&(_, a)| a).collect()
+        };
 
-                let mut incident_edges: Vec<usize> = all_arcs.iter()
-                    .map(|&a| (a as usize) / 2)
-                    .collect();
-                incident_edges.sort();
-                incident_edges.dedup();
+        // (3a) no arc enters the root.
+        b.add_row(0.0, 0.0, in_arcs(root).into_iter().map(|a| (a, 1.0)).collect());
 
-                for &edge_idx in &incident_edges {
-                    let fwd = (2 * edge_idx) as ArcId;
-                    let rev = (2 * edge_idx + 1) as ArcId;
-
-                    let mut row: Vec<(Col, f64)> = Vec::new();
-                    for &a in &all_arcs {
-                        if a == fwd || a == rev {
-                            row.push((cols[a as usize], -1.0));
-                        } else {
-                            row.push((cols[a as usize], 1.0));
-                        }
-                    }
-                    if !row.is_empty() {
-                        pb.add_row(0.0.., &row);
-                    }
-                }
+        // (3b) exactly one arc enters each non-root terminal.
+        for &t in terminals {
+            if t == root {
+                continue;
             }
+            b.add_row(1.0, 1.0, in_arcs(t).into_iter().map(|a| (a, 1.0)).collect());
         }
 
-        // FC-BCR: Forest-Closed BCR strengthening (Section 11.1 of research memo)
-        //
-        // Add activation variables s_v for each node. A tree on k used vertices
-        // has exactly k-1 edges; a non-terminal with s_v > 0 must have degree >= 2.
-        // These constraints attack fractional solutions that terminal cuts alone
-        // cannot see.
-
-        // Create activation variable columns: s_v in [0,1], zero cost
-        let all_nodes: Vec<NodeId> = graph.nodes.iter().map(|n| n.id).collect();
-        let terminal_set: std::collections::HashSet<NodeId> = terminals.iter().copied().collect();
-        let max_node_id = all_nodes.iter().copied().max().unwrap_or(0) as usize;
-
-        // Map node ID -> column index for s_v (offset by num_arcs)
-        let mut s_cols: Vec<Option<Col>> = vec![None; max_node_id + 1];
-        for &nid in &all_nodes {
-            let is_terminal = terminal_set.contains(&nid) || nid == root;
-            let (lb, ub) = if is_terminal { (1.0, 1.0) } else { (0.0, 1.0) };
-            let col = pb.add_column(0.0, lb..=ub);
-            s_cols[nid as usize] = Some(col);
-        }
-
-        // Counting constraint: sum_edges(y_fwd + y_rev) = sum_nodes(s_v) - 1
-        // Rewritten: sum_edges(y_fwd + y_rev) - sum_nodes(s_v) = -1
-        {
-            let mut row: Vec<(Col, f64)> = Vec::new();
-            for p in 0..num_pairs {
-                row.push((cols[2 * p], 1.0));
-                row.push((cols[2 * p + 1], 1.0));
-            }
-            for &nid in &all_nodes {
-                if let Some(col) = s_cols[nid as usize] {
-                    row.push((col, -1.0));
-                }
-            }
-            pb.add_row(-1.0..=-1.0, &row);
-        }
-
-        // No-leaf constraint: for each Steiner node v:
-        //   x(delta(v)) >= 2 * s_v
-        // i.e., sum of all arcs incident to v (in undirected sense) >= 2 * s_v
-        // Rewritten: sum_incident_arcs(y_a) - 2*s_v >= 0
+        // (3c) at most one arc enters a Steiner node.
         for &v in steiner_nodes {
-            if let Some(sv_col) = s_cols[v as usize] {
-                let in_arcs: Vec<ArcId> = graph.delta_minus(v).iter().map(|&(_, a)| a).collect();
-                let out_arcs: Vec<ArcId> = graph.delta_plus(v).iter().map(|&(_, a)| a).collect();
+            b.add_row(0.0, 1.0, in_arcs(v).into_iter().map(|a| (a, 1.0)).collect());
+        }
 
-                let mut row: Vec<(Col, f64)> = Vec::new();
-                for &a in &in_arcs {
-                    row.push((cols[a as usize], 1.0));
-                }
-                for &a in &out_arcs {
-                    row.push((cols[a as usize], 1.0));
-                }
-                row.push((sv_col, -2.0));
-                if !row.is_empty() {
-                    pb.add_row(0.0.., &row);
-                }
+        // (4) flow balance: an entered Steiner node must be left.
+        for &v in steiner_nodes {
+            let mut row: Vec<(u32, f64)> = in_arcs(v).into_iter().map(|a| (a, 1.0)).collect();
+            row.extend(out_arcs(v).into_iter().map(|a| (a, -1.0)));
+            b.add_row(f64::NEG_INFINITY, 0.0, row);
+        }
+
+        // (5) continuation: an arc may leave a Steiner node only if one enters.
+        // One row per arc, each of width `indeg + 1`; separated on demand.
+        for &v in steiner_nodes {
+            let ins = in_arcs(v);
+            for out in out_arcs(v) {
+                let mut row: Vec<(u32, f64)> = ins.iter().map(|&a| (a, 1.0)).collect();
+                row.push((out, -1.0));
+                b.add_lazy(0.0, f64::INFINITY, row);
             }
         }
 
-        // Edge-vertex coupling: for each edge {u,v} (arc pair 2i, 2i+1):
-        //   y_{uv} + y_{vu} <= s_u   AND   y_{uv} + y_{vu} <= s_v
+        // Anti-symmetry: at most one orientation of each edge is used.
         for p in 0..num_pairs {
-            let fwd_arc = &graph.arcs[2 * p];
-            let u = fwd_arc.tail;
-            let v = fwd_arc.head;
+            b.add_row(f64::NEG_INFINITY, 1.0, vec![(2 * p as u32, 1.0), (2 * p as u32 + 1, 1.0)]);
+        }
 
-            if let Some(su_col) = s_cols[u as usize] {
-                // y_{uv} + y_{vu} - s_u <= 0
-                pb.add_row(..=0.0, &[
-                    (cols[2 * p], 1.0),
-                    (cols[2 * p + 1], 1.0),
-                    (su_col, -1.0),
-                ]);
+        // FC-BCR block.
+        let terminal_set: std::collections::HashSet<NodeId> = terminals.iter().copied().collect();
+        let max_node_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) as usize;
+        let mut s_col: Vec<Option<u32>> = vec![None; max_node_id + 1];
+        for node in &graph.nodes {
+            let fixed = terminal_set.contains(&node.id) || node.id == root;
+            let (lb, ub) = if fixed { (1.0, 1.0) } else { (0.0, 1.0) };
+            s_col[node.id as usize] = Some(b.add_col(0.0, lb, ub));
+        }
+
+        // A tree on k used vertices has exactly k-1 edges. This single dense row
+        // carries a large share of the FC-BCR strength: without it the root gaps
+        // on c09/c13/c18 widen from 0% to 1.2%/4.8%/3.5%.
+        {
+            let mut row: Vec<(u32, f64)> = Vec::with_capacity(num_arcs as usize + graph.nodes.len());
+            for a in 0..num_arcs {
+                row.push((a, 1.0));
             }
-            if let Some(sv_col) = s_cols[v as usize] {
-                // y_{uv} + y_{vu} - s_v <= 0
-                pb.add_row(..=0.0, &[
-                    (cols[2 * p], 1.0),
-                    (cols[2 * p + 1], 1.0),
-                    (sv_col, -1.0),
-                ]);
+            for node in &graph.nodes {
+                if let Some(c) = s_col[node.id as usize] {
+                    row.push((c, -1.0));
+                }
+            }
+            b.add_row(-1.0, -1.0, row);
+        }
+
+        // No-leaf: a used Steiner node has undirected degree at least two. Valid
+        // for inclusion-minimal trees, and with non-negative costs some optimum is
+        // inclusion-minimal.
+        for &v in steiner_nodes {
+            if let Some(sv) = s_col[v as usize] {
+                let mut row: Vec<(u32, f64)> = in_arcs(v).into_iter().map(|a| (a, 1.0)).collect();
+                row.extend(out_arcs(v).into_iter().map(|a| (a, 1.0)));
+                row.push((sv, -2.0));
+                b.add_row(0.0, f64::INFINITY, row);
             }
         }
 
-        let base_rows = pb.num_rows();
+        // Edge-vertex coupling: using an edge activates both endpoints.
+        // Two rows per edge; separated on demand.
+        for p in 0..num_pairs {
+            let arc = &graph.arcs[2 * p];
+            for endpoint in [arc.tail, arc.head] {
+                if let Some(sc) = s_col[endpoint as usize] {
+                    b.add_lazy(
+                        f64::NEG_INFINITY,
+                        0.0,
+                        vec![(2 * p as u32, 1.0), (2 * p as u32 + 1, 1.0), (sc, -1.0)],
+                    );
+                }
+            }
+        }
 
-        let mut model = pb.optimise(Sense::Minimise);
-        model.set_option("output_flag", false);
+        let structural_count = b.rows.len();
+        // Budget the *separated* rows against the variable count. Sizing this too
+        // tightly evicts useful Steiner cuts that then have to be rediscovered by
+        // max-flow, which costs far more than the rows saved.
+        let row_budget = structural_count + (4 * num_arcs as usize).max(4000);
+        let lazy_count = b.lazy.len();
 
         let var_lb = vec![0.0; num_arcs as usize];
         let var_ub = vec![1.0; num_arcs as usize];
 
-        let lp = Self {
+        let mut lp = Self {
             num_vars: num_arcs,
             objective,
-            solution: vec![0.0; num_arcs as usize],
-            reduced_costs: vec![0.0; num_arcs as usize],
+            solution: vec![0.0; b.col_cost.len()],
+            reduced_costs: vec![0.0; b.col_cost.len()],
             dual_bound: f64::NEG_INFINITY,
             status: LpStatus::NotSolved,
             solve_count: 0,
-            base_constraint_count: base_rows,
-            model: Some(model),
-            cols,
-            current_row_count: base_rows,
+            base_constraint_count: structural_count,
+            solve_time_secs: 0.0,
+            rebuilds: 0,
+            col_cost: b.col_cost,
+            col_lb_base: b.col_lb,
+            col_ub_base: b.col_ub,
+            structural: b.rows,
+            lazy: b.lazy,
+            lazy_resident: vec![false; lazy_count],
+            cuts: Vec::new(),
+            row_budget,
+            model: None,
+            cols: Vec::new(),
             base_var_lb: var_lb.clone(),
             base_var_ub: var_ub.clone(),
             var_lb,
             var_ub,
         };
-
+        lp.rebuild();
         lp
     }
 
-    /// Mark current state as the base (after adding global cuts and fixed arcs).
+    /// Recreate the HiGHS model from the current data description.
+    fn rebuild(&mut self) {
+        let mut pb = RowProblem::default();
+        let cols: Vec<Col> = (0..self.col_cost.len())
+            .map(|i| {
+                let (lb, ub) = self.current_col_bounds(i);
+                pb.add_column(self.col_cost[i], lb..=ub)
+            })
+            .collect();
+
+        for row in self.structural.iter().chain(self.cuts.iter().map(|c| &c.row)) {
+            let entries: Vec<(Col, f64)> =
+                row.entries.iter().map(|&(c, v)| (cols[c as usize], v)).collect();
+            pb.add_row(row.lo..=row.hi, &entries);
+        }
+
+        let mut model = pb.optimise(Sense::Minimise);
+        model.set_option("output_flag", false);
+        self.cols = cols;
+        self.model = Some(model);
+        self.rebuilds += 1;
+    }
+
+    /// Bounds currently in force for a column, honouring branching fixings.
+    fn current_col_bounds(&self, i: usize) -> (f64, f64) {
+        if i < self.var_lb.len() {
+            (self.var_lb[i], self.var_ub[i])
+        } else {
+            (self.col_lb_base[i], self.col_ub_base[i])
+        }
+    }
+
+    /// Mark the current state as the base for per-node bound resets.
     pub fn snapshot_base(&mut self) {
-        self.base_constraint_count = self.current_row_count;
+        self.base_constraint_count = self.num_constraints();
         self.base_var_lb = self.var_lb.clone();
         self.base_var_ub = self.var_ub.clone();
     }
 
-    /// Reset column bounds to the base state for a new B&B node.
-    /// All cuts added remain (they are global); only variable fixings are reverted.
+    /// Restore column bounds to the base state for a new branch-and-bound node.
+    /// Cuts are global and stay in place.
     pub fn reset_to_base(&mut self) {
         let model = self.model.as_mut().unwrap();
         for i in 0..self.num_vars as usize {
-            let blb = self.base_var_lb[i];
-            let bub = self.base_var_ub[i];
+            let (blb, bub) = (self.base_var_lb[i], self.base_var_ub[i]);
             if (self.var_lb[i] - blb).abs() > 1e-12 || (self.var_ub[i] - bub).abs() > 1e-12 {
                 model.change_column_bounds(self.cols[i], blb..=bub);
                 self.var_lb[i] = blb;
@@ -302,76 +349,147 @@ impl LpRelaxation {
         self.status = LpStatus::NotSolved;
     }
 
-    /// Add a Steiner cut: sum y_a >= 1 for arcs crossing the cut.
+    fn push_cut(&mut self, row: RowData) {
+        self.push_cut_tagged(row, None);
+    }
+
+    fn push_cut_tagged(&mut self, row: RowData, lazy_index: Option<u32>) {
+        {
+            let entries: Vec<(Col, f64)> =
+                row.entries.iter().map(|&(c, v)| (self.cols[c as usize], v)).collect();
+            let model = self.model.as_mut().unwrap();
+            model.add_row(row.lo..=row.hi, entries);
+        }
+        self.cuts.push(CutRow { row, age: 0, lazy_index });
+    }
+
+    /// Activity of a row at the current solution.
+    fn activity(&self, row: &RowData) -> f64 {
+        row.entries
+            .iter()
+            .map(|&(c, v)| v * self.solution.get(c as usize).copied().unwrap_or(0.0))
+            .sum()
+    }
+
+    /// Add any held-back structural rows the current solution violates.
+    ///
+    /// These rows are valid for the model, so leaving them out only ever weakens
+    /// the relaxation — the dual bound stays a bound throughout. Returns how many
+    /// were brought in.
+    pub fn separate_structural(&mut self, max_add: usize) -> usize {
+        if self.status != LpStatus::Optimal || self.lazy.is_empty() {
+            return 0;
+        }
+        let mut violated: Vec<(f64, u32)> = Vec::new();
+        for i in 0..self.lazy.len() {
+            if self.lazy_resident[i] {
+                continue;
+            }
+            let row = &self.lazy[i];
+            let act = self.activity(row);
+            let v = if row.lo.is_finite() && act < row.lo - SLACK_EPS {
+                row.lo - act
+            } else if row.hi.is_finite() && act > row.hi + SLACK_EPS {
+                act - row.hi
+            } else {
+                continue;
+            };
+            violated.push((v, i as u32));
+        }
+        if violated.is_empty() {
+            return 0;
+        }
+        // Most violated first: those move the bound the furthest per row added.
+        violated.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        violated.truncate(max_add);
+        for &(_, i) in &violated {
+            self.lazy_resident[i as usize] = true;
+            let row = self.lazy[i as usize].clone();
+            self.push_cut_tagged(row, Some(i));
+        }
+        violated.len()
+    }
+
+    /// Add a Steiner cut `sum_{a in cut} y_a >= 1`.
     pub fn add_steiner_cut(&mut self, cut_arcs: &[ArcId]) {
-        let entries: Vec<(Col, f64)> = cut_arcs.iter()
-            .map(|&aid| (self.cols[aid as usize], 1.0))
-            .collect();
-        let model = self.model.as_mut().unwrap();
-        model.add_row(1.0.., entries);
-        self.current_row_count += 1;
+        let entries = cut_arcs.iter().map(|&a| (a, 1.0)).collect();
+        self.push_cut(RowData { entries, lo: 1.0, hi: f64::INFINITY });
     }
 
-    /// Add a general cut (constraint) to the LP.
+    /// Add a general `>= rhs` cut over arc variables.
     pub fn add_cut(&mut self, arc_ids: &[ArcId], coefficients: &[f64], rhs: f64) {
-        let entries: Vec<(Col, f64)> = arc_ids.iter()
-            .zip(coefficients.iter())
-            .map(|(&aid, &coeff)| (self.cols[aid as usize], coeff))
-            .collect();
-        let model = self.model.as_mut().unwrap();
-        model.add_row(rhs.., entries);
-        self.current_row_count += 1;
+        let entries = arc_ids.iter().zip(coefficients).map(|(&a, &c)| (a, c)).collect();
+        self.push_cut(RowData { entries, lo: rhs, hi: f64::INFINITY });
     }
 
-    /// Add a cycle inequality: sum (y_{uv} + y_{vu}) <= |C|-1 for arc pairs in cycle C.
+    /// Add a cycle inequality `sum_{e in C} (y_uv + y_vu) <= |C| - 1`.
     pub fn add_cycle_cut(&mut self, arc_pairs: &[(ArcId, ArcId)]) {
         let rhs = arc_pairs.len() as f64 - 1.0;
-        let entries: Vec<(Col, f64)> = arc_pairs.iter()
-            .flat_map(|&(fwd, rev)| {
-                [(self.cols[fwd as usize], 1.0), (self.cols[rev as usize], 1.0)]
-            })
+        let entries = arc_pairs
+            .iter()
+            .flat_map(|&(f, r)| [(f, 1.0), (r, 1.0)])
             .collect();
-        let model = self.model.as_mut().unwrap();
-        model.add_row(..=rhs, entries);
-        self.current_row_count += 1;
+        self.push_cut(RowData { entries, lo: f64::NEG_INFINITY, hi: rhs });
     }
 
-    /// Fix a variable to a specific value by tightening its bounds.
-    pub fn fix_variable(&mut self, arc_id: ArcId, value: f64) {
-        let idx = arc_id as usize;
-        if idx < self.var_lb.len() {
-            self.var_lb[idx] = value;
-            self.var_ub[idx] = value;
-            let model = self.model.as_mut().unwrap();
-            model.change_column_bounds(self.cols[idx], value..=value);
-        }
-    }
-
-    /// Change variable bounds (for strong branching restore).
-    pub fn change_variable_bounds(&mut self, arc_id: ArcId, lb: f64, ub: f64) {
-        let idx = arc_id as usize;
-        if idx < self.var_lb.len() {
-            self.var_lb[idx] = lb;
-            self.var_ub[idx] = ub;
-            let model = self.model.as_mut().unwrap();
-            model.change_column_bounds(self.cols[idx], lb..=ub);
-        }
-    }
-
-    /// Solve the LP using the persistent HiGHS model.
+    /// Age the cut pool against the latest solution and, if the model has grown
+    /// past its budget, drop the stale cuts and rebuild.
     ///
-    /// The model is NOT rebuilt from scratch; HiGHS re-solves incrementally
-    /// using its internal warm-start from the previous basis.
-    pub fn solve(&mut self) -> f64 {
-        let mut model = self.model.take().unwrap();
-
-        if self.solve_count > 0 && !self.solution.is_empty() && self.solution.len() == model.num_cols() {
-            model.set_solution(Some(&self.solution), None, None, None);
+    /// Returns the number of cuts discarded.
+    pub fn prune_cuts(&mut self) -> usize {
+        if self.status != LpStatus::Optimal {
+            return 0;
+        }
+        for idx in 0..self.cuts.len() {
+            let activity = self.activity(&self.cuts[idx].row);
+            let row = &self.cuts[idx].row;
+            let binding = (row.lo.is_finite() && activity <= row.lo + SLACK_EPS)
+                || (row.hi.is_finite() && activity >= row.hi - SLACK_EPS);
+            let cut = &mut self.cuts[idx];
+            if binding {
+                cut.age = 0;
+            } else {
+                cut.age += 1;
+            }
         }
 
-        let solve_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            model.solve()
-        }));
+        if self.num_constraints() <= self.row_budget {
+            return 0;
+        }
+
+        // Structural rows brought in from the lazy pool stay for good. They are
+        // part of the relaxation rather than optional strengthening, and evicting
+        // them only to re-separate them a few solves later costs both the extra
+        // solves and a weaker bound in between.
+        let before = self.cuts.len();
+        self.cuts.retain(|c| c.age < MAX_AGE || c.lazy_index.is_some());
+        let removed = before - self.cuts.len();
+        if removed > 0 {
+            // Rebuilding costs the simplex basis, so it only happens when cuts
+            // were actually dropped. If nothing is stale we simply re-check on
+            // the next solve; the activity scan is negligible next to a solve.
+            self.rebuild();
+            self.status = LpStatus::NotSolved;
+        }
+        removed
+    }
+
+    pub fn solve(&mut self) -> f64 {
+        let timer = std::time::Instant::now();
+        let value = self.solve_inner();
+        self.solve_time_secs += timer.elapsed().as_secs_f64();
+        value
+    }
+
+    fn solve_inner(&mut self) -> f64 {
+        // Note: do *not* push the previous primal point back in with
+        // `set_solution`. HiGHS keeps its own simplex basis across `solve` calls
+        // on the same model, and supplying a primal-only start discards that
+        // basis in favour of a crash start — the opposite of a warm start. Doing
+        // so cost a factor of six on SteinLib `c13`.
+        let model = self.model.take().unwrap();
+
+        let solve_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| model.solve()));
 
         let solved = match solve_result {
             Ok(s) => s,
@@ -389,14 +507,17 @@ impl LpRelaxation {
                 let sol = solved.get_solution();
                 self.solution = sol.columns().to_vec();
                 self.reduced_costs = sol.dual_columns().to_vec();
-                self.dual_bound = self.solution.iter()
+                self.dual_bound = self
+                    .solution
+                    .iter()
                     .take(self.num_vars as usize)
                     .zip(self.objective.iter())
                     .map(|(&y, &c)| y * c)
                     .sum();
                 self.status = LpStatus::Optimal;
             }
-            HighsModelStatus::Infeasible | HighsModelStatus::ObjectiveBound
+            HighsModelStatus::Infeasible
+            | HighsModelStatus::ObjectiveBound
             | HighsModelStatus::ObjectiveTarget => {
                 self.dual_bound = f64::INFINITY;
                 self.status = LpStatus::Infeasible;
@@ -414,6 +535,21 @@ impl LpRelaxation {
         self.dual_bound
     }
 
+    /// Fix a variable by tightening both of its bounds.
+    pub fn fix_variable(&mut self, arc_id: ArcId, value: f64) {
+        self.change_variable_bounds(arc_id, value, value);
+    }
+
+    pub fn change_variable_bounds(&mut self, arc_id: ArcId, lb: f64, ub: f64) {
+        let idx = arc_id as usize;
+        if idx < self.var_lb.len() {
+            self.var_lb[idx] = lb;
+            self.var_ub[idx] = ub;
+            let model = self.model.as_mut().unwrap();
+            model.change_column_bounds(self.cols[idx], lb..=ub);
+        }
+    }
+
     pub fn get_solution(&self) -> &[f64] {
         &self.solution
     }
@@ -427,7 +563,11 @@ impl LpRelaxation {
     }
 
     pub fn num_constraints(&self) -> usize {
-        self.current_row_count
+        self.structural.len() + self.cuts.len()
+    }
+
+    pub fn num_cuts(&self) -> usize {
+        self.cuts.len()
     }
 }
 
@@ -449,23 +589,19 @@ mod tests {
         g.add_arc(1, 3, 5.0);
         g.add_arc(3, 1, 5.0);
 
-        let root = 1;
-        let terminals = vec![3];
-        let steiner_nodes = vec![2];
-        (g, root, terminals, steiner_nodes)
+        (g, 1, vec![3], vec![2])
     }
 
     #[test]
     fn test_lp_solves_optimal() {
         let (graph, root, terminals, steiner_nodes) = build_simple_instance();
         let mut lp = LpRelaxation::from_formulation(&graph, root, &terminals, &steiner_nodes);
-
         lp.add_steiner_cut(&[2, 4]);
 
         let obj = lp.solve();
         assert_eq!(lp.status, LpStatus::Optimal);
-        assert!(obj >= 1.0 - 1e-6, "LP bound should be at least 1.0, got {}", obj);
-        assert!(obj <= 2.0 + 1e-6, "LP bound should be at most 2.0, got {}", obj);
+        assert!(obj >= 1.0 - 1e-6, "LP bound should be at least 1.0, got {obj}");
+        assert!(obj <= 2.0 + 1e-6, "LP bound should be at most 2.0, got {obj}");
     }
 
     #[test]
@@ -476,30 +612,20 @@ mod tests {
         lp.solve();
 
         let y = lp.get_solution();
-
-        let in_root: f64 = graph.delta_minus(root).iter()
-            .map(|&(_, aid)| y[aid as usize])
-            .sum();
-        assert!(in_root.abs() < 1e-6, "Flow into root should be 0, got {}", in_root);
-
-        let in_3: f64 = graph.delta_minus(3).iter()
-            .map(|&(_, aid)| y[aid as usize])
-            .sum();
-        assert!((in_3 - 1.0).abs() < 1e-6, "Flow into terminal 3 should be 1, got {}", in_3);
+        let in_root: f64 = graph.delta_minus(root).iter().map(|&(_, a)| y[a as usize]).sum();
+        assert!(in_root.abs() < 1e-6, "Flow into root should be 0, got {in_root}");
+        let in_3: f64 = graph.delta_minus(3).iter().map(|&(_, a)| y[a as usize]).sum();
+        assert!((in_3 - 1.0).abs() < 1e-6, "Flow into terminal 3 should be 1, got {in_3}");
     }
 
     #[test]
     fn test_lp_steiner_cut_tightens_bound() {
         let (graph, root, terminals, steiner_nodes) = build_simple_instance();
         let mut lp = LpRelaxation::from_formulation(&graph, root, &terminals, &steiner_nodes);
-
         let bound_no_cuts = lp.solve();
-
         lp.add_steiner_cut(&[2, 4]);
         let bound_with_cuts = lp.solve();
-
-        assert!(bound_with_cuts >= bound_no_cuts - 1e-9,
-            "Adding cuts should not decrease the bound: {} < {}", bound_with_cuts, bound_no_cuts);
+        assert!(bound_with_cuts >= bound_no_cuts - 1e-9);
     }
 
     #[test]
@@ -509,7 +635,6 @@ mod tests {
         g.add_node(2, NodeType::Steiner, 0.0);
         g.add_node(3, NodeType::Terminal, 0.0);
         g.add_node(4, NodeType::Terminal, 0.0);
-
         g.add_arc(1, 2, 1.0);
         g.add_arc(2, 1, 1.0);
         g.add_arc(2, 3, 2.0);
@@ -517,79 +642,47 @@ mod tests {
         g.add_arc(1, 4, 3.0);
         g.add_arc(4, 1, 3.0);
 
-        let root = 1;
-        let terminals = vec![3, 4];
-        let steiner_nodes = vec![2];
-
-        let mut lp = LpRelaxation::from_formulation(&g, root, &terminals, &steiner_nodes);
-
+        let mut lp = LpRelaxation::from_formulation(&g, 1, &[3, 4], &[2]);
         lp.add_steiner_cut(&[2, 4]);
         lp.add_steiner_cut(&[4]);
-
         let obj = lp.solve();
         assert_eq!(lp.status, LpStatus::Optimal);
-        assert!(obj >= 5.0 - 1e-6, "LP bound should be >= 5, got {}", obj);
+        assert!(obj >= 5.0 - 1e-6, "LP bound should be >= 5, got {obj}");
     }
 
-    /// Verify HiGHS reduced cost sign convention for our formulation.
-    ///
-    /// For a MINIMIZATION problem:
-    /// - Variable at lower bound (y=0): reduced cost should be >= 0.
-    ///   Meaning: increasing y from 0 would increase objective by at least rc.
-    /// - Variable at upper bound (y=1): reduced cost should be <= 0.
-    ///
-    /// This test uses a known instance where we can verify which arcs are
-    /// unused at optimality and what their reduced costs should be.
     #[test]
-    fn test_reduced_cost_sign_convention() {
-        // Triangle: 1(T,root) --1-- 2(S) --1-- 3(T), plus edge 1-3 cost 5
-        // Optimal: use 1→2→3 (cost 2). Arc 1→3 (cost 5) should be at lb=0
-        // with positive reduced cost (using it would cost 5 instead of 2, so rc>=3).
+    fn rebuilding_preserves_the_bound_and_the_fixings() {
         let (graph, root, terminals, steiner_nodes) = build_simple_instance();
         let mut lp = LpRelaxation::from_formulation(&graph, root, &terminals, &steiner_nodes);
-
-        // Add cut to make terminal 3 reachable
-        lp.add_steiner_cut(&[2, 4]); // arcs into node 3: arc 2 (2→3) and arc 4 (1→3)
-
-        let obj = lp.solve();
+        lp.add_steiner_cut(&[2, 4]);
+        lp.fix_variable(4, 0.0); // forbid the direct 1->3 arc
+        let before = lp.solve();
         assert_eq!(lp.status, LpStatus::Optimal);
 
-        let sol = lp.get_solution();
-        let rc = &lp.reduced_costs;
+        lp.rebuild();
+        let after = lp.solve();
+        assert_eq!(lp.status, LpStatus::Optimal);
+        assert!((before - after).abs() < 1e-9, "{before} != {after} after rebuild");
+        assert!(lp.var_ub[4] == 0.0, "fixing must survive a rebuild");
+    }
 
-        // Arc 4 is 1→3 (cost 5). In optimal LP, it should be 0 (cheaper path exists).
-        let arc_1_3 = 4usize; // arc index for 1→3
-        eprintln!("Arc 1→3 (cost 5): y={:.4}, rc={:.4}", sol[arc_1_3], rc[arc_1_3]);
+    #[test]
+    fn pruning_removes_only_persistently_slack_cuts() {
+        let (graph, root, terminals, steiner_nodes) = build_simple_instance();
+        let mut lp = LpRelaxation::from_formulation(&graph, root, &terminals, &steiner_nodes);
+        lp.add_steiner_cut(&[2, 4]);
+        // A cut that every feasible point satisfies with room to spare.
+        lp.add_cut(&[0, 1, 2, 3, 4, 5], &[1.0; 6], 0.0);
+        lp.row_budget = 0; // force pruning to be considered every solve
 
-        // Arc 5 is 3→1 (cost 5). Should also be 0 (going backwards from terminal).
-        let arc_3_1 = 5usize;
-        eprintln!("Arc 3→1 (cost 5): y={:.4}, rc={:.4}", sol[arc_3_1], rc[arc_3_1]);
-
-        // Arc 0 is 1→2 (cost 1). Likely used in optimal (y > 0).
-        let arc_1_2 = 0usize;
-        eprintln!("Arc 1→2 (cost 1): y={:.4}, rc={:.4}", sol[arc_1_2], rc[arc_1_2]);
-
-        // Arc 2 is 2→3 (cost 1). Likely used in optimal (y > 0).
-        let arc_2_3 = 2usize;
-        eprintln!("Arc 2→3 (cost 1): y={:.4}, rc={:.4}", sol[arc_2_3], rc[arc_2_3]);
-
-        // KEY TEST: for arc at lower bound (y≈0), rc should be non-negative.
-        // If HiGHS returns NEGATIVE rc for a variable at lb, sign is flipped.
-        if sol[arc_1_3] < 1e-6 {
-            assert!(rc[arc_1_3] >= -1e-6,
-                "Arc at lower bound should have rc >= 0, got rc={:.6}. \
-                 HiGHS sign convention may be inverted!", rc[arc_1_3]);
-        }
-        if sol[arc_3_1] < 1e-6 {
-            assert!(rc[arc_3_1] >= -1e-6,
-                "Arc at lower bound should have rc >= 0, got rc={:.6}. \
-                 HiGHS sign convention may be inverted!", rc[arc_3_1]);
+        let baseline = lp.solve();
+        for _ in 0..(MAX_AGE + 2) {
+            lp.solve();
+            lp.prune_cuts();
         }
 
-        // Also verify: LP bound + rc > cost_of_any_feasible_tree means fixable.
-        // Optimal tree cost = 2 (via 1→2→3). LP bound should be close to 2.
-        // If rc(1→3) >= 3, then LP_bound + rc >= 2 + 3 = 5 >= cost of 1→3 edge alone.
-        // This confirms the fixing criterion: if LP_bound + rc > UB, fix to 0.
-        eprintln!("LP bound: {:.4}, expected ~2.0", obj);
+        assert_eq!(lp.num_cuts(), 1, "the binding Steiner cut must survive");
+        let after = lp.solve();
+        assert!((baseline - after).abs() < 1e-9, "pruning changed the bound");
     }
 }
