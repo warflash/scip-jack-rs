@@ -7,6 +7,7 @@ use scip_jack::io;
 use scip_jack::graph::{DirectedGraph, UndirectedGraph};
 use scip_jack::preprocessing::preprocess;
 use scip_jack::branch_and_bound::{BranchAndCutSolver, SolverConfig, SolveStatus};
+use scip_jack::model::verify_solution as verify;
 
 /// Known optimal values for SteinLib B-series.
 /// Source: https://steinlib.zib.de/showset.php?B
@@ -30,6 +31,7 @@ struct BenchResult {
     lp_solves: u64,
     time_secs: f64,
     status: SolveStatus,
+    verified: bool,
 }
 
 impl BenchResult {
@@ -40,11 +42,13 @@ impl BenchResult {
         self.primal >= self.optimal - 1e-4
     }
     fn print(&self) {
+        let cert = if self.verified { "V" } else { "?" };
         eprintln!(
-            "  {:>4} | opt={:>5.0} | pri={:>6.0} | dual={:>6.1} | gap={:>5.1}% | n={:>5} | cuts={:>5} | lps={:>5} | {:.2}s | {:?} | {}",
+            "  {:>4} | opt={:>5.0} | pri={:>6.0} | dual={:>6.1} | gap={:>5.1}% | n={:>5} | cuts={:>5} | lps={:>5} | {:.2}s | {:?} | {} [{}]",
             self.name, self.optimal, self.primal, self.dual, self.gap_pct,
             self.nodes, self.cuts, self.lp_solves, self.time_secs, self.status,
             if self.is_proved_optimal() { "OPTIMAL" } else if self.is_feasible() { "feasible" } else { "WRONG!" },
+            cert,
         );
     }
 }
@@ -74,7 +78,7 @@ fn solve(path: &str, time_limit: f64, preprocess_on: bool) -> BenchResult {
         (d, r, instance.terminals.clone(), 0.0)
     };
 
-    let mut solver = BranchAndCutSolver::new(directed, root, terminals);
+    let mut solver = BranchAndCutSolver::new(directed.clone(), root, terminals.clone());
     solver.config = SolverConfig {
         time_limit_secs: time_limit,
         node_limit: 50_000,
@@ -86,7 +90,16 @@ fn solve(path: &str, time_limit: f64, preprocess_on: bool) -> BenchResult {
 
     let (solution, stats) = solver.solve();
     let elapsed = start.elapsed().as_secs_f64();
-    let primal = solution.map_or(f64::INFINITY, |s| s.objective_value + lb_offset);
+
+    let mut verified = false;
+    let primal = if let Some(ref sol) = solution {
+        let vr = verify(&directed, root, &terminals, sol);
+        verified = vr.is_valid;
+        sol.objective_value + lb_offset
+    } else {
+        f64::INFINITY
+    };
+
     let dual = stats.dual_bound + lb_offset;
     let gap_pct = if primal < f64::INFINITY && dual > f64::NEG_INFINITY {
         ((primal - dual) / primal.max(1e-10)) * 100.0
@@ -96,6 +109,7 @@ fn solve(path: &str, time_limit: f64, preprocess_on: bool) -> BenchResult {
         name, optimal: known_opt, primal, dual, gap_pct,
         nodes: stats.nodes_processed, cuts: stats.cuts_added,
         lp_solves: stats.lp_solves, time_secs: elapsed, status: stats.status,
+        verified,
     }
 }
 
@@ -159,6 +173,17 @@ fn test_statistics_wired() {
     let r = solve("tests/B/b01.stp", 30.0, false);
     assert!(r.lp_solves > 0, "LP solves must be tracked, got 0");
     assert!(r.cuts > 0, "Cuts must be tracked, got 0");
+}
+
+/// Independent solution verification: connectivity, acyclicity, terminal coverage, cost.
+#[test]
+fn test_solution_verified() {
+    for name in &["b01", "b04"] {
+        let path = format!("tests/B/{}.stp", name);
+        let r = solve(&path, 30.0, true);
+        r.print();
+        assert!(r.verified, "{}: solution failed independent verification", name);
+    }
 }
 
 // === Full benchmark (run with --ignored, takes 15+ min) ===
