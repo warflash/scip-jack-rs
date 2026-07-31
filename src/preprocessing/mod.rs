@@ -1,6 +1,7 @@
 pub mod degree;
 pub mod distance;
 pub mod bottleneck;
+pub mod implications;
 
 use std::collections::{HashMap, HashSet, BinaryHeap};
 use std::cmp::Ordering;
@@ -284,10 +285,14 @@ pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (Reduc
         lb_offset += offset;
 
         let dist_removed = distance::distance_reductions(&mut rg);
+        let impl_removed = implications::implication_reductions(&mut rg);
+        // Star/implied-distance reductions disabled: the current star reduction
+        // incorrectly removes edges that are the sole path to terminals.
+        // Needs terminal-connectivity-aware analysis before re-enabling.
 
         let _bn_removed = 0u32;
 
-        if deg_removed + dist_removed == 0 {
+        if deg_removed + dist_removed + impl_removed == 0 {
             break;
         }
     }

@@ -30,7 +30,7 @@ If an external reference value \(C\) is correct and the instance is unchanged, n
 
 ## 2. Current repository problems to correct
 
-The SteinLib values are stored in [tests/steinlib_benchmark.rs](tests/steinlib_benchmark.rs), in 'B_OPTIMA'. They are reference values for the particular SteinLib B01--B18 files, not universal mathematical limits.
+The SteinLib values are stored in [tests/steinlib_benchmark.rs](tests/steinlib_benchmark.rs), in the B table and the corresponding C/D/E tables when those datasets are present. They are reference values for particular files, not universal mathematical limits.
 
 The current tests are not exact-optimality tests:
 
@@ -233,7 +233,89 @@ Unresolved
 
 Do not print 'OPTIMAL' based only on a solver enum. Print 'OPTIMAL (CERTIFIED)' only after the independent contract succeeds. If a reference value is known but no local certificate exists, print 'REFERENCE OPTIMUM', not 'OPTIMAL (PROVEN HERE)'.
 
-## 9. Agent implementation sequence
+## 9. Research-based benchmark portfolio and runtime budget
+
+### 9.1 What the B/C baseline covers
+
+The B and C families are useful, but they are not a broad sample of the Steiner tree problem. SteinLib classifies B, C, D, and E as sparse graphs with random weights, with the size increasing from roughly 50--100 nodes (B) through 500 (C), 1000 (D), and 2500 (E). Therefore, B+C gives 38 instances from one principal graph-generation regime. D and E add scale, not fundamentally different graph structure.
+
+The official catalog contains substantially different families, including complete, Euclidean, incidence-weighted, constructed, grid, and FST-preprocessed instances. Use the [SteinLib test-set catalog](https://steinlib.zib.de/testset.php) and [official download page](https://steinlib.zib.de/download.php) as the source of family names and files. Do not invent reference values from filename conventions.
+
+### 9.2 Research-backed families to add incrementally
+
+For the classical undirected Steiner tree problem, use the following order of importance:
+
+| Priority | Families | What they expose |
+| --- | --- | --- |
+| 1 | `I080`, `I160`, `I320`, `I640` | Sparse incidence-weighted graphs and preprocessing-resistant cases. These are a better test of reductions and lower bounds than merely increasing C to D/E. |
+| 1 | `PUC`, `SP`, and the classical `PUCN` variants | Constructed difficult graphs, unweighted degeneracy, many equal-cost alternatives, and unusual connectivity patterns. |
+| 1 | `GAPS` | Synthetic instances based on Steiner LP integrality-gap constructions; directly stresses directed-cut separation, dual ascent, and the quality of lower bounds. |
+| 2 | `MC`, `X`, `P4E`, `P4Z`, `P6E`, `P6Z` | Dense or complete graphs, Euclidean weights, and a geometry-versus-random-weight control. These prevent the algorithm from overfitting sparse random graphs. |
+| 2 | `1R`, `2R` | Two- and three-dimensional cross-grid structure, geometric bottlenecks, and repeated local motifs. |
+| 2 | Vienna and Copenhagen14 | Real telecommunications structure and industrial/geometric instances transformed into classical graph instances. |
+| 3 | `ES500FST`, `ES1000FST`, `ES10000FST`, `TSPFST` | Large rectilinear/geometric graphs for scalability and FST-related reductions. |
+| 3 | `TSPEFST`, `R25KEFST`, `R50KEFST`, `R100KEFST` | Extreme-scale Euclidean-derived cases, including instances with up to 100,000 terminals. These are stress tests, not ordinary correctness tests. |
+
+The PACE 2018 Steiner Tree corpus is an especially useful curated expansion. Its organizers selected instances from SteinLib, PUC, GAPS, Vienna, VLSI/grid, industrial, and low-treewidth sources. They also specifically included `E`, `I160`, `I640`, and `PUC` cases intended to resist preprocessing. See the [PACE challenge description](https://pacechallenge.org/2018/steiner-tree/) and [PACE report](https://pacechallenge.org/files/PACE18-report.pdf).
+
+The [DIMACS 11 benchmark collection](https://dimacs11.zib.de/downloads.html) should be used for historical comparability with SCIPJack and other exact solvers. Its classical SPG section includes SteinLib, Vienna, PUC-derived instances, LP-gap constructions, Copenhagen-derived graphs, and EFST geometric transformations. For EFST, prefer the floating-point version when possible: the integer version scales and rounds geometric distances, which can change the numerical problem. DIMACS publishes best-known bounds and identifies cases where optimality is not proven; those cases must be evaluated by primal/dual gap, not exact-equality assertions.
+
+### 9.3 Variant separation
+
+Do not feed every SteinLib or DIMACS family into the plain undirected Steiner-tree certification path. Keep separate suites for:
+
+1. `GENE`, which is directed Steiner arborescence;
+2. `Relay`, which is hop-constrained directed Steiner;
+3. `WRP3` and `WRP4`, which are group Steiner instances;
+4. PCSTP/RPCSTP, degree-constrained, node-weighted, stochastic, and revenue/budget/hop-constrained variants.
+
+These are valuable future targets, but a plain SPG solver must not claim correctness on them merely because they use the STP file format.
+
+### 9.4 The always-on benchmark budget
+
+The normal agent/CI loop must have a hard wall-clock budget of approximately ten minutes. Reserve about eight minutes for solver work and two minutes for process startup, parsing, reporting, and machine variance. A configured per-instance solver timeout is not sufficient: the benchmark runner must also enforce a global timeout.
+
+Use three layers:
+
+#### Tier 0: smoke test, target less than one minute
+
+Run a small fixed set of cheap instances covering at least one small sparse case, one medium case, and one independently verified solution. This catches parser, preprocessing, objective-offset, and certificate regressions immediately.
+
+#### Tier 1: default improvement gate, target less than ten minutes
+
+Keep the existing quick B/C/D coverage and add one representative from each newly adopted family: one `I*` case, one `PUC` or `SP` case, one `GAPS` case, and one dense/geometric case. Select representatives by measured runtime, not by filename. Cap each case individually and enforce the global eight-minute solve budget.
+
+The default gate should be fixed and deterministic. It should not silently grow whenever a new dataset is downloaded. If a new representative pushes the suite over budget, replace an overlapping case or move it to a targeted pack.
+
+#### Tier 2: rotating targeted packs, each capped below ten minutes
+
+Run one targeted pack when an algorithmic change is relevant:
+
+1. **Scale pack:** B/C/D/E representatives, then `I160`/`I640` representatives.
+2. **Reduction and LP pack:** `PUC`, `SP`, and `GAPS` representatives.
+3. **Topology pack:** `MC`, `X`, `P4E/P4Z`, `P6E/P6Z`, and grid representatives.
+4. **Realism pack:** Vienna and Copenhagen14 representatives.
+5. **Large-graph pack:** `ES500FST`/`ES1000FST` or one TSP/EFST representative.
+
+The full family archives may be retained for research, but the full B--E corpus and extreme EFST families should be opt-in campaigns rather than part of every iteration. A rotating pack gives broad coverage without turning every mathematical improvement into an hours-long experiment.
+
+When a case exceeds its cap, report `BudgetExceeded` with its incumbent, lower bound, and elapsed time. Do not report it as failed correctness, and do not convert an unresolved bound gap into an optimality claim.
+
+### 9.5 How to use the budget to drive improvements
+
+Every algorithmic change should run:
+
+1. the fixed Tier 1 gate;
+2. the one Tier 2 pack that targets the changed mathematics;
+3. the same benchmark configuration before and after the change.
+
+Record at least time to first feasible solution, final primal bound (P), verified lower bound (L), certified gap, branch-and-bound nodes, LP solves, cuts, preprocessing reduction, and peak memory. Report medians and worst cases by family; a single total runtime can hide a regression on the hard structural class that motivated the change.
+
+Promote a targeted case into Tier 1 only when it reveals a regression or covers a mathematical property not already represented. This keeps the default loop short while steadily increasing its scientific coverage.
+
+The SteinLib site also warns that some reference solutions were collected from papers, typed by hand, or extracted automatically, and that it cannot guarantee every value. Therefore, reference values remain useful regression targets, but only independently checked primal and lower-bound certificates may receive `CertifiedOptimal` status.
+
+## 10. Agent implementation sequence
 
 ### Phase 1: inventory and naming
 
@@ -274,7 +356,7 @@ Do not print 'OPTIMAL' based only on a solver enum. Print 'OPTIMAL (CERTIFIED)' 
 4. Add a command that replays certificates without invoking the optimizer.
 5. Run the full benchmark suite in a clean checkout.
 
-## 10. Definition of done
+## 11. Definition of done
 
 This work is complete only when all of the following are true:
 
