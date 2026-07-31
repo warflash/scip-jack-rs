@@ -123,11 +123,45 @@ impl LpRelaxation {
             pb.add_row(..=1.0, &[(cols[fwd], 1.0), (cols[rev], 1.0)]);
         }
 
+        // TF singleton cuts (Terminal-Free degree constraints):
+        // For each Steiner node v and each incident edge e:
+        //   sum of arc flows on OTHER incident edges >= arc flow on e
+        // This prevents terminal-free nodes from having "dead-end" fractional
+        // flow, enforcing the minimal-tree structure on the LP relaxation.
+        for &v in steiner_nodes {
+            let in_arcs: Vec<ArcId> = graph.delta_minus(v).iter().map(|&(_, a)| a).collect();
+            let out_arcs: Vec<ArcId> = graph.delta_plus(v).iter().map(|&(_, a)| a).collect();
+            let all_arcs: Vec<ArcId> = in_arcs.iter().chain(out_arcs.iter()).copied().collect();
+            if all_arcs.len() < 4 { continue; }
+
+            let mut incident_edges: Vec<usize> = all_arcs.iter()
+                .map(|&a| (a as usize) / 2)
+                .collect();
+            incident_edges.sort();
+            incident_edges.dedup();
+
+            for &edge_idx in &incident_edges {
+                let fwd = (2 * edge_idx) as ArcId;
+                let rev = (2 * edge_idx + 1) as ArcId;
+
+                let mut row: Vec<(Col, f64)> = Vec::new();
+                for &a in &all_arcs {
+                    if a == fwd || a == rev {
+                        row.push((cols[a as usize], -1.0));
+                    } else {
+                        row.push((cols[a as usize], 1.0));
+                    }
+                }
+                if !row.is_empty() {
+                    pb.add_row(0.0.., &row);
+                }
+            }
+        }
+
         let base_rows = pb.num_rows();
 
         let mut model = pb.optimise(Sense::Minimise);
         model.set_option("output_flag", false);
-        model.set_option("presolve", "off");
 
         let var_lb = vec![0.0; num_arcs as usize];
         let var_ub = vec![1.0; num_arcs as usize];
