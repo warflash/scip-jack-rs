@@ -73,6 +73,10 @@ pub struct ReduceConfig {
     pub heuristic_starts: usize,
     /// Maximum tightening rounds.
     pub max_rounds: u32,
+    /// Cost of a solution already known, used as the elimination cutoff from the
+    /// first round. Feeding back an incumbent found later by branch-and-cut lets
+    /// the reduced costs eliminate far more than the heuristic's own bound would.
+    pub initial_upper_bound: Cost,
     pub deadline: Option<Instant>,
     pub verbose: bool,
 }
@@ -83,6 +87,7 @@ impl Default for ReduceConfig {
             roots_per_round: 4,
             heuristic_starts: 12,
             max_rounds: 8,
+            initial_upper_bound: Cost::INFINITY,
             deadline: None,
             verbose: false,
         }
@@ -112,7 +117,7 @@ pub fn tighten(
     let mut graph = graph;
     let mut terminals = terminals;
     let mut lower_bound: Cost = 0.0;
-    let mut upper_bound = Cost::INFINITY;
+    let mut upper_bound = config.initial_upper_bound;
     let mut certificate: Option<DualAscentResult> = None;
     let mut incumbent_arcs: Option<Vec<u32>> = None;
     let mut rounds = 0;

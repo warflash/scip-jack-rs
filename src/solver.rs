@@ -89,13 +89,56 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         return r;
     }
 
-    // Ascend-and-prune.
-    let reduce_config = ReduceConfig {
-        deadline: Some(deadline),
-        verbose: config.verbose,
-        ..ReduceConfig::default()
-    };
-    let reduced = tighten(work_graph, terminals, &reduce_config);
+    // Ascend-and-prune, then branch-and-cut, then — if the search improved the
+    // incumbent without proving it — ascend-and-prune again with that better
+    // cutoff. The heuristic's own bound is often several percent off, and the
+    // reduced-cost eliminations scale with `UB - LB`, so a tighter cutoff
+    // discovered during the search can collapse the instance on a second pass.
+    let mut incoming_ub = Cost::INFINITY;
+    let mut best: Option<SolveResult> = None;
+
+    for pass in 0..2 {
+        let reduce_config = ReduceConfig {
+            deadline: Some(deadline),
+            verbose: config.verbose,
+            initial_upper_bound: incoming_ub,
+            ..ReduceConfig::default()
+        };
+        let reduced = tighten(work_graph.clone(), terminals.clone(), &reduce_config);
+        // Cap the first search so an unproved-but-improved incumbent still
+        // leaves time for the second tightening pass to exploit it.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let pass_deadline = if pass == 0 {
+            Instant::now() + remaining.mul_f64(0.4)
+        } else {
+            deadline
+        };
+        let outcome = finish(reduced, &config, start, pass_deadline);
+        let improved = best.as_ref().is_none_or(|b| outcome.primal_bound < b.primal_bound);
+        if improved {
+            best = Some(outcome.clone());
+        }
+        let done = best.as_ref().map(|b| b.status == SolveStatus::Optimal).unwrap_or(false);
+        if done || Instant::now() >= deadline {
+            break;
+        }
+        let Some(b) = best.as_ref() else { break };
+        if !b.primal_bound.is_finite() || b.primal_bound >= incoming_ub {
+            break;
+        }
+        incoming_ub = b.primal_bound;
+    }
+
+    return best.unwrap_or_else(|| trivial_result(start, Cost::INFINITY, SolveMethod::AscendAndPrune));
+}
+
+/// Finish a tightened instance: exact DP when cheap, otherwise branch-and-cut.
+fn finish(
+    reduced: crate::root_reduce::Reduced,
+    config: &SolverConfig,
+    start: Instant,
+    deadline: Instant,
+) -> SolveResult {
 
     if config.verbose {
         eprintln!(
@@ -124,8 +167,8 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         };
     }
 
-    work_graph = reduced.graph;
-    terminals = reduced.terminals;
+    let work_graph = reduced.graph;
+    let terminals = reduced.terminals;
     let root = reduced.root;
     let root_lower_bound = reduced.lower_bound;
     let root_upper_bound = reduced.upper_bound;
@@ -144,7 +187,7 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     let directed = DirectedGraph::from_undirected(&work_graph);
     let mut solver = BranchAndCutSolver::new(directed.clone(), root, terminals.clone());
     let remaining = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
-    solver.config = SolverConfig { time_limit_secs: remaining, ..config };
+    solver.config = SolverConfig { time_limit_secs: remaining, ..config.clone() };
     solver.seed_bounds(root_lower_bound, root_upper_bound);
 
     let (solution, stats) = solver.solve();

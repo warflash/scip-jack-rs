@@ -225,7 +225,10 @@ fn main() {
             }
 
             ordinal += 1;
-            let time_limit_secs = remaining_secs;
+            // Cap each instance so one hard case cannot eat the whole campaign.
+            // The global deadline alone is not enough: it is only consulted
+            // between instances.
+            let time_limit_secs = remaining_secs.min(budget_secs / 4.0);
             let path = format!("tests/{series}/{name}.stp");
             println!(
                 "START {ordinal:02}/{total_cases} {series}/{name} ({time_limit_secs:.1}s remaining)"
