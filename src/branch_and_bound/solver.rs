@@ -64,6 +64,8 @@ pub struct BranchAndCutSolver {
     pseudo_costs: PseudoCosts,
     /// Global cut pool: Steiner cuts discovered at any node, valid everywhere.
     global_cut_pool: Vec<PoolCut>,
+    /// Canonical signatures for deduplication (sorted arc list as key).
+    cut_signatures: HashSet<Vec<ArcId>>,
     /// Arcs fixed to 0 by reduced-cost fixing (valid globally).
     fixed_zero_arcs: HashSet<ArcId>,
     /// Running statistics
@@ -96,6 +98,7 @@ impl BranchAndCutSolver {
             branching_rule: BranchingRule::default_reliability(),
             pseudo_costs: PseudoCosts::new(num_arcs),
             global_cut_pool: Vec::new(),
+            cut_signatures: HashSet::new(),
             fixed_zero_arcs: HashSet::new(),
             total_cuts_added: 0,
             total_lp_solves: 0,
@@ -332,11 +335,15 @@ impl BranchAndCutSolver {
             }
 
             for cut in &cuts {
-                lp.add_steiner_cut(&cut.cut_arcs);
-                self.global_cut_pool.push(PoolCut {
-                    cut_arcs: cut.cut_arcs.clone(),
-                });
-                self.total_cuts_added += 1;
+                let mut sig = cut.cut_arcs.clone();
+                sig.sort();
+                if self.cut_signatures.insert(sig) {
+                    lp.add_steiner_cut(&cut.cut_arcs);
+                    self.global_cut_pool.push(PoolCut {
+                        cut_arcs: cut.cut_arcs.clone(),
+                    });
+                    self.total_cuts_added += 1;
+                }
             }
         }
 
