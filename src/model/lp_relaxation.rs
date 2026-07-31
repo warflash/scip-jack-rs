@@ -38,8 +38,6 @@ struct CutRow {
 
 /// A cut is considered slack when its activity is this far from the binding side.
 const SLACK_EPS: f64 = 1e-6;
-/// Cuts slack for this many consecutive solves become removable.
-const MAX_AGE: u32 = 12;
 
 pub struct LpRelaxation {
     pub num_vars: u32,
@@ -259,7 +257,12 @@ impl LpRelaxation {
         // Budget the *separated* rows against the variable count. Sizing this too
         // tightly evicts useful Steiner cuts that then have to be rediscovered by
         // max-flow, which costs far more than the rows saved.
-        let row_budget = structural_count + (4 * num_arcs as usize).max(4000);
+        // Keep the cut pool proportional to the model. A flat floor of a few
+        // thousand rows is no constraint at all on a 400-arc instance, and the
+        // pool grows to several times the number of variables before anything is
+        // evicted — which is exactly where the LP starts costing milliseconds
+        // per solve on a problem that should take microseconds.
+        let row_budget = structural_count + (2 * num_arcs as usize).max(1000);
         let lazy_count = b.lazy.len();
 
         let var_lb = vec![0.0; num_arcs as usize];
@@ -313,6 +316,12 @@ impl LpRelaxation {
 
         let mut model = pb.optimise(Sense::Minimise);
         model.set_option("output_flag", false);
+        // Presolve runs on every `run()` call, so with a persistent model it is
+        // paid once per cut round rather than once per problem. The rows added
+        // between solves are a handful against a basis that is already optimal
+        // for everything else, which is precisely the case dual simplex handles
+        // in a few pivots and presolve cannot improve on.
+        model.set_option("presolve", "off");
         self.cols = cols;
         self.model = Some(model);
         self.rebuilds += 1;
@@ -461,17 +470,48 @@ impl LpRelaxation {
         // part of the relaxation rather than optional strengthening, and evicting
         // them only to re-separate them a few solves later costs both the extra
         // solves and a weaker bound in between.
-        let before = self.cuts.len();
-        self.cuts.retain(|c| c.age < MAX_AGE || c.lazy_index.is_some());
-        let removed = before - self.cuts.len();
-        if removed > 0 {
-            // Rebuilding costs the simplex basis, so it only happens when cuts
-            // were actually dropped. If nothing is stale we simply re-check on
-            // the next solve; the activity scan is negligible next to a solve.
-            self.rebuild();
-            self.status = LpStatus::NotSolved;
+        let protected = self.structural.len()
+            + self.cuts.iter().filter(|c| c.lazy_index.is_some()).count();
+        // Prune down to a low-water mark rather than to the budget itself.
+        // Evicting only the rows that happen to be over the line leaves the model
+        // back over it after the next few separations, so every solve triggers a
+        // rebuild and every rebuild throws away the simplex basis: on PACE
+        // instance099 that was 163 rebuilds in 299 solves and 12 ms a solve on a
+        // 428-variable problem.
+        let keep = self.row_budget.saturating_sub(protected) / 2;
+
+        let mut evictable: Vec<(u32, usize)> = self
+            .cuts
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.lazy_index.is_none() && c.age > 0)
+            .map(|(i, c)| (c.age, i))
+            .collect();
+        if evictable.is_empty() {
+            return 0;
         }
-        removed
+        // Oldest first: those have gone longest without binding.
+        evictable.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let live = self.cuts.len() - evictable.len();
+        let drop_count = evictable.len().saturating_sub(keep.saturating_sub(live.min(keep)));
+        if drop_count == 0 {
+            return 0;
+        }
+        let mut doomed = vec![false; self.cuts.len()];
+        for &(_, i) in evictable.iter().take(drop_count) {
+            doomed[i] = true;
+        }
+        let mut i = 0;
+        self.cuts.retain(|_| {
+            let keep_it = !doomed[i];
+            i += 1;
+            keep_it
+        });
+
+        self.rebuild();
+        self.status = LpStatus::NotSolved;
+        drop_count
     }
 
     pub fn solve(&mut self) -> f64 {
@@ -676,7 +716,9 @@ mod tests {
         lp.row_budget = 0; // force pruning to be considered every solve
 
         let baseline = lp.solve();
-        for _ in 0..(MAX_AGE + 2) {
+        // Eviction ranks by age and prunes down to a low-water mark, so a single
+        // round is enough once the slack cut has gone one solve without binding.
+        for _ in 0..3 {
             lp.solve();
             lp.prune_cuts();
         }

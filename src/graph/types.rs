@@ -56,3 +56,27 @@ impl fmt::Display for SteinerInstance {
         )
     }
 }
+
+/// Whether every cost in a collection is an integer.
+///
+/// When it is, every feasible objective value is an integer too, so any dual
+/// bound may be rounded *up* to the next integer and any primal bound down.
+/// That is worth a great deal on the instances whose costs are in the millions:
+/// a relative gap tolerance can never separate 3,000,569 from 3,000,573, but
+/// integrality closes the last unit directly.
+pub fn costs_are_integral<I: IntoIterator<Item = Cost>>(costs: I) -> bool {
+    costs.into_iter().all(|c| c.is_finite() && (c - c.round()).abs() < 1e-9)
+}
+
+/// Round a dual bound up to the next integer when the objective is integral.
+///
+/// The epsilon absorbs the LP's own error: a true bound of 74 can come back as
+/// 74.0000000003, and rounding that to 75 would be unsound.
+#[inline]
+pub fn tighten_dual(bound: Cost, integral: bool) -> Cost {
+    if integral && bound.is_finite() {
+        (bound - 1e-6).ceil()
+    } else {
+        bound
+    }
+}

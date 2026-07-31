@@ -38,7 +38,7 @@ use std::time::Instant;
 use crate::graph::algorithms::{
     dual_ascent_masked, reduced_cost_distances, reduced_cost_fixings, ArcIndex, DualAscentResult,
 };
-use crate::graph::{Cost, DirectedGraph, NodeId, NodeType, UndirectedGraph};
+use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, NodeId, NodeType, UndirectedGraph};
 use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
 use crate::heuristics::sph::{shortest_path_heuristic, SphResult, SphWorkspace};
 use crate::preprocessing::preprocess_until;
@@ -146,7 +146,10 @@ pub fn tighten(
 
         let outcome = round(&graph, &terminals, config, upper_bound);
 
-        lower_bound = lower_bound.max(outcome.lower_bound);
+        // With integral costs every tree costs an integer, so a fractional dual
+        // bound can be lifted to the next one.
+        let integral = costs_are_integral(graph.edges.iter().map(|e| e.cost));
+        lower_bound = lower_bound.max(tighten_dual(outcome.lower_bound, integral));
         if outcome.upper_bound < upper_bound {
             upper_bound = outcome.upper_bound;
             incumbent_arcs = outcome.incumbent_arcs;
@@ -267,7 +270,7 @@ fn round(
     let mut incumbent_arcs: Option<Vec<u32>> = None;
     let mut pool: Vec<(Cost, Vec<NodeId>)> = Vec::new();
 
-    let mut polish = |r: SphResult,
+    let polish = |r: SphResult,
                       root: NodeId,
                       kws: &mut KeyPathWorkspace,
                       ws: &mut SphWorkspace|

@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::branch_and_bound::{BranchAndCutSolver, SolveStatus, SolverConfig};
 use crate::graph::algorithms::dreyfus_wagner;
-use crate::graph::{Cost, DirectedGraph, SteinerInstance, UndirectedGraph};
+use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, SteinerInstance, UndirectedGraph};
 use crate::io;
 use crate::model::verify_solution;
 use crate::preprocessing::preprocess_until;
@@ -294,10 +294,11 @@ fn finish(
     // error: reduced-cost elimination deletes everything that cannot appear in a
     // solution *strictly cheaper than the incumbent*, so running out of feasible
     // solutions is exactly the proof that the incumbent is optimal.
+    let integral = costs_are_integral(directed.arcs.iter().map(|a| a.cost));
     let dual = if stats.status == SolveStatus::Infeasible && primal.is_finite() {
         primal
     } else {
-        stats.dual_bound.max(root_lower_bound).min(primal)
+        tighten_dual(stats.dual_bound.max(root_lower_bound), integral).min(primal)
     };
     let gap_pct = if primal.is_finite() && dual > f64::NEG_INFINITY {
         ((primal - dual) / primal.abs().max(1e-10)) * 100.0

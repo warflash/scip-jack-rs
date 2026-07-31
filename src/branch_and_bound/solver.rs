@@ -1,14 +1,16 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use crate::graph::{DirectedGraph, NodeId, ArcId, Cost};
+use crate::graph::{costs_are_integral, tighten_dual, DirectedGraph, NodeId, ArcId, Cost};
 use crate::graph::algorithms::{
     dual_ascent, dual_ascent_masked, reduced_cost_distances, reduced_cost_fixable_arcs,
     reduced_cost_fixings, ArcIndex,
 };
 use crate::model::{LpRelaxation, SteinerSolution};
 use crate::separation::{FlowCutSeparator, CycleCutSeparator, PartitionSeparator, TfCutSeparator};
-use crate::heuristics::{ConstructiveHeuristic, LocalSearchHeuristic, RecombinationHeuristic, PrimalHeuristic};
+use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
+use crate::heuristics::sph::{mst_prune, shortest_path_heuristic, SphResult, SphWorkspace};
+use crate::heuristics::{RecombinationHeuristic, PrimalHeuristic};
 
 use super::tree::{BranchAndBoundTree, BbNode, SolveStatus};
 use super::branching::{BranchingRule, PseudoCosts};
@@ -82,11 +84,19 @@ pub struct BranchAndCutSolver {
     recombination: RecombinationHeuristic,
     /// CSR arc index, reused by every node-level dual ascent.
     arc_index: Option<ArcIndex>,
+    /// Terminal membership by node id, for the primal heuristics.
+    is_terminal: Vec<bool>,
+    /// Heuristic scratch space, kept so the node heuristics allocate nothing.
+    sph_ws: Option<SphWorkspace>,
+    kp_ws: Option<KeyPathWorkspace>,
     /// Running statistics
     total_cuts_added: u64,
     total_lp_solves: u64,
     /// Nodes pruned by the dual-ascent bound without solving an LP.
     da_prunes: u64,
+    /// Every arc cost is an integer, so every feasible objective value is too
+    /// and dual bounds may be rounded up.
+    integral_objective: bool,
     /// Wall-clock stop. Checked inside the cut loop as well as between nodes:
     /// a root node runs a hundred cut rounds, each of which may solve dozens of
     /// LPs, so a between-nodes check alone lets one node overrun the budget by
@@ -107,6 +117,11 @@ impl BranchAndCutSolver {
             .collect();
 
         let num_arcs = graph.num_arcs();
+        let integral_objective = costs_are_integral(graph.arcs.iter().map(|a| a.cost));
+        let mut is_terminal = vec![false; graph.num_nodes as usize + 1];
+        for &t in &terminals {
+            is_terminal[t as usize] = true;
+        }
         let recombination = RecombinationHeuristic::new(
             graph.clone(), root, terminals.clone(),
         );
@@ -127,9 +142,13 @@ impl BranchAndCutSolver {
             fixed_zero_arcs: HashSet::new(),
             recombination,
             arc_index: None,
+            is_terminal,
+            sph_ws: None,
+            kp_ws: None,
             total_cuts_added: 0,
             total_lp_solves: 0,
             da_prunes: 0,
+            integral_objective,
             deadline: None,
         }
     }
@@ -186,7 +205,10 @@ impl BranchAndCutSolver {
             start_time + std::time::Duration::from_secs_f64(self.config.time_limit_secs.max(0.0)),
         );
 
-        self.arc_index = Some(ArcIndex::new(&self.graph));
+        let idx = ArcIndex::new(&self.graph);
+        self.sph_ws = Some(SphWorkspace::new(idx.num_nodes()));
+        self.kp_ws = Some(KeyPathWorkspace::new(idx.num_nodes()));
+        self.arc_index = Some(idx);
 
         // No construction heuristic here. Ascend-and-prune has already run a
         // far stronger primal search — many guided shortest-path starts, key-path
@@ -194,8 +216,9 @@ impl BranchAndCutSolver {
         // `seed_bounds`/`seed_incumbent`. Repeating a weaker search would only
         // burn the time budget before the first LP is ever solved.
         let da_result = dual_ascent(&self.graph, self.root, &self.terminals);
-        if da_result.lower_bound > self.tree.global_dual_bound {
-            self.tree.global_dual_bound = da_result.lower_bound;
+        let da_bound = self.lift(da_result.lower_bound);
+        if da_bound > self.tree.global_dual_bound {
+            self.tree.global_dual_bound = da_bound;
         }
         self.da_reduced_costs = da_result.reduced_costs.clone();
 
@@ -329,15 +352,17 @@ impl BranchAndCutSolver {
                 .base_lp
                 .as_ref()
                 .map_or((0.0, 0), |lp| (lp.solve_time_secs, lp.num_constraints()));
+            let rebuilds = self.base_lp.as_ref().map_or(0, |lp| lp.rebuilds);
             eprintln!(
                 "[B&C] Done. Status: {:?} | Nodes: {} (DA-pruned {}) | Cuts: {} | LPs: {} | Time: {:.2}s | \
-                 LP time: {:.2}s ({:.1}ms/solve, {} rows) | Gap: {:.6}%",
+                 LP time: {:.2}s ({:.1}ms/solve, {} rows, {} rebuilds) | Gap: {:.6}%",
                 self.tree.status, self.tree.nodes_processed, self.da_prunes,
                 self.total_cuts_added, self.total_lp_solves,
                 elapsed,
                 lp_secs,
                 if self.total_lp_solves > 0 { lp_secs * 1000.0 / self.total_lp_solves as f64 } else { 0.0 },
                 rows,
+                rebuilds,
                 self.tree.gap() * 100.0,
             );
         }
@@ -392,6 +417,11 @@ impl BranchAndCutSolver {
         (da.lower_bound, fix.arcs)
     }
 
+    /// Lift a dual bound to the next integer when the objective is integral.
+    fn lift(&self, bound: f64) -> f64 {
+        tighten_dual(bound, self.integral_objective)
+    }
+
     fn out_of_time(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
     }
@@ -404,6 +434,7 @@ impl BranchAndCutSolver {
         // Cheap dual bound first: if the ascent already reaches the cutoff there
         // is no reason to touch the LP at all.
         let (da_bound, da_fixable) = self.node_dual_ascent(&fixings);
+        let da_bound = self.lift(da_bound);
         if da_bound >= self.tree.global_primal_bound - self.config.gap_tolerance {
             self.tree.nodes[node_id as usize].dual_bound = da_bound;
             self.da_prunes += 1;
@@ -426,10 +457,14 @@ impl BranchAndCutSolver {
         let mut lp_solution: Vec<f64> = Vec::new();
         let mut node_dual_bound = f64::NEG_INFINITY;
 
+        // Cuts separated anywhere are globally valid and stay in the pool, so
+        // the root is where it pays to iterate. Deep in the tree the bound is
+        // moved much more cheaply by branching than by another twenty rounds of
+        // separation against an LP that costs milliseconds a solve.
         let max_rounds = if is_root_node {
             self.config.cut_rounds_per_node * 5
         } else {
-            self.config.cut_rounds_per_node
+            (self.config.cut_rounds_per_node / 6).max(2)
         };
 
         let mut separator = FlowCutSeparator::new(
@@ -452,7 +487,7 @@ impl BranchAndCutSolver {
         let mut prev_bound = f64::NEG_INFINITY;
         let mut stall_rounds = 0u32;
 
-        for _round in 0..max_rounds {
+        for _round in 0..max_rounds as usize {
             if self.out_of_time() {
                 break;
             }
@@ -493,7 +528,7 @@ impl BranchAndCutSolver {
             // monotonically and the LP comes to dominate the whole runtime.
             self.base_lp.as_mut().unwrap().prune_cuts();
 
-            node_dual_bound = obj;
+            node_dual_bound = self.lift(obj);
 
             if node_dual_bound >= self.tree.global_primal_bound - self.config.gap_tolerance {
                 return NodeResult::Pruned;
@@ -520,6 +555,37 @@ impl BranchAndCutSolver {
             }
 
             lp_solution = self.base_lp.as_ref().unwrap().get_solution().to_vec();
+
+            // Round the current point into a tree as the relaxation tightens,
+            // not only once the node is finished. On the instances where the
+            // root consumes the whole budget the node-level call would fire
+            // exactly once, against the weakest LP point of the run, and the
+            // incumbent is what every reduced-cost elimination is measured
+            // against.
+            if _round % self.config.heuristic_frequency.max(1) as usize == 0 {
+                let candidate = lp_guided_tree(
+                    self.arc_index.as_ref().unwrap(),
+                    &self.fixed_zero_arcs,
+                    &self.terminals,
+                    &self.is_terminal,
+                    self.root,
+                    &lp_solution,
+                    self.sph_ws.as_mut().unwrap(),
+                    self.kp_ws.as_mut().unwrap(),
+                );
+                if let Some(sol) = candidate {
+                    if sol.objective_value < self.tree.global_primal_bound - 1e-9 {
+                        self.recombination.add_solution(sol.clone());
+                        self.tree.update_primal(sol);
+                        self.tree.prune();
+                        if node_dual_bound
+                            >= self.tree.global_primal_bound - self.config.gap_tolerance
+                        {
+                            return NodeResult::Pruned;
+                        }
+                    }
+                }
+            }
 
             let flow_cuts = separator.find_violated_cuts(&lp_solution);
             let cycle_cuts = if no_cycle {
@@ -707,6 +773,7 @@ impl BranchAndCutSolver {
                 loop {
                     let before = self.fixed_zero_arcs.len();
                     let (da_bound, da_fixable) = self.node_dual_ascent(&[]);
+                    let da_bound = self.lift(da_bound);
                     if da_bound > self.tree.global_dual_bound {
                         self.tree.global_dual_bound = da_bound;
                     }
@@ -820,33 +887,116 @@ impl BranchAndCutSolver {
         best_var
     }
 
-    fn run_lp_heuristic(&self, lp_solution: &[f64]) -> Option<SteinerSolution> {
-        let mut constructive = ConstructiveHeuristic::new(
-            self.graph.clone(),
+    fn run_lp_heuristic(&mut self, lp_solution: &[f64]) -> Option<SteinerSolution> {
+        let sol = lp_guided_tree(
+            self.arc_index.as_ref()?,
+            &self.fixed_zero_arcs,
+            &self.terminals,
+            &self.is_terminal,
             self.root,
-            self.terminals.clone(),
-        );
-        constructive = constructive.with_lp_weights(lp_solution.to_vec());
+            lp_solution,
+            self.sph_ws.as_mut()?,
+            self.kp_ws.as_mut()?,
+        )?;
+        self.verify_solution(&sol).then_some(sol)
+    }
+}
 
-        let sol = constructive.run()?;
-        if !self.verify_solution(&sol) {
+/// Turn the fractional LP point into a tree.
+///
+/// Two operators, both driven by the same solution:
+///
+/// 1. **Support rebuild.** Take every vertex the LP puts any weight on and
+///    return the pruned minimum spanning tree of the induced subgraph. When the
+///    relaxation is nearly integral — which, at the root of these instances, it
+///    usually is — this alone lands on the optimum.
+/// 2. **Guided growth.** Run the shortest-path heuristic with arc weights
+///    `c_a (1 - y_a)`, so corridors the LP has committed to are nearly free and
+///    the greedy growth follows them, then improve the result by key-path
+///    exchange.
+///
+/// Both are scored with the true arc costs, never with the search weights.
+/// This is a free function rather than a method so that it can run inside the
+/// cut loop, where the separators already hold a borrow of the graph.
+#[allow(clippy::too_many_arguments)]
+fn lp_guided_tree(
+    idx: &ArcIndex,
+    fixed_zero: &HashSet<ArcId>,
+    terminals: &[NodeId],
+    is_terminal: &[bool],
+    root: NodeId,
+    lp_solution: &[f64],
+    sws: &mut SphWorkspace,
+    kws: &mut KeyPathWorkspace,
+) -> Option<SteinerSolution> {
+        let num_arcs = idx.num_arcs();
+        let mut active = vec![true; num_arcs];
+        for &a in fixed_zero {
+            active[a as usize] = false;
+        }
+
+        let mut support: Vec<NodeId> = vec![root];
+        let mut weights: Vec<Cost> = Vec::with_capacity(num_arcs);
+        for a in 0..num_arcs {
+            let arc = a as ArcId;
+            let c = idx.cost(arc);
+            let y = lp_solution.get(a).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            if y > 1e-6 && active[a] {
+                support.push(idx.tail(arc));
+                support.push(idx.head(arc));
+            }
+            weights.push(c * (1.0 - y));
+        }
+        support.sort_unstable();
+        support.dedup();
+
+        let mut best: Option<SphResult> = None;
+        let offer = |r: SphResult, best: &mut Option<SphResult>| {
+            if best.as_ref().is_none_or(|b| r.cost < b.cost) {
+                *best = Some(r);
+            }
+        };
+
+        if support.len() > 1 {
+            let rebuilt = mst_prune(idx, &active, root, &support, is_terminal, sws);
+            if !rebuilt.arcs.is_empty() {
+                offer(rebuilt, &mut best);
+            }
+        }
+
+        // A spread of starts, capped: this runs many times per node.
+        let starts = 4.min(terminals.len()).max(1);
+        for i in 0..starts {
+            let start = terminals[i * terminals.len() / starts];
+            if let Some(r) = shortest_path_heuristic(
+                idx, &active, &weights, root, start, terminals, is_terminal, sws,
+            ) {
+                offer(r, &mut best);
+            }
+        }
+
+        if let Some(current) = best.take() {
+            let improved =
+                key_path_exchange(idx, &active, root, &current, is_terminal, 8, kws, sws);
+            best = Some(improved.unwrap_or(current));
+        }
+
+        let r = best?;
+        if r.arcs.is_empty() {
             return None;
         }
-
-        let mut ls = LocalSearchHeuristic::new(
-            self.graph.clone(),
-            self.root,
-            self.terminals.clone(),
-        );
-        ls.max_iterations = 10;
-        ls.set_incumbent(sol.clone());
-
-        match ls.run() {
-            Some(improved) if improved.objective_value < sol.objective_value
-                && self.verify_solution(&improved) => Some(improved),
-            _ => Some(sol),
+        let mut nodes: Vec<NodeId> = Vec::with_capacity(r.arcs.len() + 1);
+        nodes.push(root);
+        for &a in &r.arcs {
+            nodes.push(idx.tail(a));
+            nodes.push(idx.head(a));
         }
-    }
+        nodes.sort_unstable();
+        nodes.dedup();
+        Some(SteinerSolution::new(r.arcs, nodes, r.cost))
+}
+
+impl BranchAndCutSolver {
 
     fn is_integer_solution(&self, solution: &[f64]) -> bool {
         let num_arcs = self.graph.num_arcs() as usize;
