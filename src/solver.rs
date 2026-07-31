@@ -124,8 +124,14 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     let mut best: Option<SolveResult> = None;
 
     for pass in 0..2 {
+        // Split the remaining budget explicitly. Tightening will happily use
+        // every second it is given — on SteinLib e13 two rounds of it consumed a
+        // twenty-second limit whole and the search was handed 0.02s — so it gets
+        // a share, not the whole clock.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let reduce_deadline = Instant::now() + remaining.mul_f64(0.35);
         let reduce_config = ReduceConfig {
-            deadline: Some(deadline),
+            deadline: Some(reduce_deadline),
             verbose: config.verbose,
             initial_upper_bound: incoming_ub,
             ..ReduceConfig::default()
@@ -135,7 +141,7 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         // leaves time for the second tightening pass to exploit it.
         let remaining = deadline.saturating_duration_since(Instant::now());
         let pass_deadline = if pass == 0 {
-            Instant::now() + remaining.mul_f64(0.4)
+            Instant::now() + remaining.mul_f64(0.5)
         } else {
             deadline
         };
@@ -180,6 +186,17 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
 fn merge(a: SolveResult, b: SolveResult, tolerance: Cost) -> SolveResult {
     let (primal_from, other) = if b.primal_bound < a.primal_bound { (b, a) } else { (a, b) };
     let mut out = primal_from;
+    // A dual bound above a known feasible value is a contradiction: one of the
+    // two is wrong. Clamping is the sound direction — the primal is achieved by
+    // an actual tree — but it must never be how a proof gets manufactured, which
+    // is why the status below is recomputed from the clamped numbers and not
+    // inherited.
+    debug_assert!(
+        other.dual_bound <= out.primal_bound + 1e-6 || !out.primal_bound.is_finite(),
+        "dual bound {} exceeds a feasible primal {}",
+        other.dual_bound,
+        out.primal_bound
+    );
     out.dual_bound = out.dual_bound.max(other.dual_bound).min(out.primal_bound);
     out.nodes_processed += other.nodes_processed;
     out.cuts_added += other.cuts_added;
@@ -192,6 +209,10 @@ fn merge(a: SolveResult, b: SolveResult, tolerance: Cost) -> SolveResult {
     if out.primal_bound.is_finite() && out.dual_bound >= out.primal_bound - tolerance {
         out.status = SolveStatus::Optimal;
         out.gap_pct = 0.0;
+    } else if out.status == SolveStatus::Optimal {
+        // The surviving status came from whichever pass had the better primal;
+        // it says nothing about the merged bounds.
+        out.status = SolveStatus::Feasible;
     }
     out
 }
@@ -306,8 +327,19 @@ fn finish(
         100.0
     };
 
-    let status = if primal.is_finite() && dual >= primal - config.gap_tolerance.max(1e-6) {
+    // `Optimal` is reported if and only if the bounds being reported prove it.
+    //
+    // The status must not be an independent flag that can drift away from the
+    // numbers beside it. It did drift: the search could leave a node unfinished,
+    // read the resulting empty queue as an exhausted tree, and return `Optimal`
+    // alongside a dual bound several percent below the primal — PACE instance200
+    // was announced as a proved 6491 against a true optimum of 6393. This is the
+    // last line of defence, and it is a cheap one.
+    let proved = primal.is_finite() && dual >= primal - config.gap_tolerance.max(1e-6);
+    let status = if proved {
         SolveStatus::Optimal
+    } else if stats.status == SolveStatus::Optimal {
+        SolveStatus::Feasible
     } else {
         stats.status
     };

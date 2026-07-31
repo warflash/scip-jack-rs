@@ -6,7 +6,7 @@ use crate::graph::algorithms::{
     dual_ascent, dual_ascent_masked, reduced_cost_distances, reduced_cost_fixable_arcs,
     reduced_cost_fixings, ArcIndex,
 };
-use crate::model::{LpRelaxation, SteinerSolution};
+use crate::model::{LpRelaxation, LpStatus, SteinerSolution};
 use crate::separation::{FlowCutSeparator, CycleCutSeparator, PartitionSeparator, TfCutSeparator};
 use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
 use crate::heuristics::sph::{mst_prune, shortest_path_heuristic, SphResult, SphWorkspace};
@@ -97,6 +97,10 @@ pub struct BranchAndCutSolver {
     /// Every arc cost is an integer, so every feasible objective value is too
     /// and dual bounds may be rounded up.
     integral_objective: bool,
+    /// Set the moment any node is left unfinished. While it is set, an empty
+    /// node queue no longer means "everything was pruned", so the search may not
+    /// conclude that the incumbent is optimal.
+    search_incomplete: bool,
     /// Wall-clock stop. Checked inside the cut loop as well as between nodes:
     /// a root node runs a hundred cut rounds, each of which may solve dozens of
     /// LPs, so a between-nodes check alone lets one node overrun the budget by
@@ -149,6 +153,7 @@ impl BranchAndCutSolver {
             total_lp_solves: 0,
             da_prunes: 0,
             integral_objective,
+            search_incomplete: false,
             deadline: None,
         }
     }
@@ -264,10 +269,12 @@ impl BranchAndCutSolver {
         loop {
             let elapsed = start_time.elapsed().as_secs_f64();
             if elapsed > self.config.time_limit_secs {
+                self.search_incomplete = !self.tree.open_nodes.is_empty();
                 self.tree.status = SolveStatus::TimeLimit;
                 break;
             }
             if self.tree.nodes_processed >= self.config.node_limit {
+                self.search_incomplete = !self.tree.open_nodes.is_empty();
                 self.tree.status = SolveStatus::NodeLimit;
                 break;
             }
@@ -275,11 +282,18 @@ impl BranchAndCutSolver {
             let node_id = match self.node_selector.select(&self.tree.nodes, &self.tree.open_nodes) {
                 Some(id) => id,
                 None => {
-                    if self.tree.best_solution.is_some() {
-                        self.tree.status = SolveStatus::Optimal;
+                    self.update_global_dual_bound();
+                    self.tree.status = if self.search_incomplete {
+                        SolveStatus::TimeLimit
+                    } else if self.tree.best_solution.is_some()
+                        || self.tree.global_primal_bound.is_finite()
+                    {
+                        // Every node was closed by a genuine prune, so nothing
+                        // cheaper than the incumbent exists anywhere.
+                        SolveStatus::Optimal
                     } else {
-                        self.tree.status = SolveStatus::Infeasible;
-                    }
+                        SolveStatus::Infeasible
+                    };
                     break;
                 }
             };
@@ -321,6 +335,15 @@ impl BranchAndCutSolver {
                 }
                 NodeResult::Branch(branch_var) => {
                     self.create_children(node_id, branch_var);
+                }
+                NodeResult::Abandoned => {
+                    // Put it back: its bound is valid, its subtree is not
+                    // explored, and the search is no longer a proof.
+                    self.search_incomplete = true;
+                    self.tree.open_nodes.push(node_id);
+                    self.update_global_dual_bound();
+                    self.tree.status = SolveStatus::TimeLimit;
+                    break;
                 }
             }
 
@@ -487,15 +510,30 @@ impl BranchAndCutSolver {
         let mut prev_bound = f64::NEG_INFINITY;
         let mut stall_rounds = 0u32;
 
+        let mut rounds_done = 0usize;
         for _round in 0..max_rounds as usize {
             if self.out_of_time() {
+                // A node that has completed a round has a valid bound and a
+                // valid fractional point, so it can still be branched: the
+                // children carry the bound and stay in the queue, and the search
+                // remains a proof of whatever it goes on to establish. Only a
+                // node that never got that far is genuinely unresolved.
+                if rounds_done == 0 {
+                    return NodeResult::Abandoned;
+                }
                 break;
             }
             let mut obj = self.base_lp.as_mut().unwrap().solve();
             self.total_lp_solves += 1;
 
             if !self.base_lp.as_ref().unwrap().is_optimal() {
-                return NodeResult::Pruned;
+                // Infeasible is a genuine prune; anything else — an iteration
+                // limit, a numerical failure — proves nothing.
+                return if self.base_lp.as_ref().unwrap().status == LpStatus::Infeasible {
+                    NodeResult::Pruned
+                } else {
+                    NodeResult::Abandoned
+                };
             }
 
             // Complete the model before doing anything with the solution: the
@@ -519,7 +557,11 @@ impl BranchAndCutSolver {
                 obj = self.base_lp.as_mut().unwrap().solve();
                 self.total_lp_solves += 1;
                 if !self.base_lp.as_ref().unwrap().is_optimal() {
-                    return NodeResult::Pruned;
+                    return if self.base_lp.as_ref().unwrap().status == LpStatus::Infeasible {
+                        NodeResult::Pruned
+                    } else {
+                        NodeResult::Abandoned
+                    };
                 }
             }
 
@@ -555,6 +597,7 @@ impl BranchAndCutSolver {
             }
 
             lp_solution = self.base_lp.as_ref().unwrap().get_solution().to_vec();
+            rounds_done += 1;
 
             // Round the current point into a tree as the relaxation tightens,
             // not only once the node is finished. On the instances where the
@@ -813,7 +856,9 @@ impl BranchAndCutSolver {
 
         match branch_var {
             Some(var) => NodeResult::Branch(var),
-            None => NodeResult::Pruned,
+            // No fractional variable and no integer solution extracted: the node
+            // is unresolved, not closed.
+            None => NodeResult::Abandoned,
         }
     }
 
@@ -1087,21 +1132,53 @@ impl BranchAndCutSolver {
         self.tree.open_nodes.push(child1_id);
     }
 
+    /// The dual bound is the weakest bound among the open nodes.
+    ///
+    /// An empty queue means every node was closed by a genuine prune, so nothing
+    /// cheaper than the incumbent survives anywhere and the incumbent is optimal.
+    /// That inference is only available when the search actually finished, which
+    /// is why an abandoned node is pushed back before this is called.
     fn update_global_dual_bound(&mut self) {
-        if self.tree.open_nodes.is_empty() {
-            self.tree.global_dual_bound = self.tree.global_primal_bound;
+        let from_queue = if self.tree.open_nodes.is_empty() {
+            if self.search_incomplete {
+                // The queue emptied because work was abandoned, not because the
+                // tree was exhausted. It proves nothing.
+                f64::NEG_INFINITY
+            } else {
+                self.tree.global_primal_bound
+            }
         } else {
-            self.tree.global_dual_bound = self.tree.open_nodes.iter()
+            self.tree
+                .open_nodes
+                .iter()
                 .map(|&id| self.tree.nodes[id as usize].dual_bound)
-                .fold(f64::INFINITY, f64::min);
+                .fold(f64::INFINITY, f64::min)
+        };
+        // A dual bound never gets worse. The minimum over the open queue is a
+        // valid bound and so is the value already held — which includes the one
+        // seeded from ascend-and-prune before the first node was touched, and
+        // which the old unconditional assignment threw away the moment a node
+        // was queued with no bound of its own yet.
+        if from_queue > self.tree.global_dual_bound {
+            self.tree.global_dual_bound = from_queue;
         }
     }
 }
 
 enum NodeResult {
+    /// The node is finished: nothing cheaper than the incumbent lives below it.
     Pruned,
     IntegerFeasible(SteinerSolution),
     Branch(ArcId),
+    /// The node could not be finished — the clock ran out, the LP did not solve,
+    /// or there was no fractional variable to branch on. It stays open, and the
+    /// search must not claim to have proved anything.
+    ///
+    /// Treating this as a prune is how a search reports a false optimum: the last
+    /// node leaves the queue, `update_global_dual_bound` sees an empty queue and
+    /// sets the dual bound to the incumbent, and the solver announces a proof it
+    /// never had.
+    Abandoned,
 }
 
 #[cfg(test)]

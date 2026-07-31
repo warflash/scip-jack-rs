@@ -275,18 +275,27 @@ fn round(
                       kws: &mut KeyPathWorkspace,
                       ws: &mut SphWorkspace|
      -> SphResult {
-        match key_path_exchange(&idx, &active, root, &r, &is_terminal, 16, kws, ws) {
+        match key_path_exchange(&idx, &active, root, &r, &is_terminal, 6, kws, ws) {
             Some(better) => better,
             None => r,
         }
     };
 
     let expired = || config.deadline.is_some_and(|d| Instant::now() >= d);
+    // The construction phase will use every second it is given: one run is
+    // `|R|` Dijkstras and the key-path exchange on top of it costs about as much
+    // again, so sixty-four starts on a graph with three hundred terminals is
+    // measured in seconds. Cap it at a share of the round, because the dual
+    // ascent that follows is what drives the eliminations and it must run.
+    let primal_deadline = config.deadline.map(|d| {
+        Instant::now() + d.saturating_duration_since(Instant::now()).mul_f64(0.4)
+    });
+    let primal_expired = || primal_deadline.is_some_and(|d| Instant::now() >= d);
 
     // Unguided primal pass from a spread of starts. Each run is k Dijkstras on a
     // graph that earlier rounds have already shrunk, so this stays cheap.
     for s in heuristic_starts(terminals, config.heuristic_starts) {
-        if expired() {
+        if primal_expired() {
             break;
         }
         if let Some(r) =

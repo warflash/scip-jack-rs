@@ -97,3 +97,49 @@ fn test_dual_bound_valid() {
         "Dual bound ({:.4}) must not exceed primal bound ({:.4})",
         r.dual_bound, r.primal_bound);
 }
+
+/// A time limit must never turn into a proof.
+///
+/// The branch-and-cut tree used to treat an unfinished node as a pruned one.
+/// When the clock ran out inside the root's cut loop the node left the queue,
+/// the empty queue was read as "everything was pruned", and the dual bound was
+/// set to the incumbent — so the solver announced `Optimal` on a value it had
+/// only guessed. PACE instance200 reported 6491 as proved against a true optimum
+/// of 6393.
+///
+/// The property this pins is the one that matters: a claimed optimum must be the
+/// optimum, whatever the budget.
+#[test]
+fn a_tight_budget_never_produces_a_false_proof() {
+    let hard: &[(&str, &str, f64)] = &[
+        ("tests/C/c18.stp", "c18", 113.0),
+        ("tests/D/d18.stp", "d18", 223.0),
+        ("tests/D/d19.stp", "d19", 310.0),
+        ("tests/E/e18.stp", "e18", 564.0),
+        ("tests/E/e19.stp", "e19", 758.0),
+    ];
+
+    for &(path, name, reference) in hard {
+        for &budget in &[0.02, 0.1, 0.35, 1.0, 2.5] {
+            let r = solve_file(path, quick_config(budget));
+            assert!(
+                r.primal_bound >= reference - 1e-6,
+                "{name} at {budget}s: returned {} below the true optimum {reference}",
+                r.primal_bound
+            );
+            if r.status == SolveStatus::Optimal {
+                assert!(
+                    (r.primal_bound - reference).abs() < 1e-6,
+                    "{name} at {budget}s: claimed {} is optimal, but the optimum is \
+                     {reference} — the search reported a proof it did not have",
+                    r.primal_bound
+                );
+            }
+            assert!(
+                r.dual_bound <= reference + 1e-6,
+                "{name} at {budget}s: dual bound {} exceeds the optimum {reference}",
+                r.dual_bound
+            );
+        }
+    }
+}
