@@ -8,7 +8,7 @@ pub struct UndirectedGraph {
     pub num_nodes: u32,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
-    adjacency: HashMap<NodeId, Vec<(NodeId, EdgeId)>>,
+    pub adjacency: HashMap<NodeId, Vec<(NodeId, EdgeId)>>,
 }
 
 impl UndirectedGraph {

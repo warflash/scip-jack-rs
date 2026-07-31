@@ -275,6 +275,38 @@ fn test_d01_optimal() {
     assert!(r.is_feasible(), "d01: {} < opt {}", r.primal, r.optimal);
 }
 
+// === Dreyfus-Wagner DP exact solver for small-terminal instances ===
+
+#[test]
+fn test_dreyfus_wagner_b_series() {
+    use scip_jack::graph::algorithms::dreyfus_wagner;
+
+    for name in &["b01", "b02", "b04", "b07"] {
+        let path = format!("tests/B/{}.stp", name);
+        let instance = io::read_instance(&path).expect("read");
+        let mut graph = UndirectedGraph::new(instance.num_nodes);
+        for node in &instance.nodes { graph.add_node(node.id, node.node_type, node.weight); }
+        for edge in &instance.edges { graph.add_edge(edge.src, edge.dst, edge.cost); }
+
+        let start = std::time::Instant::now();
+        let result = dreyfus_wagner(&graph, &instance.terminals);
+        let elapsed = start.elapsed().as_secs_f64();
+
+        let known_opt = B_OPTIMA.iter()
+            .find(|(n, _)| n == name).map(|(_, o)| *o).unwrap();
+
+        if let Some(r) = result {
+            eprintln!("  DW {} | opt={:.0} | dw={:.0} | {:.3}s | {}",
+                name, known_opt, r.optimal_cost, elapsed,
+                if (r.optimal_cost - known_opt).abs() < 1e-6 { "EXACT" } else { "MISMATCH!" });
+            assert!((r.optimal_cost - known_opt).abs() < 1e-4,
+                "DW {}: expected {}, got {}", name, known_opt, r.optimal_cost);
+        } else {
+            eprintln!("  DW {} | infeasible or too many terminals", name);
+        }
+    }
+}
+
 // === Full benchmarks (run with --ignored) ===
 
 #[test]

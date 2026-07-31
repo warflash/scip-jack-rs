@@ -11,6 +11,7 @@ use std::env;
 use std::time::Instant;
 
 use graph::{DirectedGraph, UndirectedGraph};
+use graph::algorithms::dreyfus_wagner;
 use preprocessing::preprocess;
 use branch_and_bound::{BranchAndCutSolver, SolverConfig, SolveStatus};
 
@@ -89,7 +90,34 @@ fn main() {
     eprintln!();
 
     // Phase 5: Solve
-    eprintln!("Solving...");
+    // Use Dreyfus-Wagner DP for small-terminal instances (exact, faster than B&C)
+    let dw_threshold = 15;
+    if reduced_instance.num_terminals <= dw_threshold as u32 {
+        eprintln!("Using Dreyfus-Wagner DP ({} terminals ≤ {} threshold)",
+            reduced_instance.num_terminals, dw_threshold);
+        eprintln!("--------------------------------------------------");
+
+        let dw_start = Instant::now();
+        if let Some(dw_result) = dreyfus_wagner(&reduced_undirected, &reduced_instance.terminals) {
+            let dw_time = dw_start.elapsed().as_secs_f64();
+            let total_obj = dw_result.optimal_cost + preprocess_result.lower_bound_offset;
+
+            eprintln!("--------------------------------------------------");
+            eprintln!();
+            eprintln!("Results (Dreyfus-Wagner DP):");
+            eprintln!("  Status: Optimal (exact DP)");
+            eprintln!("  Optimal cost: {:.6}", total_obj);
+            eprintln!("  Tree edges: {}", dw_result.tree_edges.len());
+            eprintln!("  Time: {:.3}s", dw_time);
+            eprintln!("  OPTIMAL (proven by DP)");
+
+            println!("{:.6}", total_obj);
+            return;
+        }
+        eprintln!("DW infeasible, falling back to branch-and-cut");
+    }
+
+    eprintln!("Using Branch-and-Cut solver");
     eprintln!("--------------------------------------------------");
 
     let mut solver = BranchAndCutSolver::new(directed, root, terminals);
@@ -100,7 +128,6 @@ fn main() {
     eprintln!("--------------------------------------------------");
     eprintln!();
 
-    // Phase 6: Report
     let total_obj = stats.primal_bound + preprocess_result.lower_bound_offset;
 
     eprintln!("Results:");
@@ -124,7 +151,6 @@ fn main() {
         eprintln!("No feasible solution found.");
     }
 
-    // Output solution value to stdout for scripting
     if let Some(sol) = &solution {
         println!("{:.6}", sol.objective_value + preprocess_result.lower_bound_offset);
     }
