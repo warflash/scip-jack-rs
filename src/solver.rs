@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::graph::{DirectedGraph, UndirectedGraph};
+use crate::graph::{DirectedGraph, SteinerInstance, UndirectedGraph};
 use crate::graph::algorithms::dreyfus_wagner;
 use crate::preprocessing::preprocess;
 use crate::branch_and_bound::{BranchAndCutSolver, SolverConfig, SolveStatus};
@@ -29,13 +29,12 @@ pub enum SolveMethod {
     BranchAndCut,
 }
 
-/// Solve a Steiner tree instance from an .stp file.
+/// Solve a Steiner tree instance held in memory.
 ///
 /// This is the single entry point for the entire solver pipeline:
-/// parse → build graph → preprocess → DW/B&C dispatch → verify.
-pub fn solve_file(path: &str, config: SolverConfig) -> SolveResult {
+/// build graph → preprocess → DW/B&C dispatch → verify.
+pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     let start = Instant::now();
-    let instance = io::read_instance(path).expect("Failed to read instance");
 
     let mut graph = UndirectedGraph::new(instance.num_nodes);
     for node in &instance.nodes {
@@ -112,4 +111,12 @@ pub fn solve_file(path: &str, config: SolverConfig) -> SolveResult {
         verified,
         method: SolveMethod::BranchAndCut,
     }
+}
+
+/// Solve a Steiner tree instance from a SteinLib `.stp` file.
+///
+/// For callers that already have the graph in memory, use [`solve`] instead.
+pub fn solve_file(path: &str, config: SolverConfig) -> SolveResult {
+    let instance = io::read_instance(path).expect("Failed to read instance");
+    solve(&instance, config)
 }

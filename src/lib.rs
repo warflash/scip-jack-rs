@@ -8,4 +8,5 @@ pub mod transformations;
 pub mod io;
 pub mod solver;
 
-pub use solver::{solve_file, SolveResult, SolveMethod};
+pub use branch_and_bound::SolverConfig;
+pub use solver::{solve, solve_file, SolveResult, SolveMethod};
