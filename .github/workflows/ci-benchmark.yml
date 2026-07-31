@@ -1,0 +1,81 @@
+name: CI Benchmark
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  deployments: write
+
+# There is intentionally no concurrency group: every push should remain a
+# benchmark data point instead of being cancelled by a newer push.
+jobs:
+  steinlib:
+    name: SteinLib CI benchmark suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build CI benchmark runner
+        run: cargo build --release --bin ci_benchmark
+
+      - name: Run three-minute CI benchmark campaign
+        run: timeout --foreground 240s ./target/release/ci_benchmark --budget-secs 180
+
+      - name: Add benchmark summary to workflow
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f ci-benchmark-summary.md ]]; then
+            cat ci-benchmark-summary.md >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Historical charts: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/dev/bench/" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Benchmark summary was not produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: steinlib-ci-benchmark-${{ github.run_id }}
+          path: |
+            ci-benchmark-results.json
+            ci-benchmark-summary.md
+          if-no-files-found: warn
+
+      # The action keeps one time series per JSON entry and generates a
+      # Chart.js dashboard in the gh-pages branch. Enable GitHub Pages from
+      # gh-pages:/dev/bench after the first successful run.
+      - name: Ensure benchmark history branch exists
+        if: success() && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          if ! git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git push origin "HEAD:refs/heads/gh-pages" || \
+              git ls-remote --exit-code --heads origin gh-pages >/dev/null
+          fi
+
+      - name: Publish historical benchmark charts
+        if: success() && github.ref == 'refs/heads/main'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: scip-jack SteinLib CI campaign
+          tool: customSmallerIsBetter
+          output-file-path: ci-benchmark-results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          benchmark-data-dir-path: dev/bench
+          max-items-in-chart: 100
+          alert-threshold: '150%'

@@ -1,1 +1,3 @@
 /target
+/ci-benchmark-results.json
+/ci-benchmark-summary.md
