@@ -6,14 +6,11 @@ pub mod heuristics;
 pub mod branch_and_bound;
 pub mod transformations;
 pub mod io;
+pub mod solver;
 
 use std::env;
-use std::time::Instant;
-
-use graph::{DirectedGraph, UndirectedGraph};
-use graph::algorithms::dreyfus_wagner;
-use preprocessing::preprocess;
-use branch_and_bound::{BranchAndCutSolver, SolverConfig, SolveStatus};
+use branch_and_bound::SolverConfig;
+use solver::SolveMethod;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -30,129 +27,26 @@ fn main() {
     eprintln!("================================================================");
     eprintln!();
 
-    // Phase 1: Parse input
-    let start = Instant::now();
-    let instance = match io::read_instance(input_file) {
-        Ok(inst) => inst,
-        Err(e) => {
-            eprintln!("Error reading instance '{}': {}", input_file, e);
-            std::process::exit(1);
-        }
+    let result = solver::solve_file(input_file, config);
+
+    let method_name = match result.method {
+        SolveMethod::DreyfusWagner => "Dreyfus-Wagner DP",
+        SolveMethod::BranchAndCut => "Branch-and-Cut",
     };
-    let parse_time = start.elapsed().as_secs_f64();
 
-    eprintln!("Instance: {}", instance);
-    if let Some(root) = instance.root {
-        eprintln!("Root: {}", root);
-    }
-    eprintln!("Parse time: {:.3}s", parse_time);
-    eprintln!();
+    eprintln!("Results ({}):", method_name);
+    eprintln!("  Status: {:?}", result.status);
+    eprintln!("  Primal bound: {:.6}", result.primal_bound);
+    eprintln!("  Dual bound: {:.6}", result.dual_bound);
+    eprintln!("  Gap: {:.4}%", result.gap_pct);
+    eprintln!("  Nodes processed: {}", result.nodes_processed);
+    eprintln!("  Cuts added: {}", result.cuts_added);
+    eprintln!("  LP solves: {}", result.lp_solves);
+    eprintln!("  Time: {:.3}s", result.time_secs);
+    eprintln!("  Verified: {}", result.verified);
 
-    // Phase 2: Build undirected graph
-    let mut graph = UndirectedGraph::new(instance.num_nodes);
-    for node in &instance.nodes {
-        graph.add_node(node.id, node.node_type, node.weight);
-    }
-    for edge in &instance.edges {
-        graph.add_edge(edge.src, edge.dst, edge.cost);
-    }
-
-    // Phase 3: Preprocessing
-    let preprocess_start = Instant::now();
-    let (reduced_graph, preprocess_result) = preprocess(&instance, &graph);
-    let preprocess_time = preprocess_start.elapsed().as_secs_f64();
-
-    eprintln!("Preprocessing:");
-    eprintln!("  Nodes removed: {}", preprocess_result.nodes_removed);
-    eprintln!("  Edges removed: {}", preprocess_result.edges_removed);
-    eprintln!("  Edges fixed: {}", preprocess_result.edges_fixed.len());
-    eprintln!("  LB offset: {:.4}", preprocess_result.lower_bound_offset);
-    eprintln!("  Time: {:.3}s", preprocess_time);
-    eprintln!();
-
-    // Phase 4: Build directed graph (SAP transformation)
-    let (reduced_instance, reduced_undirected) = reduced_graph.to_instance();
-    let directed = DirectedGraph::from_undirected(&reduced_undirected);
-
-    let root = reduced_instance.root.unwrap_or_else(|| {
-        // If no root specified, pick first terminal
-        *reduced_instance.terminals.first().expect("No terminals in instance")
-    });
-
-    let terminals: Vec<u32> = reduced_instance.terminals.clone();
-
-    eprintln!("Reduced instance: |V|={}, |E|={}, |T|={}",
-        reduced_instance.num_nodes,
-        reduced_instance.num_edges,
-        reduced_instance.num_terminals,
-    );
-    eprintln!("Directed graph: {} nodes, {} arcs", directed.num_nodes, directed.num_arcs());
-    eprintln!();
-
-    // Phase 5: Solve
-    // Use Dreyfus-Wagner DP for small-terminal instances (exact, faster than B&C)
-    let dw_threshold = 15;
-    if reduced_instance.num_terminals <= dw_threshold as u32 {
-        eprintln!("Using Dreyfus-Wagner DP ({} terminals ≤ {} threshold)",
-            reduced_instance.num_terminals, dw_threshold);
-        eprintln!("--------------------------------------------------");
-
-        let dw_start = Instant::now();
-        if let Some(dw_result) = dreyfus_wagner(&reduced_undirected, &reduced_instance.terminals) {
-            let dw_time = dw_start.elapsed().as_secs_f64();
-            let total_obj = dw_result.optimal_cost + preprocess_result.lower_bound_offset;
-
-            eprintln!("--------------------------------------------------");
-            eprintln!();
-            eprintln!("Results (Dreyfus-Wagner DP):");
-            eprintln!("  Status: Optimal (exact DP)");
-            eprintln!("  Optimal cost: {:.6}", total_obj);
-            eprintln!("  Tree edges: {}", dw_result.tree_edges.len());
-            eprintln!("  Time: {:.3}s", dw_time);
-            eprintln!("  OPTIMAL (proven by DP)");
-
-            println!("{:.6}", total_obj);
-            return;
-        }
-        eprintln!("DW infeasible, falling back to branch-and-cut");
-    }
-
-    eprintln!("Using Branch-and-Cut solver");
-    eprintln!("--------------------------------------------------");
-
-    let mut solver = BranchAndCutSolver::new(directed, root, terminals);
-    solver.config = config;
-
-    let (solution, stats) = solver.solve();
-
-    eprintln!("--------------------------------------------------");
-    eprintln!();
-
-    let total_obj = stats.primal_bound + preprocess_result.lower_bound_offset;
-
-    eprintln!("Results:");
-    eprintln!("  Status: {:?}", stats.status);
-    eprintln!("  Primal bound: {:.6}", total_obj);
-    eprintln!("  Dual bound: {:.6}", stats.dual_bound + preprocess_result.lower_bound_offset);
-    eprintln!("  Gap: {:.4}%", stats.gap * 100.0);
-    eprintln!("  Nodes processed: {}", stats.nodes_processed);
-    eprintln!("  Time: {:.3}s", stats.time_secs);
-    eprintln!();
-
-    if let Some(sol) = &solution {
-        eprintln!("Solution:");
-        eprintln!("  Arcs: {}", sol.arcs.len());
-        eprintln!("  Nodes: {}", sol.nodes.len());
-        eprintln!("  Objective: {:.6}", sol.objective_value + preprocess_result.lower_bound_offset);
-        if stats.status == SolveStatus::Optimal {
-            eprintln!("  OPTIMAL (proven)");
-        }
-    } else {
-        eprintln!("No feasible solution found.");
-    }
-
-    if let Some(sol) = &solution {
-        println!("{:.6}", sol.objective_value + preprocess_result.lower_bound_offset);
+    if result.primal_bound < f64::INFINITY {
+        println!("{:.6}", result.primal_bound);
     }
 }
 

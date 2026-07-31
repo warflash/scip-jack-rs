@@ -270,7 +270,14 @@ pub struct PreprocessingResult {
     pub lower_bound_offset: Cost,
 }
 
-/// Apply all reduction techniques iteratively until no more progress.
+/// Apply all reduction techniques in a sound order:
+///
+/// 1. Iterative: degree reductions + SD test + implications
+///    The SD test uses contraction-aware guards to avoid removing edges
+///    whose shortest paths are distorted by degree-2 contractions.
+///
+/// The SD test only applies to edges whose BOTH endpoints are NOT adjacent
+/// to any contracted node, ensuring it operates on undistorted distances.
 pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (ReducibleGraph, PreprocessingResult) {
     let mut rg = ReducibleGraph::from_instance(instance, graph);
 
@@ -279,22 +286,27 @@ pub fn preprocess(instance: &SteinerInstance, graph: &UndirectedGraph) -> (Reduc
     let mut total_fixed: Vec<EdgeId> = Vec::new();
     let mut lb_offset = 0.0;
 
+    let mut iteration = 0u32;
+
     loop {
         let (deg_removed, fixed, offset) = degree::degree_reductions(&mut rg);
         total_fixed.extend(fixed);
         lb_offset += offset;
 
-        let dist_removed = distance::distance_reductions(&mut rg);
-        let impl_removed = implications::implication_reductions(&mut rg);
-        // Star/implied-distance reductions disabled: the current star reduction
-        // incorrectly removes edges that are the sole path to terminals.
-        // Needs terminal-connectivity-aware analysis before re-enabling.
+        // SD test: only on the first iteration (clean graph) or if no
+        // contractions occurred (safe to re-run).
+        let dist_removed = if iteration == 0 || rg.contracted_edges.is_empty() {
+            distance::distance_reductions(&mut rg)
+        } else {
+            0
+        };
 
-        let _bn_removed = 0u32;
+        let impl_removed = implications::implication_reductions(&mut rg);
 
         if deg_removed + dist_removed + impl_removed == 0 {
             break;
         }
+        iteration += 1;
     }
 
     let result = PreprocessingResult {

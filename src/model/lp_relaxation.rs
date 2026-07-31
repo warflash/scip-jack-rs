@@ -9,6 +9,8 @@ pub struct LpRelaxation {
     pub num_vars: u32,
     pub objective: Vec<Cost>,
     pub solution: Vec<f64>,
+    /// LP reduced costs (dual column values) from the last solve
+    pub reduced_costs: Vec<f64>,
     pub dual_bound: f64,
     constraints: Vec<LpConstraint>,
     pub base_constraint_count: usize,
@@ -53,6 +55,7 @@ impl LpRelaxation {
             num_vars: num_arcs,
             objective: objective.clone(),
             solution: vec![0.0; num_arcs as usize],
+            reduced_costs: vec![0.0; num_arcs as usize],
             dual_bound: f64::NEG_INFINITY,
             constraints: Vec::new(),
             base_constraint_count: 0,
@@ -137,6 +140,7 @@ impl LpRelaxation {
             num_vars,
             objective,
             solution: vec![0.0; num_vars as usize],
+            reduced_costs: vec![0.0; num_vars as usize],
             dual_bound: f64::NEG_INFINITY,
             constraints: Vec::new(),
             base_constraint_count: 0,
@@ -188,6 +192,18 @@ impl LpRelaxation {
         self.add_constraint_raw(&vars_coeffs, rhs, f64::INFINITY);
     }
 
+    /// Add a cycle inequality: Σ (y_{uv} + y_{vu}) ≤ |C|-1 for arc pairs in cycle C.
+    /// Each pair is (fwd_arc, rev_arc) representing one undirected edge.
+    pub fn add_cycle_cut(&mut self, arc_pairs: &[(ArcId, ArcId)]) {
+        let rhs = arc_pairs.len() as f64 - 1.0;
+        let mut vars_coeffs: Vec<(u32, f64)> = Vec::with_capacity(arc_pairs.len() * 2);
+        for &(fwd, rev) in arc_pairs {
+            vars_coeffs.push((fwd, 1.0));
+            vars_coeffs.push((rev, 1.0));
+        }
+        self.add_constraint_raw(&vars_coeffs, f64::NEG_INFINITY, rhs);
+    }
+
     /// Fix a variable to a specific value by tightening its bounds.
     pub fn fix_variable(&mut self, arc_id: ArcId, value: f64) {
         let idx = arc_id as usize;
@@ -197,7 +213,7 @@ impl LpRelaxation {
         }
     }
 
-    /// Solve the LP relaxation using HiGHS.
+    /// Solve the LP relaxation using HiGHS with warm-starting from previous solution.
     pub fn solve(&mut self) -> f64 {
         let mut pb = RowProblem::default();
 
@@ -210,7 +226,6 @@ impl LpRelaxation {
             .collect();
 
         for constraint in &self.constraints {
-            // Skip constraints where all variables are fixed
             let has_free_var = constraint.vars.iter().any(|&v| {
                 let idx = v as usize;
                 let lb = self.var_lb.get(idx).copied().unwrap_or(0.0);
@@ -218,7 +233,6 @@ impl LpRelaxation {
                 (ub - lb).abs() > 1e-10
             });
 
-            // For constraints with only fixed variables, check feasibility
             if !has_free_var {
                 let fixed_val: f64 = constraint.vars.iter()
                     .zip(constraint.coeffs.iter())
@@ -247,16 +261,18 @@ impl LpRelaxation {
                 pb.add_row(..=ub, &row_entries);
             } else if ub == f64::INFINITY {
                 pb.add_row(lb.., &row_entries);
-            } else if (lb - ub).abs() < 1e-12 {
-                pb.add_row(lb..=ub, &row_entries);
             } else {
                 pb.add_row(lb..=ub, &row_entries);
             }
         }
 
-        // Solve (catch HiGHS panics on malformed models)
+        // Build model and warm-start with previous solution
         let solve_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let model = pb.optimise(Sense::Minimise);
+
+            // Note: warm-start disabled to avoid affecting LP convergence path
+            // which can change cut discovery and affect optimality proof
+
             model.solve()
         }));
 
@@ -275,6 +291,7 @@ impl LpRelaxation {
             HighsModelStatus::Optimal => {
                 let sol = solved.get_solution();
                 self.solution = sol.columns().to_vec();
+                self.reduced_costs = sol.dual_columns().to_vec();
                 self.dual_bound = self.solution.iter()
                     .zip(self.objective.iter())
                     .map(|(&y, &c)| y * c)

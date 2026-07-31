@@ -48,6 +48,11 @@ impl<'a> FlowCutSeparator<'a> {
 
     /// Find all violated Steiner cuts given the current LP solution.
     /// Returns the list of violated cuts sorted by violation (most violated first).
+    ///
+    /// Checks both standard terminal cuts AND nested Steiner-node cuts:
+    /// - Standard: max-flow(root, t) < 1 for each terminal t
+    /// - Nested: when a terminal cut is found, also check sub-cuts within
+    ///   the sink side for additional violated constraints
     pub fn find_violated_cuts(&mut self, lp_solution: &[f64]) -> Vec<SteinerCut> {
         let mut violated_cuts = Vec::new();
 
@@ -56,6 +61,7 @@ impl<'a> FlowCutSeparator<'a> {
         }
         let ws = self.workspace.as_mut().unwrap();
 
+        // Standard terminal separation
         for &terminal in self.terminals {
             if terminal == self.root {
                 continue;
@@ -63,7 +69,6 @@ impl<'a> FlowCutSeparator<'a> {
 
             let result = ws.compute(self.root, terminal, lp_solution, &self.graph.arcs);
 
-            // If max-flow < 1, we have a violated Steiner cut
             if result.flow_value < 1.0 - self.violation_tolerance {
                 let violation = 1.0 - result.flow_value;
                 violated_cuts.push(SteinerCut {
@@ -75,7 +80,47 @@ impl<'a> FlowCutSeparator<'a> {
             }
         }
 
-        // Sort by violation (most violated first)
+        // "Back-cut" separation: for Steiner nodes with fractional incoming flow,
+        // check if the minimum cut separating them from the root is violated.
+        // This finds nested cuts that terminal separation alone would miss.
+        if violated_cuts.is_empty() {
+            let mut steiner_candidates: Vec<(NodeId, f64)> = Vec::new();
+            for node in &self.graph.nodes {
+                if self.terminals.contains(&node.id) || node.id == self.root {
+                    continue;
+                }
+                // Compute total incoming flow to this Steiner node
+                let in_flow: f64 = self.graph.delta_minus(node.id).iter()
+                    .map(|&(_, aid)| lp_solution.get(aid as usize).copied().unwrap_or(0.0))
+                    .sum();
+                if in_flow > 0.01 && in_flow < 0.999 {
+                    steiner_candidates.push((node.id, in_flow));
+                }
+            }
+
+            // Sort by fractionality (most fractional first)
+            steiner_candidates.sort_by(|a, b| {
+                let frac_a = (a.1 - 0.5).abs();
+                let frac_b = (b.1 - 0.5).abs();
+                frac_a.partial_cmp(&frac_b).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            for &(node, in_flow) in steiner_candidates.iter().take(10) {
+                let result = ws.compute(self.root, node, lp_solution, &self.graph.arcs);
+                if result.flow_value < in_flow - self.violation_tolerance {
+                    let violation = in_flow - result.flow_value;
+                    if violation > self.violation_tolerance {
+                        violated_cuts.push(SteinerCut {
+                            cut_set: result.source_side,
+                            cut_arcs: result.cut_arcs,
+                            separated_terminal: node,
+                            violation,
+                        });
+                    }
+                }
+            }
+        }
+
         violated_cuts.sort_by(|a, b| b.violation.partial_cmp(&a.violation).unwrap_or(std::cmp::Ordering::Equal));
 
         self.cuts_found = violated_cuts.len() as u32;

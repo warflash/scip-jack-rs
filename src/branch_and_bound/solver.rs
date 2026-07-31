@@ -4,7 +4,7 @@ use std::time::Instant;
 use crate::graph::{DirectedGraph, NodeId, ArcId, Cost};
 use crate::graph::algorithms::{dual_ascent, reduced_cost_fixable_arcs};
 use crate::model::{LpRelaxation, SteinerSolution};
-use crate::separation::FlowCutSeparator;
+use crate::separation::{FlowCutSeparator, CycleCutSeparator};
 use crate::heuristics::{ConstructiveHeuristic, LocalSearchHeuristic, PrimalHeuristic};
 
 use super::tree::{BranchAndBoundTree, BbNode, SolveStatus};
@@ -19,6 +19,7 @@ pub struct SolverConfig {
     pub cut_rounds_per_node: u32,
     pub heuristic_frequency: u32,
     pub verbose: bool,
+    pub preprocess: bool,
 }
 
 impl Default for SolverConfig {
@@ -30,6 +31,7 @@ impl Default for SolverConfig {
             cut_rounds_per_node: 10,
             heuristic_frequency: 5,
             verbose: true,
+            preprocess: true,
         }
     }
 }
@@ -294,7 +296,7 @@ impl BranchAndCutSolver {
         let mut node_dual_bound = f64::NEG_INFINITY;
 
         let max_rounds = if is_root_node {
-            self.config.cut_rounds_per_node * 3
+            self.config.cut_rounds_per_node * 5
         } else {
             self.config.cut_rounds_per_node
         };
@@ -315,19 +317,28 @@ impl BranchAndCutSolver {
 
             lp_solution = self.base_lp.as_ref().unwrap().get_solution().to_vec();
 
+            // LP-based reduced-cost fixing: if an arc's LP reduced cost
+            // exceeds the gap (UB - LB), then that arc is 0 in every optimal solution.
+            // Only apply AFTER the cut loop stabilizes (not during), to avoid
+            // fixing based on reduced costs from an early, weak LP relaxation.
+            // The actual fixing happens after the cut loop (below).
+
             let mut separator = FlowCutSeparator::new(
                 &self.graph,
                 self.root,
                 &self.terminals,
             );
-            let cuts = separator.find_violated_cuts(&lp_solution);
+            let flow_cuts = separator.find_violated_cuts(&lp_solution);
 
-            if cuts.is_empty() {
+            let mut cycle_sep = CycleCutSeparator::new(&self.graph);
+            let cycle_cuts = cycle_sep.find_violated_cuts(&lp_solution);
+
+            if flow_cuts.is_empty() && cycle_cuts.is_empty() {
                 break;
             }
 
             let mut new_cut_arcs: Vec<Vec<ArcId>> = Vec::new();
-            for cut in &cuts {
+            for cut in &flow_cuts {
                 let mut sig = cut.cut_arcs.clone();
                 sig.sort();
                 if self.cut_signatures.insert(sig) {
@@ -335,9 +346,26 @@ impl BranchAndCutSolver {
                     self.total_cuts_added += 1;
                 }
             }
+
+            let mut new_cycle_pairs: Vec<Vec<(ArcId, ArcId)>> = Vec::new();
+            for ccut in &cycle_cuts {
+                let mut sig = ccut.arc_ids.clone();
+                sig.sort();
+                if self.cut_signatures.insert(sig) {
+                    let pairs: Vec<(ArcId, ArcId)> = ccut.edge_indices.iter()
+                        .map(|&ei| (2 * ei as ArcId, 2 * ei as ArcId + 1))
+                        .collect();
+                    new_cycle_pairs.push(pairs);
+                    self.total_cuts_added += 1;
+                }
+            }
+
             let lp = self.base_lp.as_mut().unwrap();
             for arcs in &new_cut_arcs {
                 lp.add_steiner_cut(arcs);
+            }
+            for pairs in &new_cycle_pairs {
+                lp.add_cycle_cut(pairs);
             }
             lp.base_constraint_count = lp.num_constraints();
         }

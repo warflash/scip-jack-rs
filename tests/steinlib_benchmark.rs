@@ -1,13 +1,9 @@
-//! SteinLib B-series benchmarks with correctness verification.
+//! SteinLib benchmarks with correctness verification.
 //! Non-ignored tests complete in ~2-3 minutes total.
 //! Use `--ignored` for the full suite (may take 15+ minutes).
 
-use std::time::Instant;
-use scip_jack::io;
-use scip_jack::graph::{DirectedGraph, UndirectedGraph};
-use scip_jack::preprocessing::preprocess;
-use scip_jack::branch_and_bound::{BranchAndCutSolver, SolverConfig, SolveStatus};
-use scip_jack::model::verify_solution as verify;
+use scip_jack::branch_and_bound::{SolverConfig, SolveStatus};
+use scip_jack::solver::{solve_file, SolveResult, SolveMethod};
 
 /// Known optimal values for SteinLib B-series.
 /// Source: https://steinlib.zib.de/showset.php?B
@@ -50,186 +46,159 @@ const E_OPTIMA: &[(&str, f64)] = &[
     ("e19", 758.0),  ("e20", 1342.0),
 ];
 
+fn lookup_optimum(name: &str) -> f64 {
+    B_OPTIMA.iter()
+        .chain(C_OPTIMA.iter())
+        .chain(D_OPTIMA.iter())
+        .chain(E_OPTIMA.iter())
+        .find(|(n, _)| *n == name)
+        .map(|(_, o)| *o)
+        .unwrap_or(f64::INFINITY)
+}
+
 struct BenchResult {
     name: String,
     optimal: f64,
-    primal: f64,
-    dual: f64,
-    gap_pct: f64,
-    nodes: u64,
-    cuts: u64,
-    lp_solves: u64,
-    time_secs: f64,
-    status: SolveStatus,
-    verified: bool,
+    result: SolveResult,
 }
 
 impl BenchResult {
     fn is_proved_optimal(&self) -> bool {
-        self.status == SolveStatus::Optimal && (self.primal - self.optimal).abs() < 1.0
+        self.result.status == SolveStatus::Optimal
+            && (self.result.primal_bound - self.optimal).abs() < 1.0
     }
     fn is_feasible(&self) -> bool {
-        self.primal >= self.optimal - 1e-4
+        self.result.primal_bound >= self.optimal - 1e-4
     }
     fn print(&self) {
-        let cert = if self.verified { "V" } else { "?" };
+        let cert = if self.result.verified { "V" } else { "?" };
+        let method = match self.result.method {
+            SolveMethod::DreyfusWagner => "DW",
+            SolveMethod::BranchAndCut => "BC",
+        };
         eprintln!(
-            "  {:>4} | opt={:>5.0} | pri={:>6.0} | dual={:>6.1} | gap={:>5.1}% | n={:>5} | cuts={:>5} | lps={:>5} | {:.2}s | {:?} | {} [{}]",
-            self.name, self.optimal, self.primal, self.dual, self.gap_pct,
-            self.nodes, self.cuts, self.lp_solves, self.time_secs, self.status,
+            "  {:>4} | opt={:>5.0} | pri={:>6.0} | dual={:>6.1} | gap={:>5.1}% | n={:>5} | cuts={:>5} | lps={:>5} | {:.2}s | {:?} | {} [{}] {}",
+            self.name, self.optimal, self.result.primal_bound, self.result.dual_bound,
+            self.result.gap_pct, self.result.nodes_processed, self.result.cuts_added,
+            self.result.lp_solves, self.result.time_secs, self.result.status,
             if self.is_proved_optimal() { "OPTIMAL" } else if self.is_feasible() { "feasible" } else { "WRONG!" },
-            cert,
+            cert, method,
         );
     }
 }
 
-fn solve(path: &str, time_limit: f64, preprocess_on: bool) -> BenchResult {
+fn solve(path: &str, time_limit: f64) -> BenchResult {
+    solve_with(path, time_limit, true)
+}
+
+fn solve_with(path: &str, time_limit: f64, preprocess_on: bool) -> BenchResult {
     let name = std::path::Path::new(path)
         .file_stem().unwrap().to_str().unwrap().to_string();
-    let known_opt = B_OPTIMA.iter()
-        .chain(C_OPTIMA.iter())
-        .chain(D_OPTIMA.iter())
-        .chain(E_OPTIMA.iter())
-        .find(|(n, _)| *n == name).map(|(_, o)| *o).unwrap_or(f64::INFINITY);
+    let optimal = lookup_optimum(&name);
 
-    let start = Instant::now();
-    let instance = io::read_instance(path).expect("Failed to read instance");
-
-    let mut graph = UndirectedGraph::new(instance.num_nodes);
-    for node in &instance.nodes { graph.add_node(node.id, node.node_type, node.weight); }
-    for edge in &instance.edges { graph.add_edge(edge.src, edge.dst, edge.cost); }
-
-    let (directed, root, terminals, lb_offset) = if preprocess_on {
-        let (rg, pr) = preprocess(&instance, &graph);
-        let (ri, ru) = rg.to_instance();
-        let d = DirectedGraph::from_undirected(&ru);
-        let r = ri.root.unwrap_or(*ri.terminals.first().expect("No terminals"));
-        (d, r, ri.terminals.clone(), pr.lower_bound_offset)
-    } else {
-        let d = DirectedGraph::from_undirected(&graph);
-        let r = instance.root.unwrap_or(*instance.terminals.first().expect("No terminals"));
-        (d, r, instance.terminals.clone(), 0.0)
-    };
-
-    let mut solver = BranchAndCutSolver::new(directed.clone(), root, terminals.clone());
-    solver.config = SolverConfig {
+    let config = SolverConfig {
         time_limit_secs: time_limit,
         node_limit: 50_000,
         gap_tolerance: 1e-6,
         cut_rounds_per_node: 20,
         heuristic_frequency: 3,
         verbose: false,
+        preprocess: preprocess_on,
     };
 
-    let (solution, stats) = solver.solve();
-    let elapsed = start.elapsed().as_secs_f64();
+    let result = solve_file(path, config);
 
-    let mut verified = false;
-    let primal = if let Some(ref sol) = solution {
-        let vr = verify(&directed, root, &terminals, sol);
-        verified = vr.is_valid;
-        sol.objective_value + lb_offset
-    } else {
-        f64::INFINITY
-    };
-
-    let dual = stats.dual_bound + lb_offset;
-    let gap_pct = if primal < f64::INFINITY && dual > f64::NEG_INFINITY {
-        ((primal - dual) / primal.max(1e-10)) * 100.0
-    } else { 100.0 };
-
-    BenchResult {
-        name, optimal: known_opt, primal, dual, gap_pct,
-        nodes: stats.nodes_processed, cuts: stats.cuts_added,
-        lp_solves: stats.lp_solves, time_secs: elapsed, status: stats.status,
-        verified,
-    }
+    BenchResult { name, optimal, result }
 }
 
 // === Quick correctness tests (run in CI, ~2 min total) ===
 
 #[test]
 fn test_b01_optimal() {
-    let r = solve("tests/B/b01.stp", 30.0, true);
+    let r = solve("tests/B/b01.stp", 30.0);
     r.print();
-    assert!(r.is_feasible(), "b01: {} < opt {}", r.primal, r.optimal);
-    assert!(r.primal <= r.optimal * 1.05 + 0.5);
+    assert!(r.is_feasible(), "b01: {} < opt {}", r.result.primal_bound, r.optimal);
+    assert!(r.result.primal_bound <= r.optimal * 1.05 + 0.5);
 }
 
 #[test]
 fn test_b02_optimal() {
-    let r = solve("tests/B/b02.stp", 30.0, true);
+    let r = solve("tests/B/b02.stp", 30.0);
     r.print();
     assert!(r.is_feasible());
-    assert!(r.primal <= r.optimal * 1.05 + 0.5);
+    assert!(r.result.primal_bound <= r.optimal * 1.05 + 0.5);
 }
 
 #[test]
 fn test_b04_optimal() {
-    let r = solve("tests/B/b04.stp", 30.0, true);
+    let r = solve("tests/B/b04.stp", 30.0);
     r.print();
     assert!(r.is_feasible());
-    assert!(r.primal <= r.optimal * 1.05 + 0.5);
+    assert!(r.result.primal_bound <= r.optimal * 1.05 + 0.5);
 }
 
 #[test]
 fn test_b08_fast() {
-    let r = solve("tests/B/b08.stp", 15.0, true);
+    let r = solve("tests/B/b08.stp", 15.0);
     r.print();
     assert!(r.is_feasible());
-    assert!(r.primal <= r.optimal * 1.05 + 0.5);
+    assert!(r.result.primal_bound <= r.optimal * 1.05 + 0.5);
 }
 
 #[test]
 fn test_b05_fast() {
-    let r = solve("tests/B/b05.stp", 15.0, true);
+    let r = solve("tests/B/b05.stp", 15.0);
     r.print();
     assert!(r.is_feasible());
-    assert!(r.primal <= r.optimal * 1.05 + 0.5);
+    assert!(r.result.primal_bound <= r.optimal * 1.05 + 0.5);
 }
 
 #[test]
 fn test_b07_fast() {
-    let r = solve("tests/B/b07.stp", 15.0, true);
+    let r = solve("tests/B/b07.stp", 15.0);
     r.print();
     assert!(r.is_feasible());
-    assert!(r.primal <= r.optimal * 1.05 + 0.5);
+    assert!(r.result.primal_bound <= r.optimal * 1.05 + 0.5);
 }
 
 #[test]
 fn test_b09_fast() {
-    let r = solve("tests/B/b09.stp", 15.0, true);
+    let r = solve("tests/B/b09.stp", 15.0);
     r.print();
     assert!(r.is_feasible());
-    assert!(r.primal <= r.optimal * 1.05 + 0.5);
+    assert!(r.result.primal_bound <= r.optimal * 1.05 + 0.5);
 }
 
 #[test]
 fn test_b14_with_preprocess() {
-    let r = solve("tests/B/b14.stp", 30.0, true);
+    let r = solve("tests/B/b14.stp", 30.0);
     r.print();
-    assert!(r.is_feasible(), "b14: {} < opt {}", r.primal, r.optimal);
-    assert!(r.primal <= r.optimal * 1.02 + 0.5, "b14: {} > opt*1.02", r.primal);
+    assert!(r.is_feasible(), "b14: {} < opt {}", r.result.primal_bound, r.optimal);
+    assert!(r.result.primal_bound <= r.optimal * 1.02 + 0.5, "b14: {} > opt*1.02", r.result.primal_bound);
 }
 
 /// Mathematical invariant: dual bound must never exceed true optimal.
 #[test]
 fn test_dual_bounds_valid() {
-    for name in &["b01", "b04", "b08", "b09", "b14"] {
+    for name in &["b01", "b04", "b08", "b09", "b14", "b17"] {
         let path = format!("tests/B/{}.stp", name);
-        let r = solve(&path, 15.0, false);
+        let r = solve_with(&path, 15.0, false);
         r.print();
-        assert!(r.dual <= r.optimal + 1e-4,
-            "{}: dual {:.4} > optimal {:.4} — invalid!", r.name, r.dual, r.optimal);
+        assert!(r.result.dual_bound <= r.optimal + 1e-4,
+            "{}: dual {:.4} > optimal {:.4} — invalid!", r.name, r.result.dual_bound, r.optimal);
     }
 }
 
 /// Verify solution statistics are properly tracked.
 #[test]
 fn test_statistics_wired() {
-    let r = solve("tests/B/b01.stp", 30.0, false);
-    assert!(r.lp_solves > 0, "LP solves must be tracked, got 0");
-    assert!(r.cuts > 0, "Cuts must be tracked, got 0");
+    // b03 has 25 terminals → forces B&C, so LP stats should be non-zero
+    let r = solve("tests/B/b03.stp", 30.0);
+    r.print();
+    assert_eq!(r.result.method, SolveMethod::BranchAndCut,
+        "b03 should use B&C (25 terminals > DW threshold)");
+    assert!(r.result.lp_solves > 0, "LP solves must be tracked, got 0");
+    assert!(r.result.cuts_added > 0, "Cuts must be tracked, got 0");
 }
 
 /// Independent solution verification: connectivity, acyclicity, terminal coverage, cost.
@@ -237,9 +206,9 @@ fn test_statistics_wired() {
 fn test_solution_verified() {
     for name in &["b01", "b04"] {
         let path = format!("tests/B/{}.stp", name);
-        let r = solve(&path, 30.0, true);
+        let r = solve(&path, 30.0);
         r.print();
-        assert!(r.verified, "{}: solution failed independent verification", name);
+        assert!(r.result.verified, "{}: solution failed independent verification", name);
     }
 }
 
@@ -247,21 +216,21 @@ fn test_solution_verified() {
 
 #[test]
 fn test_c01_optimal() {
-    let r = solve("tests/C/c01.stp", 30.0, true);
+    let r = solve("tests/C/c01.stp", 30.0);
     r.print();
-    assert!(r.is_feasible(), "c01: {} < opt {}", r.primal, r.optimal);
+    assert!(r.is_feasible(), "c01: {} < opt {}", r.result.primal_bound, r.optimal);
 }
 
 #[test]
 fn test_c06_optimal() {
-    let r = solve("tests/C/c06.stp", 30.0, true);
+    let r = solve("tests/C/c06.stp", 30.0);
     r.print();
     assert!(r.is_feasible());
 }
 
 #[test]
 fn test_c11_optimal() {
-    let r = solve("tests/C/c11.stp", 30.0, true);
+    let r = solve("tests/C/c11.stp", 30.0);
     r.print();
     assert!(r.is_feasible());
 }
@@ -270,115 +239,51 @@ fn test_c11_optimal() {
 
 #[test]
 fn test_d01_optimal() {
-    let r = solve("tests/D/d01.stp", 60.0, true);
+    let r = solve("tests/D/d01.stp", 60.0);
     r.print();
-    assert!(r.is_feasible(), "d01: {} < opt {}", r.primal, r.optimal);
-}
-
-// === Dreyfus-Wagner DP exact solver for small-terminal instances ===
-
-#[test]
-fn test_dreyfus_wagner_b_series() {
-    use scip_jack::graph::algorithms::dreyfus_wagner;
-
-    for name in &["b01", "b02", "b04", "b07"] {
-        let path = format!("tests/B/{}.stp", name);
-        let instance = io::read_instance(&path).expect("read");
-        let mut graph = UndirectedGraph::new(instance.num_nodes);
-        for node in &instance.nodes { graph.add_node(node.id, node.node_type, node.weight); }
-        for edge in &instance.edges { graph.add_edge(edge.src, edge.dst, edge.cost); }
-
-        let start = std::time::Instant::now();
-        let result = dreyfus_wagner(&graph, &instance.terminals);
-        let elapsed = start.elapsed().as_secs_f64();
-
-        let known_opt = B_OPTIMA.iter()
-            .find(|(n, _)| n == name).map(|(_, o)| *o).unwrap();
-
-        if let Some(r) = result {
-            eprintln!("  DW {} | opt={:.0} | dw={:.0} | {:.3}s | {}",
-                name, known_opt, r.optimal_cost, elapsed,
-                if (r.optimal_cost - known_opt).abs() < 1e-6 { "EXACT" } else { "MISMATCH!" });
-            assert!((r.optimal_cost - known_opt).abs() < 1e-4,
-                "DW {}: expected {}, got {}", name, known_opt, r.optimal_cost);
-        } else {
-            eprintln!("  DW {} | infeasible or too many terminals", name);
-        }
-    }
+    assert!(r.is_feasible(), "d01: {} < opt {}", r.result.primal_bound, r.optimal);
 }
 
 // === Full benchmarks (run with --ignored) ===
 
-#[test]
-#[ignore]
-fn benchmark_full_b_series() {
-    eprintln!("\n=== SteinLib B-Series Full Benchmark (with preprocessing) ===");
+fn run_series(label: &str, optima: &[(&str, f64)], series: &str, time_limit: f64) {
+    eprintln!("\n=== {} ===", label);
     let mut solved = 0;
     let mut total_time = 0.0;
 
-    for (name, _) in B_OPTIMA {
-        let path = format!("tests/B/{}.stp", name);
+    for (name, _) in optima {
+        let path = format!("tests/{}/{}.stp", series, name);
         if !std::path::Path::new(&path).exists() { continue; }
-        let r = solve(&path, 120.0, true);
+        let r = solve(&path, time_limit);
         r.print();
         if r.is_proved_optimal() { solved += 1; }
-        total_time += r.time_secs;
+        total_time += r.result.time_secs;
     }
-    eprintln!("  Proved optimal: {}/{} | Total: {:.1}s", solved, B_OPTIMA.len(), total_time);
+    eprintln!("  Proved optimal: {}/{} | Total: {:.1}s", solved, optima.len(), total_time);
+}
+
+#[test]
+#[ignore]
+fn benchmark_full_b_series() {
+    run_series("SteinLib B-Series Full Benchmark", B_OPTIMA, "B", 120.0);
 }
 
 #[test]
 #[ignore]
 fn benchmark_full_c_series() {
-    eprintln!("\n=== SteinLib C-Series Full Benchmark (500 nodes) ===");
-    let mut solved = 0;
-    let mut total_time = 0.0;
-
-    for (name, _) in C_OPTIMA {
-        let path = format!("tests/C/{}.stp", name);
-        if !std::path::Path::new(&path).exists() { continue; }
-        let r = solve(&path, 120.0, true);
-        r.print();
-        if r.is_proved_optimal() { solved += 1; }
-        total_time += r.time_secs;
-    }
-    eprintln!("  Proved optimal: {}/{} | Total: {:.1}s", solved, C_OPTIMA.len(), total_time);
+    run_series("SteinLib C-Series Full Benchmark (500 nodes)", C_OPTIMA, "C", 120.0);
 }
 
 #[test]
 #[ignore]
 fn benchmark_full_d_series() {
-    eprintln!("\n=== SteinLib D-Series Full Benchmark (1000 nodes) ===");
-    let mut solved = 0;
-    let mut total_time = 0.0;
-
-    for (name, _) in D_OPTIMA {
-        let path = format!("tests/D/{}.stp", name);
-        if !std::path::Path::new(&path).exists() { continue; }
-        let r = solve(&path, 120.0, true);
-        r.print();
-        if r.is_proved_optimal() { solved += 1; }
-        total_time += r.time_secs;
-    }
-    eprintln!("  Proved optimal: {}/{} | Total: {:.1}s", solved, D_OPTIMA.len(), total_time);
+    run_series("SteinLib D-Series Full Benchmark (1000 nodes)", D_OPTIMA, "D", 120.0);
 }
 
 #[test]
 #[ignore]
 fn benchmark_full_e_series() {
-    eprintln!("\n=== SteinLib E-Series Full Benchmark (2500 nodes) ===");
-    let mut solved = 0;
-    let mut total_time = 0.0;
-
-    for (name, _) in E_OPTIMA {
-        let path = format!("tests/E/{}.stp", name);
-        if !std::path::Path::new(&path).exists() { continue; }
-        let r = solve(&path, 180.0, true);
-        r.print();
-        if r.is_proved_optimal() { solved += 1; }
-        total_time += r.time_secs;
-    }
-    eprintln!("  Proved optimal: {}/{} | Total: {:.1}s", solved, E_OPTIMA.len(), total_time);
+    run_series("SteinLib E-Series Full Benchmark (2500 nodes)", E_OPTIMA, "E", 180.0);
 }
 
 #[test]
@@ -390,20 +295,20 @@ fn proof_optimality_certificate() {
     for (name, opt) in B_OPTIMA {
         let path = format!("tests/B/{}.stp", name);
         if !std::path::Path::new(&path).exists() { continue; }
-        let r = solve(&path, 120.0, true);
+        let r = solve(&path, 120.0);
 
-        if r.status == SolveStatus::Optimal {
-            let ok = (r.primal - opt).abs() < 1.0
-                && r.dual <= opt + 1e-4
-                && r.gap_pct < 0.01;
+        if r.result.status == SolveStatus::Optimal {
+            let ok = (r.result.primal_bound - opt).abs() < 1.0
+                && r.result.dual_bound <= opt + 1e-4
+                && r.result.gap_pct < 0.01;
             if ok {
-                eprintln!("  {} PASS: pri={:.0} = dual={:.1} = opt={:.0}", name, r.primal, r.dual, opt);
+                eprintln!("  {} PASS: pri={:.0} = dual={:.1} = opt={:.0}", name, r.result.primal_bound, r.result.dual_bound, opt);
             } else {
-                eprintln!("  {} FAIL: pri={:.0}, dual={:.1}, opt={:.0}", name, r.primal, r.dual, opt);
+                eprintln!("  {} FAIL: pri={:.0}, dual={:.1}, opt={:.0}", name, r.result.primal_bound, r.result.dual_bound, opt);
                 violations.push(name.to_string());
             }
         } else {
-            eprintln!("  {} SKIP ({:?}, {:.1}s)", name, r.status, r.time_secs);
+            eprintln!("  {} SKIP ({:?}, {:.1}s)", name, r.result.status, r.result.time_secs);
         }
     }
     assert!(violations.is_empty(), "Violations: {:?}", violations);

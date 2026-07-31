@@ -6,3 +6,6 @@ pub mod heuristics;
 pub mod branch_and_bound;
 pub mod transformations;
 pub mod io;
+pub mod solver;
+
+pub use solver::{solve_file, SolveResult, SolveMethod};
