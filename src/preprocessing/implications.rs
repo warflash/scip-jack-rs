@@ -118,7 +118,7 @@ fn find_triangle_conflicts(graph: &mut ReducibleGraph, ig: &mut ImplicationGraph
             if let Some(&(_, eid_vw, cost_vw)) = neighbors_v.iter().find(|&&(n, eid, _)| n == w && graph.is_edge_valid(eid)) {
                 // Triangle {u,v,w} with edges eid_uv, eid_uw, eid_vw
                 // Check if longest edge is dominated by the other two
-                if cost_uv >= cost_uw + cost_vw - 1e-9 && !graph.contracted_edges.contains(&eid_uv) {
+                if cost_uv > cost_uw + cost_vw + 1e-9 && !graph.contracted_edges.contains(&eid_uv) {
                     // {u,v} dominated by path u-w-v
                     if graph.is_terminal(w) {
                         // w is a terminal, so path through w is valid for SD
@@ -127,13 +127,13 @@ fn find_triangle_conflicts(graph: &mut ReducibleGraph, ig: &mut ImplicationGraph
                         ig.implications.entry(eid_uv).or_default().push(eid_vw);
                     }
                 }
-                if cost_uw >= cost_uv + cost_vw - 1e-9 && !graph.contracted_edges.contains(&eid_uw) {
+                if cost_uw > cost_uv + cost_vw + 1e-9 && !graph.contracted_edges.contains(&eid_uw) {
                     if graph.is_terminal(v) {
                         ig.implications.entry(eid_uw).or_default().push(eid_uv);
                         ig.implications.entry(eid_uw).or_default().push(eid_vw);
                     }
                 }
-                if cost_vw >= cost_uv + cost_uw - 1e-9 && !graph.contracted_edges.contains(&eid_vw) {
+                if cost_vw > cost_uv + cost_uw + 1e-9 && !graph.contracted_edges.contains(&eid_vw) {
                     if graph.is_terminal(u) {
                         ig.implications.entry(eid_vw).or_default().push(eid_uv);
                         ig.implications.entry(eid_vw).or_default().push(eid_uw);
@@ -147,27 +147,28 @@ fn find_triangle_conflicts(graph: &mut ReducibleGraph, ig: &mut ImplicationGraph
 }
 
 /// Propagate implications to find dominated edges.
-/// If e implies f, and f is already fixed/removed, then e can be removed.
-/// If e implies f and f implies g, then e implies g (transitivity).
+///
+/// An implication "e → {f1, f2}" means "e can be replaced by f1 + f2 in any
+/// optimal solution." This means e is dominated WHEN both f1 and f2 are still
+/// available. If any alternative edge has been removed, the dominance breaks
+/// and e might be needed.
+///
+/// So we remove e only if ALL its alternative edges are still valid.
 fn propagate_implications(graph: &mut ReducibleGraph, ig: &ImplicationGraph) -> u32 {
     let mut removed = 0u32;
 
-    // If an edge implies another edge that's been removed, the implying edge
-    // cannot be part of any optimal solution
     for (eid, implied) in &ig.implications {
         if !graph.is_edge_valid(*eid) { continue; }
-        for &implied_eid in implied {
-            if !graph.is_edge_valid(implied_eid) {
-                graph.remove_edge(*eid);
-                removed += 1;
-                break;
-            }
+        if implied.is_empty() { continue; }
+
+        let all_alternatives_valid = implied.iter()
+            .all(|&implied_eid| graph.is_edge_valid(implied_eid));
+
+        if all_alternatives_valid {
+            graph.remove_edge(*eid);
+            removed += 1;
         }
     }
-
-    // Conflict propagation: if two edges conflict and one is fixed (must be used),
-    // the other can be removed. Currently we don't have "fixed" edges in this context,
-    // so this is a no-op but structured for future integration with branch-and-bound.
 
     removed
 }

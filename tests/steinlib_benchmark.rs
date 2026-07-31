@@ -180,9 +180,9 @@ fn test_b14_with_preprocess() {
 /// Mathematical invariant: dual bound must never exceed true optimal.
 #[test]
 fn test_dual_bounds_valid() {
-    for name in &["b01", "b04", "b08", "b09", "b14", "b17"] {
+    for name in &["b01", "b04", "b08", "b09", "b14", "b17", "b18"] {
         let path = format!("tests/B/{}.stp", name);
-        let r = solve_with(&path, 15.0, false);
+        let r = solve_with(&path, 30.0, false);
         r.print();
         assert!(r.result.dual_bound <= r.optimal + 1e-4,
             "{}: dual {:.4} > optimal {:.4} — invalid!", r.name, r.result.dual_bound, r.optimal);
