@@ -155,7 +155,7 @@ pub fn shortest_path_heuristic(
         }
     }
 
-    Some(finalize(idx, active, root, &tree_nodes, is_terminal, ws))
+    mst_prune(idx, active, root, &tree_nodes, is_terminal, ws)
 }
 
 /// Minimum spanning tree of the subgraph induced on `tree_nodes`, pruned of
@@ -164,6 +164,14 @@ pub fn shortest_path_heuristic(
 /// Exposed on its own because it doubles as a recombination operator: feed it the
 /// union of the vertex sets of several solutions and it returns the best tree
 /// inside that union, which is at least as good as any of them.
+///
+/// Returns `None` when the induced subgraph does not connect every terminal to
+/// the root. That is not a hypothetical: the LP-guided heuristic feeds this the
+/// *support* of a fractional point, which is routinely disconnected, and the
+/// result is then a cheap subgraph spanning only part of the terminal set. On
+/// PACE instance105 exactly that produced an "incumbent" of cost 226 leaving ten
+/// terminals unreachable, which pruned the search against itself and was
+/// reported as a proved optimum.
 pub fn mst_prune(
     idx: &ArcIndex,
     active: &[bool],
@@ -171,8 +179,34 @@ pub fn mst_prune(
     tree_nodes: &[NodeId],
     is_terminal: &[bool],
     ws: &mut SphWorkspace,
-) -> SphResult {
-    finalize(idx, active, root, tree_nodes, is_terminal, ws)
+) -> Option<SphResult> {
+    let result = finalize(idx, active, root, tree_nodes, is_terminal, ws);
+    spans_every_terminal(idx, root, &result, is_terminal).then_some(result)
+}
+
+/// Whether every terminal is reachable from `root` along the arcs of `result`.
+fn spans_every_terminal(
+    idx: &ArcIndex,
+    root: NodeId,
+    result: &SphResult,
+    is_terminal: &[bool],
+) -> bool {
+    let n = idx.num_nodes();
+    let mut reached = vec![false; n];
+    reached[root as usize] = true;
+    // The arcs come out of a rooted orientation, so one relaxation sweep per arc
+    // is enough; iterate to a fixpoint anyway rather than rely on their order.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &a in &result.arcs {
+            if reached[idx.tail(a) as usize] && !reached[idx.head(a) as usize] {
+                reached[idx.head(a) as usize] = true;
+                changed = true;
+            }
+        }
+    }
+    (0..n).all(|v| !is_terminal[v] || reached[v])
 }
 
 /// Rebuild an MST on the induced subgraph, prune non-terminal leaves, and orient
@@ -401,6 +435,35 @@ mod tests {
 
         let r = shortest_path_heuristic(&idx, &active, &w, 1, 1, &terminals, &is_t, &mut ws).unwrap();
         assert!((r.cost - 9.0).abs() < 1e-9, "expected 9 (1-2-3-4), got {}", r.cost);
+    }
+
+    /// `mst_prune` is fed the support of a fractional LP point, which is
+    /// routinely disconnected. It must refuse rather than return the cheap
+    /// subgraph that spans only the root's component.
+    #[test]
+    fn mst_prune_refuses_a_vertex_set_that_cannot_reach_every_terminal() {
+        // Two components: {1, 2} holding the root and a terminal, and {3, 4}
+        // holding another terminal. No edge joins them.
+        let mut g = UndirectedGraph::new(4);
+        g.add_node(1, NodeType::Terminal, 0.0);
+        g.add_node(2, NodeType::Terminal, 0.0);
+        g.add_node(3, NodeType::Terminal, 0.0);
+        g.add_node(4, NodeType::Steiner, 0.0);
+        g.add_edge(1, 2, 1.0);
+        g.add_edge(3, 4, 1.0);
+
+        let terminals = vec![1, 2, 3];
+        let (d, is_t) = setup(&g, &terminals);
+        let idx = ArcIndex::new(&d);
+        let active = vec![true; idx.num_arcs()];
+        let mut ws = SphWorkspace::new(idx.num_nodes());
+
+        assert!(
+            mst_prune(&idx, &active, 1, &[1, 2, 3, 4], &is_t, &mut ws).is_none(),
+            "returned a tree that cannot reach terminal 3"
+        );
+        // The connected half on its own is fine when it is all that is asked for.
+        assert!(mst_prune(&idx, &active, 1, &[1, 2], &is_t, &mut ws).is_none());
     }
 
     #[test]

@@ -128,8 +128,8 @@ pub fn key_path_exchange(
     }
     nodes.sort_unstable();
     nodes.dedup();
-    let rebuilt = mst_prune(idx, active, root, &nodes, is_terminal, sws);
-    Some(if rebuilt.cost < solution.cost - 1e-9 { rebuilt } else { return None })
+    let rebuilt = mst_prune(idx, active, root, &nodes, is_terminal, sws)?;
+    (rebuilt.cost < solution.cost - 1e-9).then_some(rebuilt)
 }
 
 /// One sweep over every key path, applying each improving exchange as it is

@@ -400,14 +400,16 @@ fn round(
             let mut union: Vec<NodeId> = pool[..take].iter().flat_map(|(_, v)| v.iter().copied()).collect();
             union.sort_unstable();
             union.dedup();
-            let merged = crate::heuristics::sph::mst_prune(
+            let Some(merged) = crate::heuristics::sph::mst_prune(
                 &idx,
                 &active,
                 primary,
                 &union,
                 &is_terminal,
                 &mut ws,
-            );
+            ) else {
+                continue;
+            };
             let merged = polish(merged, primary, &mut kws, &mut ws);
             if merged.cost < upper_bound - 1e-9 {
                 upper_bound = merged.cost;

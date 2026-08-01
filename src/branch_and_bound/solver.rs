@@ -330,8 +330,13 @@ impl BranchAndCutSolver {
             match result {
                 NodeResult::Pruned => {}
                 NodeResult::IntegerFeasible(solution) => {
-                    self.tree.update_primal(solution);
-                    self.tree.prune();
+                    // An integral LP point is only a tree once every cut has
+                    // been separated. Until then it can be a disconnected arc
+                    // set, so it is verified rather than trusted.
+                    if self.verify_solution(&solution) {
+                        self.tree.update_primal(solution);
+                        self.tree.prune();
+                    }
                 }
                 NodeResult::Branch(branch_var) => {
                     self.create_children(node_id, branch_var);
@@ -616,7 +621,10 @@ impl BranchAndCutSolver {
                     self.sph_ws.as_mut().unwrap(),
                     self.kp_ws.as_mut().unwrap(),
                 );
-                if let Some(sol) = candidate {
+                if let Some(sol) = candidate.filter(|s| {
+                    crate::model::verify_solution(&self.graph, self.root, &self.terminals, s)
+                        .is_valid
+                }) {
                     if sol.objective_value < self.tree.global_primal_bound - 1e-9 {
                         self.recombination.add_solution(sol.clone());
                         self.tree.update_primal(sol);
@@ -662,7 +670,11 @@ impl BranchAndCutSolver {
             sorted_flow.sort_by(|a, b| b.violation.partial_cmp(&a.violation).unwrap_or(std::cmp::Ordering::Equal));
 
             let mut new_cut_arcs: Vec<Vec<ArcId>> = Vec::new();
-            let max_cuts_per_round = 30;
+            // Install everything the nested separator found. Generating a family
+            // and then discarding five sixths of it wastes the max-flows that
+            // produced it, and nested cuts are disjoint by construction, so they
+            // are not the near-duplicates that a cap is meant to suppress.
+            let max_cuts_per_round = 200;
             for cut in sorted_flow.iter().take(max_cuts_per_round) {
                 let mut sig = cut.cut_arcs.clone();
                 sig.sort();
@@ -1003,9 +1015,10 @@ fn lp_guided_tree(
         };
 
         if support.len() > 1 {
-            let rebuilt = mst_prune(idx, &active, root, &support, is_terminal, sws);
-            if !rebuilt.arcs.is_empty() {
-                offer(rebuilt, &mut best);
+            if let Some(rebuilt) = mst_prune(idx, &active, root, &support, is_terminal, sws) {
+                if !rebuilt.arcs.is_empty() {
+                    offer(rebuilt, &mut best);
+                }
             }
         }
 
@@ -1075,23 +1088,16 @@ impl BranchAndCutSolver {
 
     /// Independent solution verifier: connectivity check via BFS from root.
     /// Verifies all terminals are reachable through selected arcs.
+    /// The single gate every incumbent passes through.
+    ///
+    /// There used to be two verifiers: a connectivity-only check here and the
+    /// strict one in `model::verifier`, which the top level applied afterwards.
+    /// They disagreed, and the disagreement was not academic — on PACE
+    /// instance105 the loose check accepted an arc set of cost 226 that left ten
+    /// terminals unreachable, which became the incumbent, pruned the whole tree
+    /// against itself and produced a proof of optimality at a cost no tree has.
     fn verify_solution(&self, solution: &SteinerSolution) -> bool {
-        let arc_set: HashSet<ArcId> = solution.arcs.iter().copied().collect();
-        let mut reachable: HashSet<NodeId> = HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(self.root);
-        reachable.insert(self.root);
-
-        while let Some(node) = queue.pop_front() {
-            for &(head, arc_id) in self.graph.delta_plus(node) {
-                if arc_set.contains(&arc_id) && !reachable.contains(&head) {
-                    reachable.insert(head);
-                    queue.push_back(head);
-                }
-            }
-        }
-
-        self.terminals.iter().all(|t| reachable.contains(t))
+        crate::model::verify_solution(&self.graph, self.root, &self.terminals, solution).is_valid
     }
 
     fn create_children(&mut self, parent_id: u64, branch_var: ArcId) {
@@ -1159,9 +1165,15 @@ impl BranchAndCutSolver {
         // seeded from ascend-and-prune before the first node was touched, and
         // which the old unconditional assignment threw away the moment a node
         // was queued with no bound of its own yet.
-        if from_queue > self.tree.global_dual_bound {
-            self.tree.global_dual_bound = from_queue;
-        }
+        //
+        // It also never exceeds a value that is actually achieved. Node bounds
+        // can run far above the cutoff — the node-local eliminations delete
+        // everything that cannot beat the incumbent, so once the incumbent *is*
+        // optimal the node LP jumps to whatever survives — and without this clamp
+        // that leaks out as a dual bound above the primal, which reads as a
+        // negative gap and, through `is_solved`, as a proof.
+        let raised = from_queue.max(self.tree.global_dual_bound);
+        self.tree.global_dual_bound = raised.min(self.tree.global_primal_bound);
     }
 }
 
