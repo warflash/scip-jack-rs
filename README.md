@@ -1,82 +1,97 @@
 # scip-jack
 
-A mathematically optimal Steiner tree problem solver implemented in Rust, based on the
-directed cut formulation from the SCIP-Jack papers by Gamrath, Koch, Maher, Rehfeldt, and Shinano (ZIB).
+`scip-jack` is a Rust research solver for the classical Steiner Tree Problem in
+Graphs (STP). It uses a bidirected directed-cut relaxation, safe graph
+reductions, dual-ascent bounds, primal heuristics, and branch-and-cut with
+HiGHS.
 
-## Goal
+This is a working solver prototype, not a complete reimplementation of
+SCIP-Jack and not a general solver for every problem type named in the source
+tree.
 
-Implement a high-performance, exact solver for the Steiner Tree Problem in Graphs (STP) and its
-variants using branch-and-cut with the directed cut formulation. The implementation targets
-mathematical optimality — finding provably optimal solutions via integer programming techniques.
+## Current solver pipeline
 
-## Problem
+For a classical `.stp` instance, the top-level solver runs:
 
-Given an undirected connected graph G = (V, E), costs c : E → Q+ and a set T ⊂ V of terminals,
-find a minimum weight tree S ⊆ G which spans T.
-
-## Approach: Directed Cut Formulation
-
-The solver transforms the undirected STP into a directed Steiner arborescence problem and solves
-the following integer program:
-
-```
-min  c^T y
-
-s.t. y(δ+(W)) ≥ 1,        ∀W ⊂ V, r ∈ W, (V \ W) ∩ T ≠ ∅
-     y(δ⁻(v)) = 0,        if v = r
-     y(δ⁻(v)) = 1,        if v ∈ T \ {r}
-     y(δ⁻(v)) ≤ 1,        if v ∈ N
-     y(δ⁻(v)) ≤ y(δ+(v)), ∀v ∈ N
-     y(δ⁻(v)) ≥ y_a,      ∀a ∈ δ+(v), v ∈ N
-     0 ≤ y_a ≤ 1,          ∀a ∈ A
-     y_a ∈ {0, 1},          ∀a ∈ A
+```text
+read instance
+  -> classical reductions
+  -> Dreyfus-Wagner DP when the estimated work is small
+     or dual ascent / reduced-cost pruning
+  -> branch-and-cut for the remaining instance
+  -> independent incumbent verification and bound reporting
 ```
 
-## Supported Problem Variants
+The implemented STP path includes:
 
-- **STP** — Steiner Tree Problem in Graphs
-- **SAP** — Steiner Arborescence Problem
-- **RSMTP** — Rectilinear Steiner Minimum Tree Problem
-- **NWSTP** — Node-Weighted Steiner Tree Problem
-- **PCSTP** — Prize-Collecting Steiner Tree Problem
-- **RPCSTP** — Rooted Prize-Collecting Steiner Tree Problem
-- **MWCSP** — Maximum-Weight Connected Subgraph Problem
-- **DCSTP** — Degree-Constrained Steiner Tree Problem
-- **GSTP** — Group Steiner Tree Problem
-- **HCSTP** — Hop-Constrained Steiner Tree Problem
+- `.stp` parsing for graphs, terminals, optional roots, coordinates, prizes,
+  degree metadata, and hop metadata;
+- degree, block/cut-vertex, nearest-vertex, bottleneck-Steiner-distance, and
+  star-domination reductions, with contracted cost tracked as an objective
+  offset;
+- shortest-path, LP-guided, MST-pruning, key-path exchange, iterated-local-
+  search, and recombination heuristics;
+- Wong-style dual ascent with replayable in-memory certificates and
+  reduced-cost arc/node fixing;
+- a persistent HiGHS LP model with structural rows, a global cut pool, warm
+  starts, and cut-pool ageing;
+- flow, cycle, terminal-partition, and terminal-free-set cut separation;
+- branch-and-bound with time/node limits, strong branching near the root,
+  pseudo-cost feedback, and best-estimate node selection; and
+- Dreyfus-Wagner exact dynamic programming for affordable small-terminal
+  instances.
 
-## Architecture
+`Optimal` is reported only when the maintained primal and dual bounds meet the
+configured tolerance. Costs and LP computations currently use `f64`, so this is
+an engineering-level numerical result rather than a formal exact-arithmetic
+proof. The internal verifier checks arc validity, cost consistency, reachability,
+terminal coverage, directed acyclicity, and duplicate arcs.
 
+## Usage
+
+Run the command-line solver on a SteinLib-style instance:
+
+```text
+cargo run --release -- path/to/instance.stp --time-limit 60 --quiet
 ```
-src/
-├── main.rs              # Entry point
-├── graph/               # Graph data structures (directed/undirected)
-├── model/               # Cut formulation and LP relaxation
-├── preprocessing/       # Reduction techniques
-├── separation/          # Cut separation (flow-cuts, Gomory, MIR)
-├── heuristics/          # Primal heuristics (constructive, local search, recombination)
-├── branch_and_bound/    # B&B tree management, branching rules, node selection
-├── transformations/     # Problem variant transformations (NWSTP→SAP, PCSTP→SAP, etc.)
-└── io/                  # Instance readers (STP format, SteinLib)
+
+The objective value is written to standard output. Progress and bound
+statistics are written to standard error. Available options include
+`--time-limit`, `--node-limit`, `--gap`, `--quiet`, `--no-preprocess`, and the
+separator switches `--no-cycle-cuts`, `--no-partition-cuts`, and `--no-tf-cuts`.
+
+Use the library API through `scip_jack::solve`, `solve_file`, or the exported
+`SolverConfig`.
+
+## Scope and known gaps
+
+The reader recognizes SAP, RSMTP, NWSTP, PCSTP, RPCSTP, MWCSP, DCSTP, and HCSTP
+problem labels, and transformation functions exist for several of them. The
+CLI and `solve_file` currently dispatch only the classical STP representation.
+RSMTP conversion still returns a placeholder instead of a completed Hanan-grid
+graph, and the variant transformations need checked artificial-node allocation
+and end-to-end objective/solution restoration before they can be advertised as
+supported.
+
+The legacy `model::CutFormulation` helper also contains an unfinished max-flow
+stub; the active solver uses `model::LpRelaxation` together with the separators
+under `src/separation/` instead.
+
+For the implementation audit, the current non-ignored test suite passes:
+93 library tests, 6 integration tests, and 16 SteinLib checks; 5 longer
+benchmark/certificate tests remain ignored. Run the suite yourself with:
+
+```text
+cargo test --all-targets
 ```
 
-## References
+## Documentation
 
-- Gamrath, Koch, Rehfeldt, Shinano. "SCIP-Jack – A massively parallel STP solver." ZIB Report 14-35 (2014)
-- Gamrath, Koch, Maher, Rehfeldt, Shinano. "SCIP-Jack – A solver for STP and variants with parallelization extensions." (2015)
-- Koch, Martin. "Solving Steiner tree problems in graphs to optimality." Networks 32 (1998)
-- Polzin. "Algorithms for the Steiner problem in networks." PhD thesis, Saarland University (2004)
-
-## Papers
-
-The `papers/` directory contains the reference PDFs and their extracted content (`EXTRACTED_CONTENT.md`)
-with all mathematical formulations, transformations, and computational results.
-
-## Benchmark comparisons
-
-`BENCHMARK_REFERENCE_RESULTS.md` records the public PACE, DIMACS, SteinLib, and SCIP-Jack benchmark suites, including published solved counts, time limits, and runtime results. It also defines the end-to-end comparison protocol for adding external solver baselines.
-
-`BENCHMARK_CERTIFICATION_GUIDE.md` defines the correctness and optimality-certification contract for those benchmarks.
+- [Mathematical research and implementation-status memo](SCIP_JACK_MATH_RESEARCH.md)
+- [Paper index](papers/PAPER_INDEX.md)
+- [Extracted paper content](papers/EXTRACTED_CONTENT.md)
+- [Benchmark reference results](BENCHMARK_REFERENCE_RESULTS.md)
+- [Benchmark certification guide](BENCHMARK_CERTIFICATION_GUIDE.md)
 
 ## License
 
