@@ -1577,18 +1577,28 @@ true optimum on **560 of 560** random instances.
 
 **Pass counts are unchanged, and that is the honest headline.** What did change
 is the primal, on the instances where it was the binding constraint:
-instance162 goes 5,259 -> **5,193**, which is the optimum; instance024 goes
-1,757 -> **1,756**, which is the optimum; instance194 -2. Against that,
-instance163 +63 and instance187 +3, from a round whose time went elsewhere. No
-instance reports a value differing from its reference under an `Optimal` status
-on any slice.
+instance162 goes 5,259 -> **5,193**, which is the optimum, and instance194 -2.
+Against that, instance187 +3 and instance165 +2. All four are reproducible over
+three isolated runs of each binary. No instance reports a value differing from
+its reference under an `Optimal` status on any slice.
 
-instance024 is the one worth chasing. Its primal now reaches 1,756 and the
-**hypergraphic dual certifies exactly 1,756** in 0.17 s (§35) — the two objects
-that would close it are both present in the same binary and never meet, because
-by the time the certificate is offered the pass has 0.00 s left and it is
-skipped. That is a budget-ordering problem, not a mathematical one, and it is
-the cheapest unclaimed proof in this file.
+**A correction, and a methodology note.** An earlier version of this section
+claimed instance024's primal improved 1,757 -> 1,756 and instance163's worsened
+by 63. Neither survives repetition: run in isolation the control also reaches
+1,756 on 024, and on 163 the control gives 5,274 against this build's 5,272 —
+the 5,209 it produced during one sweep was a lucky run. **Per-instance deltas
+read off a single time-limited sweep are inside the noise**, because how many
+iterated-local-search rounds fit in a fixed budget depends on machine load. Only
+deltas confirmed by repeated isolated runs, or measured at a fixed work budget
+by `certify_probe`, are quoted anywhere in this file from here on.
+
+instance024 is worth chasing, though not because of anything this round did:
+both builds already reach a primal of 1,756, and the **hypergraphic dual
+certifies exactly 1,756** in 0.17 s (§35). The two objects that would close it
+sit in the same binary and never meet, because by the time the certificate is
+offered the pass has 0.00 s left and it is skipped. That is a budget-ordering
+problem, not a mathematical one, and it is the cheapest unclaimed proof in this
+file — and it was already unclaimed before this round.
 
 ### 38. Two primal changes that measured as losses
 
@@ -1703,8 +1713,11 @@ the solves. And the loop converges faster: 65 solves against 127.
 | SteinLib D @5 s | 20/20, 11.6 s | 20/20, 11.3 s |
 | SteinLib E @20 s | 19/20, 68.5 s | 19/20, 69.1 s |
 
-Pass counts unchanged again. instance189's dual gains 16 units, instance165's 5,
-instance162's 5. No instance reports a value differing from its reference under
+Pass counts unchanged again. The pipeline-level dual deltas quoted here in an
+earlier version — instance189 +16 in particular — do not survive repetition and
+have been withdrawn; the root-level figures in the table above are measured at a
+fixed twenty-second budget and do. No instance reports a value differing from
+its reference under
 an `Optimal` status on any slice. 140 library tests, the new one checking the
 decomposition lemma's three claims — boundaries inside the crossing set,
 boundaries pairwise disjoint, member count equal to the right-hand side — on
@@ -1821,11 +1834,18 @@ status on any slice. 127 library tests at the start of the round, **145** now.
 **Pass counts did not move, and that is the round's honest headline.** What
 moved is underneath them:
 
-- instance162's primal 5,259 -> **5,193**, the optimum; instance024's
-  1,757 -> **1,756**, the optimum; instance194 -2.
+- instance162's primal 5,259 -> **5,193**, the optimum, and instance194 -2 —
+  both reproducible over three isolated runs. Against them instance187 +3 and
+  instance165 +2, also reproducible.
 - instance172's root LP 7,086 -> **7,121** and its certified packing
-  7,073 -> **7,105**, in half the solves.
-- instance189's certified packing +19 and its dual +16.
+  7,073 -> **7,105**, in half the solves, at a fixed twenty-second budget.
+- instance189's certified packing 19,693 -> **19,712** at the same fixed budget.
+  Its *pipeline* dual is noise-dominated and no claim is made about it.
+
+Set against that, the wall clock is up: [1..140] 49.9 s -> 54.5 s and
+[155..200] 141.2 s -> 146.4 s, for slices whose pass counts did not move. The
+exact steps are cheap but they are not free, and nothing this round added has
+yet converted a bound into a proof.
 
 Three directions were **closed with proof**, which is the other thing this round
 bought:
