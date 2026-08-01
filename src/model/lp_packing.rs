@@ -86,7 +86,7 @@
 
 use std::time::Instant;
 
-use crate::graph::algorithms::{dual_ascent_cuts, dual_ascent_packing_residual, ArcIndex};
+use crate::graph::algorithms::{dual_ascent_cuts, dual_ascent_packing, dual_ascent_packing_residual, ArcIndex};
 use crate::graph::{ArcId, Cost, DirectedGraph, NodeId};
 use crate::model::LpRelaxation;
 use crate::separation::FlowCutSeparator;
@@ -334,6 +334,30 @@ pub fn extend_by_residual_ascent(
 }
 
 /// The outcome of the bounded root cut loop.
+/// Roots, besides the model's own, whose dual ascent contributes seed cuts.
+///
+/// Each costs one ascent — microseconds against a single simplex solve — and
+/// contributes a cut family the model's own root cannot produce, because the
+/// ascent saturates arcs in an order that depends on where it started.
+const ALT_SEED_ROOTS: usize = 4;
+
+/// What one round of the root separation loop cost and bought.
+///
+/// This exists to answer a question that guesswork got wrong twice: a
+/// 243-vertex, 1215-edge cut LP was taking 244 solves to converge, and neither
+/// "the LP is slow" nor "the separator is weak" was checkable without it.
+#[derive(Debug, Clone, Copy)]
+pub struct RoundStat {
+    pub bound: Cost,
+    /// Structural rows pulled in from the held-back pool.
+    pub structural: usize,
+    /// Violated connectivity cuts the separator returned.
+    pub cuts: usize,
+    /// Rows in the model *after* this round's additions and pruning.
+    pub rows: usize,
+    pub secs: f64,
+}
+
 pub struct RootCertificate {
     /// The LP's own dual bound, valid for the instance as given.
     pub lp_bound: Cost,
@@ -362,6 +386,8 @@ pub struct RootCertificate {
     /// the previous, smaller model's vector in place.
     pub eliminated_arcs: Vec<ArcId>,
     pub lp_solves: u64,
+    /// One entry per round; see [`RoundStat`].
+    pub rounds: Vec<RoundStat>,
 }
 
 /// Solve a bounded root cut loop and read a certified packing off its dual.
@@ -374,6 +400,31 @@ pub struct RootCertificate {
 ///
 /// Returns `None` when no LP solve reached optimality, in which case there is no
 /// dual to read.
+///
+/// # Where the rounds were going, and what did not fix it
+///
+/// Separating the LP optimum tails off badly. On PACE instance172 — 243 vertices,
+/// 1,215 edges — the loop needs about three hundred solves to converge, and
+/// [`RoundStat`] says why: the separator returns roughly ten cuts a round against
+/// a cap of four hundred, and after the first eight rounds each round buys about
+/// one unit of bound out of five hundred.
+///
+/// The textbook remedy is **in-out separation**: separate the midpoint of the
+/// segment between a known feasible point `y_in` and the LP optimum `y*` rather
+/// than `y*` itself. It is sound — every cut violated at the midpoint is violated
+/// at `y*`, since `y_in(δ⁺(W)) >= 1` and
+/// `y*(δ⁺(W)) + y_in(δ⁺(W)) < 2` together give `y*(δ⁺(W)) < 1` — and it needs no
+/// step size if the midpoint is used and `y_in` is halved towards `y*` whenever
+/// the midpoint separates nothing. It was implemented that way, with the
+/// incumbent arborescence as the initial `y_in`, and **measured as a small loss**:
+/// on instance172 at an eight-second budget it reached 7,059 against 7,071 for
+/// plain separation, and 7,097 against 7,105 at ninety seconds. The reason is
+/// visible in the same trace — the incumbent sits at 8,223 against an LP optimum
+/// near 7,100, so the midpoint is nowhere near the optimal face and the cuts it
+/// exposes are the same shallow ones, one max-flow round later. It is recorded
+/// here rather than kept.
+///
+/// What the trace *does* reward is a wider seed; see the multi-root block below.
 pub fn root_certificate(
     graph: &DirectedGraph,
     root: NodeId,
@@ -393,6 +444,52 @@ pub fn root_certificate(
     let seed = dual_ascent_cuts(&idx, root, terminals, &active, ASCENT_CUT_NNZ);
     for cut in &seed.cuts {
         lp.add_lazy_steiner_cut(cut);
+    }
+    // Seed from ascents rooted elsewhere as well.
+    //
+    // The per-round trace is what asks for this. On PACE instance172 the bound
+    // climbs while the held-back structural pool is still feeding rows in — forty
+    // a round for the first fifty rounds — and flattens to about one unit a round
+    // once that pool empties and the only new rows are separated ones. The pool is
+    // the ascent's cut family, so a wider pool is worth more than a faster loop.
+    //
+    // A dual ascent rooted at `r` raises sets that miss `r`, not sets that miss
+    // the *model's* root. Only the ones that also miss `root` are valid Steiner
+    // cuts here — `y(delta^-(W)) >= 1` needs the root outside `W`, or the
+    // arborescence has no arc entering `W` — and the rest are dropped rather than
+    // repaired. Nothing else is needed: a valid inequality is valid whatever
+    // produced it, and the ascents are microseconds next to a single solve.
+    {
+        let mut in_w = vec![false; idx.num_nodes()];
+        let mut boundary: Vec<ArcId> = Vec::new();
+        for &r in terminals.iter().step_by(terminals.len().div_ceil(ALT_SEED_ROOTS).max(1)) {
+            if r == root {
+                continue;
+            }
+            let alt = dual_ascent_packing(&idx, r, terminals, &active, ASCENT_CUT_NNZ);
+            for (_, members) in &alt.sets {
+                if members.contains(&root) || members.is_empty() {
+                    continue;
+                }
+                for &v in members {
+                    in_w[v as usize] = true;
+                }
+                boundary.clear();
+                for &v in members {
+                    for &a in idx.incoming(v) {
+                        if !in_w[idx.tail(a) as usize] {
+                            boundary.push(a);
+                        }
+                    }
+                }
+                for &v in members {
+                    in_w[v as usize] = false;
+                }
+                if !boundary.is_empty() {
+                    lp.add_lazy_steiner_cut(&boundary);
+                }
+            }
+        }
     }
     // Geometric batches, for the reason `add_lazy_steiner_cut` documents: the
     // seed is thousands of rows wide, a flat batch either makes the first solve a
@@ -416,6 +513,7 @@ pub fn root_certificate(
     // it actually proved.
     let mut candidates: Option<Vec<Candidate>> = None;
     let mut eliminated_arcs: Vec<ArcId> = Vec::new();
+    let mut rounds: Vec<RoundStat> = Vec::new();
 
     for _ in 0..max_rounds {
         let remaining = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
@@ -423,6 +521,7 @@ pub fn root_certificate(
             break;
         }
         lp.time_limit_secs = remaining;
+        let round_started = Instant::now();
         let obj = lp.solve();
         lp_solves += 1;
         if !lp.is_optimal() {
@@ -466,6 +565,7 @@ pub fn root_certificate(
             // cut relaxation's own optimum and no further round can move it.
             break;
         }
+        let installed = cuts.len().min(400);
         for cut in cuts.iter().take(400) {
             lp.add_steiner_cut(&cut.cut_arcs);
         }
@@ -474,6 +574,13 @@ pub fn root_certificate(
         // weaker relaxation, never an invalid one — and an unbounded pool is
         // what makes a 125-vertex model cost 80 ms a solve.
         lp.prune_cuts();
+        rounds.push(RoundStat {
+            bound: best_bound,
+            structural,
+            cuts: installed,
+            rows: lp.num_constraints(),
+            secs: round_started.elapsed().as_secs_f64(),
+        });
     }
 
     let candidates = candidates?;
@@ -482,7 +589,7 @@ pub fn root_certificate(
 
     debug_assert!(packing.verify(&idx, root, 1e-6), "extracted packing violates (PACK)");
 
-    Some(RootCertificate { lp_bound: best_bound, packing, eliminated_arcs, lp_solves })
+    Some(RootCertificate { lp_bound: best_bound, packing, eliminated_arcs, lp_solves, rounds })
 }
 
 #[cfg(test)]

@@ -67,6 +67,7 @@ fn main() {
     println!("ascent           {:10.2}   ({:.2}s)", da.lower_bound + offset, t.elapsed().as_secs_f64());
 
     let ub: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(f64::INFINITY);
+
     let t = Instant::now();
     let deadline = Instant::now() + Duration::from_secs_f64(budget);
     match root_certificate(&directed, root, &terminals, ub - offset, deadline, 100_000, 1 << 24) {
@@ -88,6 +89,25 @@ fn main() {
                 cert.eliminated_arcs.len(),
                 idx.num_arcs()
             );
+            // Round-by-round: what the separation loop actually costs and buys.
+            // A loop that needs hundreds of solves is either separating too
+            // little per round or re-solving a model that barely changed, and
+            // these three columns say which.
+            println!("  round      bound  struct   cuts    rows    secs");
+            let last = cert.rounds.len().saturating_sub(1);
+            for (i, r) in cert.rounds.iter().enumerate() {
+                if i < 8 || i % 16 == 0 || i == last {
+                    println!(
+                        "  {:5}  {:9.2}  {:6}  {:5}  {:6}  {:6.3}",
+                        i,
+                        r.bound + offset,
+                        r.structural,
+                        r.cuts,
+                        r.rows,
+                        r.secs
+                    );
+                }
+            }
             assert!(cert.packing.verify(&idx, root, 1e-6), "packing violates (PACK)");
 
             let ascent_pack = scip_jack::graph::algorithms::dual_ascent_packing(
