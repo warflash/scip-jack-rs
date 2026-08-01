@@ -40,6 +40,7 @@ use crate::graph::algorithms::{
 };
 use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, NodeId, NodeType, UndirectedGraph};
 use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
+use crate::heuristics::key_vertex::{key_vertex_elimination, vertex_insertion, KeyVertexWorkspace};
 use crate::heuristics::sph::{shortest_path_heuristic, SphResult, SphWorkspace};
 use crate::heuristics::{iterated_local_search, IlsStats, IlsWorkspace};
 use crate::preprocessing::preprocess_bounded;
@@ -272,6 +273,7 @@ fn round(
     let true_costs: Vec<Cost> = (0..num_arcs).map(|a| idx.cost(a as u32)).collect();
     let mut ws = SphWorkspace::new(idx.num_nodes());
     let mut kws = KeyPathWorkspace::new(idx.num_nodes());
+    let mut vws = KeyVertexWorkspace::new(idx.num_nodes());
 
     let roots = root_candidates(terminals, config.roots_per_round);
     let primary = *roots.first().unwrap_or(&terminals[0]);
@@ -399,6 +401,34 @@ fn round(
         if best.cost < upper_bound - 1e-9 {
             upper_bound = best.cost;
             incumbent_arcs = Some(best.arcs);
+        }
+    }
+
+    // Topological moves on the incumbent.
+    //
+    // Iterated local search runs a key-path neighbourhood, which rewires
+    // corridors but never changes where the tree branches. Deleting a branch
+    // point and reconnecting, or routing through one more vertex, are the two
+    // moves that do — see [`crate::heuristics::key_vertex`]. They cost a Dijkstra
+    // per candidate rather than per iteration, so they run once here on the best
+    // tree the round produced rather than inside the loop.
+    if let Some(arcs) = incumbent_arcs.clone() {
+        let mut current = SphResult { cost: upper_bound, arcs };
+        loop {
+            let stronger = key_vertex_elimination(
+                &idx, &active, primary, &current, &is_terminal, &mut vws, &mut ws,
+            )
+            .or_else(|| vertex_insertion(&idx, &active, primary, &current, &is_terminal, &mut ws));
+            let Some(better) = stronger else { break };
+            current = polish(better, primary, &mut kws, &mut ws);
+            if expired() {
+                break;
+            }
+        }
+        if current.cost < upper_bound - 1e-9 {
+            upper_bound = current.cost;
+            pool.push((current.cost, nodes_of(&idx, &current.arcs, primary)));
+            incumbent_arcs = Some(current.arcs);
         }
     }
 
