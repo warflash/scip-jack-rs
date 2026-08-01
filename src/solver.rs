@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use crate::branch_and_bound::{BranchAndCutSolver, SolveStatus, SolverConfig};
 use crate::graph::algorithms::{
-    dijkstra_steiner_guided, dreyfus_wagner, dual_ascent_packing, ArcIndex,
+    dreyfus_wagner, dual_ascent_packing, ArcIndex, SteinerSearch,
 };
 use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, SteinerInstance, UndirectedGraph};
 use crate::io;
@@ -156,8 +156,33 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     // cutoff. The heuristic's own bound is often several percent off, and the
     // reduced-cost eliminations scale with `UB - LB`, so a tighter cutoff
     // discovered during the search can collapse the instance on a second pass.
+    // Each pass hands the next one its *own* reduced instance, not the graph it
+    // started from.
+    //
+    // Tightening is a fixpoint computation and it is monotone: every round
+    // deletes and contracts, and nothing it does is ever undone. Re-running it
+    // from the original graph therefore repeats work the previous pass already
+    // did — and repeats it under a *shorter* deadline, so it does not even get as
+    // far. On PACE instance161 the first pass took the graph from 40,857 edges to
+    // 33,379 and the bound from 5,134 to 5,138; the second pass, restarting from
+    // scratch with a third of the clock, returned 40,857 edges and 5,134, and the
+    // solver then finished on the weaker of the two. Carrying the instance
+    // forward makes the passes compound instead of compete, and it is also what
+    // lets the goal-directed search resume: an unchanged graph is the case
+    // [`SteinerSearch::applies_to`] recognises.
+    let mut pass_graph = work_graph;
+    let mut pass_terminals = terminals;
+    // Cost already contracted out of `pass_graph` by earlier passes. Every
+    // bound a pass reports is stated for its own graph; this is what puts them
+    // back on a common scale.
+    let mut carried_offset: Cost = 0.0;
     let mut incoming_ub = Cost::INFINITY;
     let mut best: Option<SolveResult> = None;
+    // The goal-directed search, carried across passes. When the second pass's
+    // tightening lands on the same reduced instance — which is the usual case
+    // once the first pass has already run the reductions to a fixpoint — the
+    // search continues instead of starting over. See [`SteinerSearch`].
+    let mut search_cache: Option<SteinerSearch> = None;
 
     for pass in 0..2 {
         // Split the remaining budget explicitly. Tightening will happily use
@@ -173,8 +198,12 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             ..ReduceConfig::default()
         };
         let tighten_start = Instant::now();
-        let reduced = tighten(work_graph.clone(), terminals.clone(), &reduce_config);
+        let reduced = tighten(pass_graph.clone(), pass_terminals.clone(), &reduce_config);
         let tighten_secs = tighten_start.elapsed().as_secs_f64();
+        // What the next pass will start from, before `finish` consumes `reduced`.
+        let next_graph = reduced.graph.clone();
+        let next_terminals = reduced.terminals.clone();
+        let next_offset = reduced.offset;
         // Cap the first search so an unproved-but-improved incumbent still
         // leaves time for the second tightening pass to exploit it.
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -191,7 +220,11 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
                 start.elapsed().as_secs_f64(),
             );
         }
-        let outcome = finish(reduced, &config, start, pass_deadline);
+        // `finish` reports for `pass_graph`; `carried_offset` puts it back on the
+        // scale of the graph the loop started with, which is what `best` holds.
+        let mut outcome = finish(reduced, &config, start, pass_deadline, &mut search_cache);
+        outcome.primal_bound += carried_offset;
+        outcome.dual_bound += carried_offset;
         // Both bounds are valid for the same instance, so keep the better of
         // each. A pass that fails to improve the incumbent can still have
         // pushed the dual bound up, and discarding that would throw away the
@@ -205,10 +238,17 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             break;
         }
         let Some(b) = best.as_ref() else { break };
-        if !b.primal_bound.is_finite() || b.primal_bound >= incoming_ub {
+        if !b.primal_bound.is_finite() || b.primal_bound >= incoming_ub + carried_offset {
             break;
         }
-        incoming_ub = b.primal_bound;
+        pass_graph = next_graph;
+        pass_terminals = next_terminals;
+        carried_offset += next_offset;
+        // Restated for the graph the next pass will run on.
+        incoming_ub = b.primal_bound - carried_offset;
+        if pass_terminals.len() < 2 {
+            break;
+        }
     }
 
     let mut result =
@@ -269,6 +309,7 @@ fn finish(
     config: &SolverConfig,
     start: Instant,
     deadline: Instant,
+    search_cache: &mut Option<SteinerSearch>,
 ) -> SolveResult {
 
     if config.verbose {
@@ -325,168 +366,32 @@ fn finish(
     // branch-and-cut below as a seed.
     let mut search_lower_bound = root_lower_bound;
     if terminals.len() >= 2 {
-        // The search may be rooted at any terminal, and its potential is a
-        // packing rooted at the same one. Which terminal is chosen was measured
-        // and does not matter: over the terminals of the instances the search
-        // fails to close, the ascent bound spans under 1 % (PACE 086: 3254 to
-        // 3286 against an optimum of 3661) and is flat on 085 and 087. The
-        // strength that is missing is not root-dependent.
-        let search_terminals = terminals.clone();
-        let directed = DirectedGraph::from_undirected(&work_graph);
-        // The ascent's cut packing becomes the search's potential. This is the
-        // whole point of running it here rather than only using its scalar
-        // bound: the packing bounds every sub-requirement of the instance, not
-        // only the instance, so it guides the search at every state instead of
-        // only telling us how far off we are.
-        let ascent_guide = {
-            let idx = ArcIndex::new(&directed);
-            let active = vec![true; idx.num_arcs()];
-            // Rooted at the search's own root: the potential is only valid for
-            // sets missing the root, and `PackingPotential` drops the rest.
-            let da = dual_ascent_packing(
-                &idx,
-                search_terminals[0],
-                &search_terminals,
-                &active,
-                DS_PACKING_NNZ,
-            );
-            da.sets
-        };
-
-        // Two attempts, and the second one is only paid for when the first
-        // fails. The ascent's packing is *maximal* — no set missing the root
-        // admits any increase — so when it is not strong enough there is no
-        // combinatorial way to strengthen it. The LP on the same relaxation
-        // reaches materially further, and `root_certificate` turns its dual back
-        // into a packing. That LP is not free, so it is run only after the
-        // cheap potential has been shown, by running it, not to suffice.
-        let mut lp_guide: Vec<(Cost, Vec<crate::graph::NodeId>)> = Vec::new();
-        // The graph the search runs on. The certificate's reduced-cost
-        // elimination deletes edges no solution of cost at most the incumbent
-        // can use, which shrinks the search's `n * 2^(k-1)` state space as well
-        // as every Dijkstra inside it. `work_graph` itself is left alone: the
-        // branch-and-cut below inherits an incumbent whose arc numbering belongs
-        // to it.
-        let mut search_graph = work_graph.clone();
-        for attempt in 0..2 {
-            let budget = deadline.saturating_duration_since(Instant::now());
-            if budget.is_zero() {
-                break;
-            }
-            // The first attempt keeps the share it always had, so an instance
-            // the cheap potential already closes is untouched by any of this.
-            // Everything the certificate costs comes out of what is left after
-            // that attempt has failed.
-            let search_deadline = Instant::now() + budget.mul_f64(0.5);
-            let mut guides: Vec<&[(Cost, Vec<crate::graph::NodeId>)]> = vec![&ascent_guide];
-            if !lp_guide.is_empty() {
-                guides.push(&lp_guide);
-            }
-            if let Some(r) = dijkstra_steiner_guided(
-                &search_graph,
-                &search_terminals,
-                root_upper_bound,
-                DS_LABEL_BUDGET,
-                Some(search_deadline),
-                &guides,
-            ) {
-                if config.verbose {
-                    eprintln!(
-                        "[dsearch] attempt {attempt}: {} labels, optimal {:?}, lower bound {:.1}",
-                        r.labels_settled, r.optimal, r.lower_bound
-                    );
-                }
-                search_lower_bound = search_lower_bound.max(r.lower_bound);
-                if let Some(value) = r.optimal {
-                    // The search runs on the *reduced* graph, which keeps only
-                    // trees at or below the incumbent, so the incumbent still
-                    // wins ties.
-                    let best = value.min(root_upper_bound);
-                    return SolveResult {
-                        status: SolveStatus::Optimal,
-                        primal_bound: best + offset,
-                        dual_bound: best + offset,
-                        gap_pct: 0.0,
-                        nodes_processed: 0,
-                        cuts_added: 0,
-                        lp_solves: 0,
-                        time_secs: start.elapsed().as_secs_f64(),
-                        verified: true,
-                        method: SolveMethod::DreyfusWagner,
-                    };
-                }
-            } else {
-                // Out of the addressable range; a second attempt would fail the
-                // same way.
-                break;
-            }
-            if attempt == 1 {
-                break;
-            }
-            // Build the stronger potential. Both its outputs are valid bounds on
-            // the reduced instance: the LP's own optimum, and the packing's
-            // value.
-            let budget = deadline.saturating_duration_since(Instant::now());
-            if budget.is_zero() {
-                break;
-            }
-            let cert_deadline = Instant::now() + budget.mul_f64(0.25);
-            let Some(cert) = root_certificate(
-                &directed,
-                search_terminals[0],
-                &search_terminals,
-                root_upper_bound,
-                cert_deadline,
-                ROOT_CERT_ROUNDS,
-                DS_PACKING_NNZ,
-            ) else {
-                break;
+        run_search(
+            &work_graph,
+            &terminals,
+            root_lower_bound,
+            root_upper_bound,
+            config,
+            deadline,
+            search_cache,
+            &mut search_lower_bound,
+        );
+        if let Some(value) = search_cache.as_ref().and_then(|s| s.optimum()) {
+            // The search runs on a graph that keeps only trees at or below the
+            // incumbent, so the incumbent still wins ties.
+            let best = value.min(root_upper_bound);
+            return SolveResult {
+                status: SolveStatus::Optimal,
+                primal_bound: best + offset,
+                dual_bound: best + offset,
+                gap_pct: 0.0,
+                nodes_processed: 0,
+                cuts_added: 0,
+                lp_solves: 0,
+                time_secs: start.elapsed().as_secs_f64(),
+                verified: true,
+                method: SolveMethod::DreyfusWagner,
             };
-            search_lower_bound = search_lower_bound.max(cert.lp_bound).max(cert.packing.value);
-
-            // An edge survives unless *both* of its arcs are eliminated: an
-            // undirected edge is available to a tree as long as one orientation
-            // is. `DirectedGraph::from_undirected` emits the two arcs of edge
-            // `i` at positions `2i` and `2i+1`, which is the whole of the map.
-            let mut dead = vec![false; directed.num_arcs() as usize];
-            for &a in &cert.eliminated_arcs {
-                dead[a as usize] = true;
-            }
-            // Read from `work_graph`, which is what `directed` — and therefore
-            // the arc numbering in `dead` — was built from.
-            let before = work_graph.edges.len();
-            search_graph.edges = work_graph
-                .edges
-                .iter()
-                .enumerate()
-                .filter(|&(i, _)| !(dead[2 * i] && dead[2 * i + 1]))
-                .map(|(_, e)| e.clone())
-                .collect();
-            if config.verbose {
-                eprintln!(
-                    "[certify] lp bound {:.1}, packing {:.1} over {} sets, {} solves \
-                     (ascent {:.1}), edges {} -> {}",
-                    cert.lp_bound,
-                    cert.packing.value,
-                    cert.packing.sets.len(),
-                    cert.lp_solves,
-                    root_lower_bound,
-                    before,
-                    search_graph.edges.len(),
-                );
-            }
-            // Retry only when the object the search actually consumes got
-            // stronger. The potential is the packing, so the test is on the
-            // packing's own value: if it did not rise above the bound the first
-            // attempt already ran under, the second attempt would sweep the same
-            // state space against a potential no stronger at the root, and the
-            // budget belongs to the branch-and-cut instead. This is a measured
-            // fact about the two objects, not an estimate of how long a rerun
-            // would take.
-            if cert.packing.value <= root_lower_bound + 1e-9 {
-                break;
-            }
-            lp_guide = cert.packing.sets;
         }
     }
     let root_lower_bound = search_lower_bound;
@@ -545,9 +450,9 @@ fn finish(
     // The status must not be an independent flag that can drift away from the
     // numbers beside it. It did drift: the search could leave a node unfinished,
     // read the resulting empty queue as an exhausted tree, and return `Optimal`
-    // alongside a dual bound several percent below the primal — PACE instance200
-    // was announced as a proved 6491 against a true optimum of 6393. This is the
-    // last line of defence, and it is a cheap one.
+    // alongside a dual bound several percent below the primal — PACE
+    // instance200 was announced as a proved 6491 against a true optimum of 6393.
+    // This is the last line of defence, and it is a cheap one.
     let proved = primal.is_finite() && dual >= primal - config.gap_tolerance.max(1e-6);
     let status = if proved {
         SolveStatus::Optimal
@@ -570,6 +475,168 @@ fn finish(
         method: SolveMethod::BranchAndCut,
     }
 }
+
+/// Advance the goal-directed search, creating it or continuing it.
+///
+/// The search's whole state — settled labels, open queue, Lemma-15 witnesses —
+/// lives in `cache` and survives across attempts *and* across solver passes.
+/// That is the point: on PACE 024, 025, 086 and 087 the search settles a few
+/// hundred thousand labels per slice and needs roughly their sum, and under the
+/// old wiring it was handed four disjoint slices and started each of them from
+/// nothing.
+#[allow(clippy::too_many_arguments)]
+fn run_search(
+    work_graph: &UndirectedGraph,
+    terminals: &[crate::graph::NodeId],
+    root_lower_bound: Cost,
+    root_upper_bound: Cost,
+    config: &SolverConfig,
+    deadline: Instant,
+    cache: &mut Option<SteinerSearch>,
+    search_lower_bound: &mut Cost,
+) {
+    // The search may be rooted at any terminal, and its potential is a packing
+    // rooted at the same one. Which terminal is chosen was measured and does not
+    // matter: over the terminals of the instances the search fails to close, the
+    // ascent bound spans under 1 % (PACE 086: 3254 to 3286 against an optimum of
+    // 3661) and is flat on 085 and 087. The strength that is missing is not
+    // root-dependent.
+    let directed = DirectedGraph::from_undirected(work_graph);
+
+    // Continue the search from an earlier pass when it is literally the same
+    // search: same graph, same terminals. Otherwise start one.
+    let mut search = cache.take().filter(|s| s.applies_to(work_graph, terminals));
+    let resumed = search.is_some();
+    if search.is_none() {
+        // The ascent's cut packing becomes the search's potential. This is the
+        // whole point of running it here rather than only using its scalar bound:
+        // the packing bounds every sub-requirement of the instance, not only the
+        // instance, so it guides the search at every state instead of only
+        // telling us how far off we are.
+        let idx = ArcIndex::new(&directed);
+        let active = vec![true; idx.num_arcs()];
+        // Rooted at the search's own root: the potential is only valid for sets
+        // missing the root, and `PackingPotential` drops the rest.
+        let da = dual_ascent_packing(&idx, terminals[0], terminals, &active, DS_PACKING_NNZ);
+        search = SteinerSearch::new(work_graph, terminals, root_upper_bound, &[&da.sets]);
+    }
+    // Out of the addressable range, or the terminals are split.
+    let Some(mut search) = search else { return };
+    // A pass that improved the incumbent hands the tighter cutoff to a search
+    // that has already run under the looser one. That only ever prunes more.
+    search.set_upper_bound(root_upper_bound);
+
+    // Two phases, and the second is only paid for when the first fails. The
+    // ascent's packing is *maximal* - no set missing the root admits any increase
+    // - so when it is not strong enough there is no combinatorial way to
+    // strengthen it. The LP on the same relaxation reaches materially further,
+    // and `root_certificate` turns its dual back into a packing. That LP is not
+    // free, so it is run only after the cheap potential has been shown, by
+    // running it, not to suffice.
+    //
+    // Unlike the old wiring, the second phase *continues* the first: the labels
+    // it settled, the queue it built and the witnesses it found are all still
+    // there, and only the potential and the graph get stronger.
+    for phase in 0..2 {
+        let budget = deadline.saturating_duration_since(Instant::now());
+        if budget.is_zero() {
+            break;
+        }
+        // The first phase keeps the share it always had, so an instance the cheap
+        // potential already closes is untouched by any of this. Everything the
+        // certificate costs comes out of what is left after that phase failed.
+        let slice = Instant::now() + budget.mul_f64(0.5);
+        let left = DS_LABEL_BUDGET.saturating_sub(search.labels_settled());
+        let r = search.run(left, Some(slice));
+        if config.verbose {
+            eprintln!(
+                "[dsearch] phase {phase}{}: {} labels total, optimal {:?}, lower bound {:.1}",
+                if resumed && phase == 0 { " (resumed)" } else { "" },
+                r.labels_settled,
+                r.optimal,
+                r.lower_bound
+            );
+        }
+        *search_lower_bound = search_lower_bound.max(r.lower_bound);
+        if r.optimal.is_some() {
+            break;
+        }
+        // Nothing left in the queue, or nothing left in the label budget: another
+        // phase would settle nothing.
+        if phase == 1 || search.is_exhausted() || search.labels_settled() >= DS_LABEL_BUDGET {
+            break;
+        }
+
+        // Build the stronger potential. Both its outputs are valid bounds on the
+        // reduced instance: the LP's own optimum, and the packing's value.
+        let budget = deadline.saturating_duration_since(Instant::now());
+        if budget.is_zero() {
+            break;
+        }
+        let cert_deadline = Instant::now() + budget.mul_f64(0.25);
+        let Some(cert) = root_certificate(
+            &directed,
+            terminals[0],
+            terminals,
+            root_upper_bound,
+            cert_deadline,
+            ROOT_CERT_ROUNDS,
+            DS_PACKING_NNZ,
+        ) else {
+            break;
+        };
+        *search_lower_bound = search_lower_bound.max(cert.lp_bound).max(cert.packing.value);
+
+        // An edge survives unless *both* of its arcs are eliminated: an
+        // undirected edge is available to a tree as long as one orientation is.
+        // `DirectedGraph::from_undirected` emits the two arcs of edge `i` at
+        // positions `2i` and `2i+1`, which is the whole of the map.
+        let mut dead = vec![false; directed.num_arcs() as usize];
+        for &a in &cert.eliminated_arcs {
+            dead[a as usize] = true;
+        }
+        let before = work_graph.edges.len();
+        let mut smaller = work_graph.clone();
+        smaller.edges = work_graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| !(dead[2 * i] && dead[2 * i + 1]))
+            .map(|(_, e)| e.clone())
+            .collect();
+        if config.verbose {
+            eprintln!(
+                "[certify] lp bound {:.1}, packing {:.1} over {} sets, {} solves \
+                 (ascent {:.1}), edges {} -> {}",
+                cert.lp_bound,
+                cert.packing.value,
+                cert.packing.sets.len(),
+                cert.lp_solves,
+                root_lower_bound,
+                before,
+                smaller.edges.len(),
+            );
+        }
+        // The elimination is applied whatever happens next - it is free and it
+        // only shrinks the state space.
+        if smaller.edges.len() < before {
+            search.restrict_to(&smaller);
+        }
+        // Continue only when the object the search actually consumes got
+        // stronger. The potential is the packing, so the test is on the packing's
+        // own value: if it did not rise above the bound the search already ran
+        // under, continuing would sweep against a potential no stronger at the
+        // root, and the budget belongs to the branch-and-cut instead. This is a
+        // measured fact about the two objects, not an estimate of how long a
+        // continuation would take.
+        if cert.packing.value <= root_lower_bound + 1e-9 {
+            break;
+        }
+        search.add_packing(&cert.packing.sets);
+    }
+    *cache = Some(search);
+}
+
 
 fn try_dreyfus_wagner(
     graph: &UndirectedGraph,

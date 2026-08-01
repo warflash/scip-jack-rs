@@ -679,6 +679,42 @@ impl PackingPotential {
         self.layers.is_empty()
     }
 
+    /// A potential with no layers, ready to receive one.
+    fn empty(num_masks: usize) -> Self {
+        Self { layers: Vec::new(), num_masks }
+    }
+
+    /// Add one more packing, up to [`MAX_PACKING_LAYERS`].
+    ///
+    /// A search may resume under a strengthened potential — see
+    /// [`SteinerSearch::add_packing`] — and this is where the strengthening
+    /// lands. Adding a layer only ever raises the pointwise maximum, and the
+    /// lattice theorem above says the result is still a valid lower bound.
+    #[allow(clippy::too_many_arguments)]
+    fn push(
+        &mut self,
+        sets: &[(Cost, Vec<NodeId>)],
+        terminal_index: &[u32],
+        num_nodes: usize,
+        root: NodeId,
+        affordable: bool,
+        degree: &dyn Fn(usize) -> usize,
+    ) -> bool {
+        if self.layers.len() >= MAX_PACKING_LAYERS || sets.is_empty() {
+            return false;
+        }
+        self.layers.push(PackingLayer::new(
+            sets,
+            terminal_index,
+            num_nodes,
+            root,
+            self.num_masks,
+            affordable,
+            degree,
+        ));
+        true
+    }
+
     /// The set-dependent part of each layer's bound, in layer order.
     fn shared(&self, outstanding: Mask) -> SharedTerms {
         let mut out = SharedTerms::ZERO;
@@ -760,8 +796,15 @@ impl Csr {
     }
 
     fn neighbors(&self, v: NodeId) -> impl Iterator<Item = (NodeId, Cost)> + '_ {
-        let (s, e) = (self.start[v as usize] as usize, self.start[v as usize + 1] as usize);
+        let (s, e) = self.adjacency(v);
         (s..e).map(move |i| (self.head[i], self.cost[i]))
+    }
+
+    /// Half-open index range of `v`'s incidences, for the one loop that has to
+    /// end the borrow before each step: the grow step mutates the search while
+    /// walking a vertex's star, and the search owns this table.
+    fn adjacency(&self, v: NodeId) -> (usize, usize) {
+        (self.start[v as usize] as usize, self.start[v as usize + 1] as usize)
     }
 
     fn dijkstra(&self, source: NodeId) -> Vec<Cost> {
@@ -820,6 +863,10 @@ pub fn dijkstra_steiner(
 /// root; sets holding it are discarded rather than trusted. The potential is
 /// their pointwise maximum, which is valid by the lattice theorem on
 /// [`PackingPotential`], and at most [`MAX_PACKING_LAYERS`] of them are used.
+///
+/// This is the one-shot form. [`SteinerSearch`] is the same algorithm with its
+/// state exposed, so that a search which runs out of clock can be *continued*
+/// rather than started again.
 pub fn dijkstra_steiner_guided(
     graph: &UndirectedGraph,
     terminals: &[NodeId],
@@ -828,162 +875,372 @@ pub fn dijkstra_steiner_guided(
     deadline: Option<Instant>,
     packings: &[&[(Cost, Vec<NodeId>)]],
 ) -> Option<DijkstraSteinerResult> {
-    let k = terminals.len();
-    if !(2..=MAX_TERMINALS).contains(&k) {
-        return None;
-    }
-    let csr = Csr::build(graph);
-    if terminals.iter().any(|&t| (t as usize) >= csr.num_nodes) {
-        return None;
-    }
+    let mut search = SteinerSearch::new(graph, terminals, upper_bound, packings)?;
+    Some(search.run(label_budget, deadline))
+}
 
-    // Distances from every terminal. These serve the lower bound, the terminal
-    // metric closure, and nothing else.
-    let dist: Vec<Vec<Cost>> = terminals.iter().map(|&t| csr.dijkstra(t)).collect();
-    for i in 1..k {
-        if !dist[0][terminals[i] as usize].is_finite() {
-            return None; // terminals split across components
+/// A Dijkstra-Steiner search whose state outlives one call.
+///
+/// # Why this exists
+///
+/// The search is an A* over labels, and everything it has learned lives in three
+/// places: the settled labels, the open queue, and the Lemma-15 witnesses. A run
+/// that stops on a deadline keeps all three. Starting again from scratch throws
+/// them away and re-derives them, and the solver used to do exactly that - twice
+/// per pass and twice over - so an instance the search could close in one
+/// contiguous stretch was handed four disjoint quarters of it and closed none of
+/// them. PACE instances 024, 025, 086 and 087 are that shape: each settles a few
+/// hundred thousand labels per slice, needs about the sum of them, and proves
+/// nothing.
+///
+/// # What may change between runs, and why it stays correct
+///
+/// **A tighter incumbent** ([`SteinerSearch::set_upper_bound`]). The cutoff only
+/// discards labels that cannot lie under it; lowering it discards more. Labels
+/// already stored under the looser bound are still valid, merely not yet pruned.
+///
+/// **A stronger potential** ([`SteinerSearch::add_packing`]). This is the one
+/// that needs an argument.
+///
+/// > **Resumption under a changed potential.** Let `h_1` and `h_2` both be valid
+/// > lower bounds in the sense of this module's header. Run A* with `h_1` until
+/// > some set `D` of labels has been settled, re-key every open entry with `h_2`,
+/// > and continue with `h_2`. Every label the continuation settles carries its
+/// > true optimal value.
+///
+/// *Proof.* A settled label's value is a property of the graph, not of the
+/// potential: A* with any valid `h` settles labels in nondecreasing `g + h`
+/// order, and the standard argument gives each of them its optimal `g`. So every
+/// label of `D` holds its optimum at the moment of the switch. The continuation
+/// is then A* with the valid potential `h_2` on the same state graph, started
+/// from a frontier whose keys are exactly `g + h_2` and whose `g` values are the
+/// best known - which is what the re-key restores. Its settling order is
+/// nondecreasing in `g + h_2`, and no label of `D` can be improved, because its
+/// value is already optimal. QED
+///
+/// The re-key is not optional: leaving stale `h_1` keys in the queue would let a
+/// label be popped below its true `g + h_2`, and the frontier value the search
+/// reports as a lower bound would no longer bound anything.
+pub struct SteinerSearch {
+    state: Search,
+    goal_key: LabelKey,
+    root: NodeId,
+    terminal_index: Vec<u32>,
+    num_masks: usize,
+    dense_labels: bool,
+    settled_count: u64,
+    lower_bound: Cost,
+    optimal: Option<Cost>,
+    /// Edge list of the graph this was built for, so a caller carrying one of
+    /// these across solver passes can tell whether it still applies.
+    fingerprint: Vec<(NodeId, NodeId, Cost)>,
+    terminals: Vec<NodeId>,
+}
+
+impl SteinerSearch {
+    pub fn new(
+        graph: &UndirectedGraph,
+        terminals: &[NodeId],
+        upper_bound: Cost,
+        packings: &[&[(Cost, Vec<NodeId>)]],
+    ) -> Option<Self> {
+        let k = terminals.len();
+        if !(2..=MAX_TERMINALS).contains(&k) {
+            return None;
         }
-    }
-
-    // Terminal metric closure, for the spanning trees inside the 1-tree bound.
-    let mut td = vec![vec![0.0 as Cost; k]; k];
-    for i in 0..k {
-        for j in 0..k {
-            td[i][j] = dist[i][terminals[j] as usize];
+        let csr = Csr::build(graph);
+        if terminals.iter().any(|&t| (t as usize) >= csr.num_nodes) {
+            return None;
         }
-    }
 
-    // `2^(k-1)`, or zero when the collected-set lattice does not fit in a
-    // machine word. Only the dense label table and the subset-sum transform are
-    // indexed by it; the search itself never enumerates it.
-    let num_masks = 1usize.checked_shl(k as u32 - 1).unwrap_or(0);
-    let labels = Labels::new(csr.num_nodes, num_masks);
-    let potential = (!packings.is_empty()).then(|| {
+        // Distances from every terminal. These serve the lower bound, the
+        // terminal metric closure, and nothing else.
+        let dist: Vec<Vec<Cost>> = terminals.iter().map(|&t| csr.dijkstra(t)).collect();
+        for i in 1..k {
+            if !dist[0][terminals[i] as usize].is_finite() {
+                return None; // terminals split across components
+            }
+        }
+
+        // Terminal metric closure, for the spanning trees inside the 1-tree bound.
+        let mut td = vec![vec![0.0 as Cost; k]; k];
+        for i in 0..k {
+            for j in 0..k {
+                td[i][j] = dist[i][terminals[j] as usize];
+            }
+        }
+
+        // `2^(k-1)`, or zero when the collected-set lattice does not fit in a
+        // machine word. Only the dense label table and the subset-sum transform
+        // are indexed by it; the search itself never enumerates it.
+        let num_masks = 1usize.checked_shl(k as u32 - 1).unwrap_or(0);
+        let labels = Labels::new(csr.num_nodes, num_masks);
+        let dense_labels = matches!(labels, Labels::Dense { .. });
         let mut terminal_index = vec![u32::MAX; csr.num_nodes];
         for (i, &t) in terminals.iter().enumerate() {
             terminal_index[t as usize] = i as u32;
         }
-        PackingPotential::new(
-            packings,
-            &terminal_index,
-            csr.num_nodes,
-            terminals[0],
+        let potential = (!packings.is_empty())
+            .then(|| {
+                PackingPotential::new(
+                    packings,
+                    &terminal_index,
+                    csr.num_nodes,
+                    terminals[0],
+                    num_masks,
+                    dense_labels,
+                    &|v| csr.degree(v),
+                )
+            })
+            .filter(|p| !p.is_empty());
+
+        let root_bit: Mask = 1;
+        let all_labels: Mask = if k == Mask::BITS as usize {
+            !1
+        } else {
+            (((1 as Mask) << k) - 1) & !1
+        };
+        let goal_key = pack(all_labels, terminals[0]);
+
+        let nearest_order: Vec<Vec<u32>> = (0..k)
+            .map(|i| {
+                let mut order: Vec<u32> = (0..k as u32).filter(|&j| j as usize != i).collect();
+                order.sort_by(|&a, &b| {
+                    td[i][a as usize]
+                        .partial_cmp(&td[i][b as usize])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                order
+            })
+            .collect();
+
+        let num_nodes = csr.num_nodes;
+        let mut state = Search {
+            csr,
+            dist,
+            td,
+            nearest_order,
+            k,
+            root_bit,
+            potential,
+            info_cache: MaskMap::default(),
+            cur_mask: Mask::MAX,
+            cur_info: MaskInfo::EMPTY,
+            mst_cache: MaskMap::default(),
+            label: labels,
+            settled_masks: vec![Vec::new(); num_nodes],
+            heap: BinaryHeap::new(),
+            upper_bound,
+        };
+
+        // Base labels: the singleton tree at each non-root terminal.
+        for (i, &t) in terminals.iter().enumerate().skip(1) {
+            let mask = (1 as Mask) << i;
+            state.offer(t, mask, 0.0);
+        }
+
+        Some(Self {
+            state,
+            goal_key,
+            root: terminals[0],
+            terminal_index,
             num_masks,
-            matches!(labels, Labels::Dense { .. }),
-            &|v| csr.degree(v),
-        )
-    });
-    let potential = potential.filter(|p| !p.is_empty());
-
-    let root_bit: Mask = 1;
-    let all_labels: Mask = if k == Mask::BITS as usize {
-        !1
-    } else {
-        (((1 as Mask) << k) - 1) & !1
-    };
-    let goal_key = pack(all_labels, terminals[0]);
-
-    let nearest_order: Vec<Vec<u32>> = (0..k)
-        .map(|i| {
-            let mut order: Vec<u32> = (0..k as u32).filter(|&j| j as usize != i).collect();
-            order.sort_by(|&a, &b| {
-                td[i][a as usize].partial_cmp(&td[i][b as usize]).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            order
+            dense_labels,
+            settled_count: 0,
+            lower_bound: 0.0,
+            optimal: None,
+            fingerprint: graph.edges.iter().map(|e| (e.src, e.dst, e.cost)).collect(),
+            terminals: terminals.to_vec(),
         })
-        .collect();
-
-    let mut state = Search {
-        csr: &csr,
-        dist: &dist,
-        td: &td,
-        nearest_order: &nearest_order,
-        k,
-        root_bit,
-        potential,
-        info_cache: MaskMap::default(),
-        cur_mask: Mask::MAX,
-        cur_info: MaskInfo::EMPTY,
-        mst_cache: MaskMap::default(),
-        label: labels,
-        settled_masks: vec![Vec::new(); csr.num_nodes],
-        heap: BinaryHeap::new(),
-        upper_bound,
-    };
-
-    // Base labels: the singleton tree at each non-root terminal.
-    for (i, &t) in terminals.iter().enumerate().skip(1) {
-        let mask = (1 as Mask) << i;
-        state.offer(t, mask, 0.0);
     }
 
-    let mut settled_count = 0u64;
-    let mut lower_bound: Cost = 0.0;
-    let mut optimal = None;
+    /// Whether this search is still the search for `(graph, terminals)`.
+    ///
+    /// The solver rebuilds its reduced instance once per pass, and the second
+    /// pass usually lands on exactly the same graph. This is what lets it
+    /// continue instead of starting over, and it is an equality test rather than
+    /// a hash: a false positive would resume a search against a graph it never
+    /// examined.
+    pub fn applies_to(&self, graph: &UndirectedGraph, terminals: &[NodeId]) -> bool {
+        self.terminals == terminals
+            && self.fingerprint.len() == graph.edges.len()
+            && self
+                .fingerprint
+                .iter()
+                .zip(graph.edges.iter())
+                .all(|(a, e)| a.0 == e.src && a.1 == e.dst && a.2 == e.cost)
+    }
 
-    while let Some((Reverse(Key(key)), packed)) = state.heap.pop() {
-        let mask = (packed >> 32) as Mask;
-        let v = (packed & 0xFFFF_FFFF) as u32;
-        let g = match state.label.get(mask >> 1, v) {
-            Some((_, true)) => continue, // already settled
-            Some((g, false)) => g,
-            None => continue,
-        };
-        // Stale heap entry from a superseded relaxation.
-        if key > g + state.heuristic(v, mask) + 1e-9 {
-            continue;
+    /// Lower the incumbent cutoff. Raising it is refused: labels have already
+    /// been discarded against the current one.
+    pub fn set_upper_bound(&mut self, upper_bound: Cost) {
+        if upper_bound < self.state.upper_bound {
+            self.state.upper_bound = upper_bound;
         }
+    }
 
-        // Everything still in the queue has key at least this one, so this is
-        // the frontier value the proposition above refers to.
-        lower_bound = lower_bound.max(key);
-
-        if packed == goal_key {
-            optimal = Some(g);
-            break;
+    /// Strengthen the potential with one more packing and re-key the open queue.
+    ///
+    /// Returns whether the layer was accepted. See the type's documentation for
+    /// why resuming under the stronger potential is sound, and why the re-key is
+    /// mandatory.
+    pub fn add_packing(&mut self, sets: &[(Cost, Vec<NodeId>)]) -> bool {
+        if self.optimal.is_some() {
+            return false;
         }
-
-        state.label.put(mask >> 1, v, g, true);
-        state.settled_masks[v as usize].push((mask, g));
-        settled_count += 1;
-
-        if settled_count >= label_budget
-            || (settled_count % 4096 == 0 && deadline.is_some_and(|d| Instant::now() >= d))
-        {
-            break;
+        let num_nodes = self.state.csr.num_nodes;
+        let root = self.root;
+        let dense = self.dense_labels;
+        let num_masks = self.num_masks;
+        // The degree closure would otherwise borrow `Search::csr` while the
+        // potential inside the same struct is borrowed mutably.
+        let degrees: Vec<usize> = (0..num_nodes).map(|v| self.state.csr.degree(v)).collect();
+        let potential = self
+            .state
+            .potential
+            .get_or_insert_with(|| PackingPotential::empty(num_masks));
+        let added =
+            potential.push(sets, &self.terminal_index, num_nodes, root, dense, &|v| degrees[v]);
+        if !added {
+            return false;
         }
-
-        // Grow along an edge.
-        for (u, c) in state.csr.neighbors(v) {
-            state.offer(u, mask, g + c);
-        }
-
-        // Merge with every disjoint set already settled at this vertex.
-        // No de-duplication is needed or wanted: `other` was settled strictly
-        // earlier, so this is the first and only moment at which both halves of
-        // the pair are settled. Filtering on which half owns the lowest bit --
-        // the Dreyfus-Wagner trick -- silently drops every merge whose partner
-        // happens to hold it.
-        // The settled side of every merge is the same, so its witness is read
-        // once rather than once per partner.
-        let settled_info = state.info(mask);
-        let partners = std::mem::take(&mut state.settled_masks[v as usize]);
-        for &(other, g_other) in &partners {
-            if other & mask == 0 {
-                state.offer_merge(v, mask, &settled_info, other, g + g_other);
+        // Everything cached from the old potential is now wrong, and every open
+        // key is now too low.
+        self.state.info_cache = MaskMap::default();
+        self.state.cur_mask = Mask::MAX;
+        let open = std::mem::take(&mut self.state.heap).into_vec();
+        for (_, packed) in open {
+            let mask = (packed >> 32) as Mask;
+            let v = (packed & 0xFFFF_FFFF) as u32;
+            if let Some((g, false)) = self.state.label.get(mask >> 1, v) {
+                let key = g + self.state.heuristic(v, mask);
+                self.state.heap.push((Reverse(Key(key)), packed));
             }
         }
-        state.settled_masks[v as usize] = partners;
+        true
     }
 
-    // A completed search proves its own value; an abandoned one still leaves the
-    // frontier, and the optimum is never below zero.
-    if let Some(opt) = optimal {
-        lower_bound = opt;
+    /// Settle up to `label_budget` further labels, or until `deadline`.
+    ///
+    /// The budget is counted from this call, not from the search's birth, so a
+    /// caller handing out repeated slices controls each slice rather than the
+    /// total. The returned `lower_bound` is the running frontier maximum over
+    /// every slice so far, which is valid because each slice's frontier is.
+    pub fn run(&mut self, label_budget: u64, deadline: Option<Instant>) -> DijkstraSteinerResult {
+        if self.optimal.is_none() {
+            self.sweep(label_budget, deadline);
+        }
+        if let Some(opt) = self.optimal {
+            self.lower_bound = opt;
+        }
+        DijkstraSteinerResult {
+            optimal: self.optimal,
+            lower_bound: self.lower_bound,
+            labels_settled: self.settled_count,
+        }
     }
 
-    Some(DijkstraSteinerResult { optimal, lower_bound, labels_settled: settled_count })
+    fn sweep(&mut self, label_budget: u64, deadline: Option<Instant>) {
+        let state = &mut self.state;
+        let mut this_slice = 0u64;
+
+        while let Some((Reverse(Key(key)), packed)) = state.heap.pop() {
+            let mask = (packed >> 32) as Mask;
+            let v = (packed & 0xFFFF_FFFF) as u32;
+            let g = match state.label.get(mask >> 1, v) {
+                Some((_, true)) => continue, // already settled
+                Some((g, false)) => g,
+                None => continue,
+            };
+            // Stale heap entry from a superseded relaxation.
+            if key > g + state.heuristic(v, mask) + 1e-9 {
+                continue;
+            }
+
+            // Everything still in the queue has key at least this one, so this is
+            // the frontier value the proposition above refers to.
+            self.lower_bound = self.lower_bound.max(key);
+
+            if packed == self.goal_key {
+                self.optimal = Some(g);
+                return;
+            }
+
+            state.label.put(mask >> 1, v, g, true);
+            state.settled_masks[v as usize].push((mask, g));
+            self.settled_count += 1;
+            this_slice += 1;
+
+            if this_slice >= label_budget
+                || (this_slice % 4096 == 0 && deadline.is_some_and(|d| Instant::now() >= d))
+            {
+                return;
+            }
+
+            // Grow along an edge.
+            let (lo, hi) = state.csr.adjacency(v);
+            for i in lo..hi {
+                let (u, c) = (state.csr.head[i], state.csr.cost[i]);
+                state.offer(u, mask, g + c);
+            }
+
+            // Merge with every disjoint set already settled at this vertex.
+            // No de-duplication is needed or wanted: `other` was settled strictly
+            // earlier, so this is the first and only moment at which both halves
+            // of the pair are settled. Filtering on which half owns the lowest
+            // bit -- the Dreyfus-Wagner trick -- silently drops every merge whose
+            // partner happens to hold it.
+            // The settled side of every merge is the same, so its witness is read
+            // once rather than once per partner.
+            let settled_info = state.info(mask);
+            let partners = std::mem::take(&mut state.settled_masks[v as usize]);
+            for &(other, g_other) in &partners {
+                if other & mask == 0 {
+                    state.offer_merge(v, mask, &settled_info, other, g + g_other);
+                }
+            }
+            state.settled_masks[v as usize] = partners;
+        }
+    }
+
+    /// Drop from the search every edge outside `graph`, which must have the same
+    /// vertex numbering.
+    ///
+    /// # Why this may happen mid-search
+    ///
+    /// Reduced-cost elimination proves that no tree *strictly cheaper than the
+    /// incumbent* uses the removed edges, and the search is looking for exactly
+    /// such a tree, so removing them cannot lose the answer:
+    ///
+    /// - Every label value stays the cost of a genuine subtree of the original
+    ///   graph, including the ones settled before the restriction, so the search
+    ///   can never report below the optimum.
+    /// - If the optimum is below the incumbent, every edge of an optimal tree
+    ///   survives the elimination, so its whole derivation survives and the
+    ///   search still reaches it.
+    ///
+    /// The lower-bound tables (`dist`, `td`, the metric closure) are left alone:
+    /// distances in a subgraph are never shorter, so a bound computed in the
+    /// larger graph remains a bound in the smaller one.
+    pub fn restrict_to(&mut self, graph: &UndirectedGraph) {
+        self.state.csr = Csr::build(graph);
+        self.fingerprint = graph.edges.iter().map(|e| (e.src, e.dst, e.cost)).collect();
+    }
+
+    /// Whether the open queue is empty, i.e. the search has nothing left to do.
+    pub fn is_exhausted(&self) -> bool {
+        self.state.heap.is_empty()
+    }
+
+    /// The optimum, once some slice has reached the goal state.
+    pub fn optimum(&self) -> Option<Cost> {
+        self.optimal
+    }
+
+    /// Labels settled across every slice so far.
+    pub fn labels_settled(&self) -> u64 {
+        self.settled_count
+    }
 }
 
 /// The part of a label's evaluation that depends on its terminal set `I` alone.
@@ -1015,12 +1272,12 @@ impl MaskInfo {
     };
 }
 
-struct Search<'a> {
-    csr: &'a Csr,
-    dist: &'a [Vec<Cost>],
-    td: &'a [Vec<Cost>],
+struct Search {
+    csr: Csr,
+    dist: Vec<Vec<Cost>>,
+    td: Vec<Vec<Cost>>,
     /// For each terminal, the other terminals in order of increasing distance.
-    nearest_order: &'a [Vec<u32>],
+    nearest_order: Vec<Vec<u32>>,
     k: usize,
     root_bit: Mask,
     potential: Option<PackingPotential>,
@@ -1047,7 +1304,7 @@ struct Search<'a> {
     upper_bound: Cost,
 }
 
-impl Search<'_> {
+impl Search {
     /// Offer `value` as the cost of the label `(v, mask)`.
     fn offer(&mut self, v: NodeId, mask: Mask, value: Cost) {
         if self.label.get(mask >> 1, v).is_some_and(|(old, done)| done || old <= value + 1e-12) {

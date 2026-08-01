@@ -4,7 +4,9 @@ pub mod max_flow;
 pub mod dual_ascent;
 pub mod dreyfus_wagner;
 
-pub use dijkstra_steiner::{dijkstra_steiner, dijkstra_steiner_guided, DijkstraSteinerResult};
+pub use dijkstra_steiner::{
+    dijkstra_steiner, dijkstra_steiner_guided, DijkstraSteinerResult, SteinerSearch,
+};
 pub use dijkstra::{shortest_path, shortest_paths_from, ShortestPathResult};
 pub use max_flow::{max_flow_min_cut, MaxFlowResult, MaxFlowWorkspace};
 pub use dual_ascent::{
