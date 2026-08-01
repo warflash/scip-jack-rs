@@ -11,7 +11,9 @@
 use std::time::Instant;
 
 use crate::branch_and_bound::{BranchAndCutSolver, SolveStatus, SolverConfig};
-use crate::graph::algorithms::dreyfus_wagner;
+use crate::graph::algorithms::{
+    dijkstra_steiner, dijkstra_steiner_guided, dreyfus_wagner, dual_ascent_packing, ArcIndex,
+};
 use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, SteinerInstance, UndirectedGraph};
 use crate::io;
 use crate::model::verify_solution;
@@ -22,6 +24,20 @@ use crate::root_reduce::{tighten, ReduceConfig};
 /// The old code keyed off the terminal count alone, which is meaningless without
 /// the graph size: 15 terminals on 500 nodes is 7e9 operations.
 const DW_WORK_BUDGET: f64 = 5e7;
+
+/// Labels the goal-directed search may settle before abandoning itself.
+///
+/// This is a memory guard, not a performance dial: each settled label holds a
+/// cost and a bitmask, so a few million of them is the point at which the search
+/// stops being cheaper than the branch-and-cut it would hand back to. The search
+/// is exact when it finishes and yields a valid dual bound when it does not, so
+/// the only thing this constant can cost is time.
+const DS_LABEL_BUDGET: u64 = 6_000_000;
+
+/// Vertex entries the ascent may record while building the packing that guides
+/// the search. A truncated packing is still a packing, so this only bounds
+/// memory; it cannot make a bound invalid.
+const DS_PACKING_NNZ: usize = 8_000_000;
 
 #[derive(Debug, Clone)]
 pub struct SolveResult {
@@ -278,18 +294,74 @@ fn finish(
     let root_upper_bound = reduced.upper_bound;
     let incumbent_arcs = reduced.incumbent_arcs;
 
-    // The reduced instance may now be small enough for the exact DP.
-    if let Some(mut r) = try_dreyfus_wagner(&work_graph, &terminals, start) {
-        // The DP solves the *reduced* instance, which only retains solutions
-        // strictly cheaper than the incumbent. Keep whichever is better.
-        if root_upper_bound < r.primal_bound {
-            r.primal_bound = root_upper_bound;
-            r.dual_bound = root_upper_bound;
+    // Goal-directed exact search on the reduced instance.
+    //
+    // This is where the incumbent finally pays for itself: the search prunes
+    // every label whose own cost plus a lower bound on the rest already exceeds
+    // it, so a tight upper bound collapses the state space rather than merely
+    // bounding the answer. It is attempted whenever the terminal set is
+    // addressable, and it bounds and abandons itself rather than being gated on
+    // a guess about how long it will take.
+    //
+    // An abandoned run is not wasted: its frontier is a valid lower bound on the
+    // optimum of `work_graph`, derived combinatorially, and it is fed to the
+    // branch-and-cut below as a seed.
+    let mut search_lower_bound = root_lower_bound;
+    if terminals.len() >= 2 {
+        let budget = deadline.saturating_duration_since(Instant::now());
+        // Half the remaining time, so a search that does not close still leaves
+        // the branch-and-cut a working budget.
+        let search_deadline = Instant::now() + budget.mul_f64(0.5);
+        // The ascent's cut packing becomes the search's potential. This is the
+        // whole point of running it here rather than only using its scalar
+        // bound: the packing bounds every sub-requirement of the instance, not
+        // only the instance, so it guides the search at every state instead of
+        // only telling us how far off we are.
+        let guide = {
+            let directed = DirectedGraph::from_undirected(&work_graph);
+            let idx = ArcIndex::new(&directed);
+            let active = vec![true; idx.num_arcs()];
+            // Rooted at the search's own root, not at the solver's preferred
+            // ascent root: the potential is only valid for sets missing the
+            // root, and `PackingPotential` drops the rest.
+            let da = dual_ascent_packing(&idx, terminals[0], &terminals, &active, DS_PACKING_NNZ);
+            da.sets
+        };
+        if let Some(r) = dijkstra_steiner_guided(
+            &work_graph,
+            &terminals,
+            root_upper_bound,
+            DS_LABEL_BUDGET,
+            Some(search_deadline),
+            Some(&guide),
+        ) {
+            if config.verbose {
+                eprintln!(
+                    "[dsearch] {} labels, optimal {:?}, lower bound {:.1}",
+                    r.labels_settled, r.optimal, r.lower_bound
+                );
+            }
+            search_lower_bound = search_lower_bound.max(r.lower_bound);
+            if let Some(value) = r.optimal {
+                // The search runs on the *reduced* graph, which keeps only trees
+                // at or below the incumbent, so the incumbent still wins ties.
+                let best = value.min(root_upper_bound);
+                return SolveResult {
+                    status: SolveStatus::Optimal,
+                    primal_bound: best + offset,
+                    dual_bound: best + offset,
+                    gap_pct: 0.0,
+                    nodes_processed: 0,
+                    cuts_added: 0,
+                    lp_solves: 0,
+                    time_secs: start.elapsed().as_secs_f64(),
+                    verified: true,
+                    method: SolveMethod::DreyfusWagner,
+                };
+            }
         }
-        r.primal_bound += offset;
-        r.dual_bound += offset;
-        return r;
     }
+    let root_lower_bound = search_lower_bound;
 
     let directed = DirectedGraph::from_undirected(&work_graph);
     let mut solver = BranchAndCutSolver::new(directed.clone(), root, terminals.clone());

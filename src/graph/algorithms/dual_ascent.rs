@@ -84,6 +84,19 @@ pub struct DualAscentResult {
     /// cut, so `y(cut) >= 1` is a valid inequality; see [`dual_ascent_cuts`] for
     /// what handing them to an LP buys.
     pub cuts: Vec<Vec<ArcId>>,
+    /// The raised sets themselves, as `(y_W, W)` pairs, in the order raised.
+    ///
+    /// Empty unless [`dual_ascent_packing`] asked for them. This is the dual
+    /// solution as a *cut packing*: the `y_W` are non-negative and satisfy
+    /// `sum { y_W : a enters W } <= c(a)` for every arc, which is exactly what
+    /// makes `sum y_W` a lower bound. Keeping the sets rather than only their
+    /// boundaries lets a consumer ask the packing about an arbitrary subset of
+    /// requirements rather than only about the whole instance -- see
+    /// `dijkstra_steiner`, which turns it into an A* potential.
+    ///
+    /// A prefix of the packing is still a packing, so a truncated list is still
+    /// dual-feasible and every bound derived from it stays valid.
+    pub sets: Vec<(Cost, Vec<NodeId>)>,
 }
 
 /// Static CSR view of a digraph, built once and reused across ascent runs.
@@ -284,7 +297,7 @@ pub fn dual_ascent_masked(
     terminals: &[NodeId],
     active: &[bool],
 ) -> DualAscentResult {
-    ascend(idx, root, terminals, active, 0)
+    ascend(idx, root, terminals, active, 0, 0)
 }
 
 /// [`dual_ascent_masked`], additionally returning the cuts it raised.
@@ -312,7 +325,21 @@ pub fn dual_ascent_cuts(
     active: &[bool],
     max_nnz: usize,
 ) -> DualAscentResult {
-    ascend(idx, root, terminals, active, max_nnz.max(1))
+    ascend(idx, root, terminals, active, max_nnz.max(1), 0)
+}
+
+/// Dual ascent that also returns the raised sets, as a cut packing.
+///
+/// `max_set_nnz` caps the total number of vertex entries retained; recording
+/// stops at the cap, and a prefix of a packing is still a packing.
+pub fn dual_ascent_packing(
+    idx: &ArcIndex,
+    root: NodeId,
+    terminals: &[NodeId],
+    active: &[bool],
+    max_set_nnz: usize,
+) -> DualAscentResult {
+    ascend(idx, root, terminals, active, 0, max_set_nnz)
 }
 
 fn ascend(
@@ -321,6 +348,7 @@ fn ascend(
     terminals: &[NodeId],
     active: &[bool],
     mut cut_nnz_budget: usize,
+    set_nnz_budget: usize,
 ) -> DualAscentResult {
     let num_arcs = idx.num_arcs();
     let mut reduced: Vec<Cost> = (0..num_arcs).map(|a| idx.cost(a as ArcId)).collect();
@@ -336,9 +364,18 @@ fn ascend(
     let mut lower_bound = 0.0;
     let mut steps = Vec::new();
     let mut cuts: Vec<Vec<ArcId>> = Vec::new();
+    let mut sets: Vec<(Cost, Vec<NodeId>)> = Vec::new();
+    let mut set_budget = set_nnz_budget;
 
     if comps.is_empty() {
-        return DualAscentResult { lower_bound, reduced_costs: reduced, root, steps, cuts };
+        return DualAscentResult {
+            lower_bound,
+            reduced_costs: reduced,
+            root,
+            steps,
+            cuts,
+            sets,
+        };
     }
 
     // Initial expansion; terminals already reachable from the root over zero-cost
@@ -395,6 +432,18 @@ fn ascend(
             cut_nnz_budget = 0;
         }
 
+        if set_budget > 0 {
+            let members: Vec<NodeId> = (0..idx.num_nodes() as NodeId)
+                .filter(|&v| comps[ci].contains(v))
+                .collect();
+            if members.len() <= set_budget {
+                set_budget -= members.len();
+                sets.push((delta, members));
+            } else {
+                set_budget = 0;
+            }
+        }
+
         for &a in &comps[ci].frontier {
             reduced[a as usize] -= delta;
             if reduced[a as usize] < 0.0 {
@@ -407,7 +456,7 @@ fn ascend(
         comps[ci].grow(idx, &reduced, active, root);
     }
 
-    DualAscentResult { lower_bound, reduced_costs: reduced, root, steps, cuts }
+    DualAscentResult { lower_bound, reduced_costs: reduced, root, steps, cuts, sets }
 }
 
 /// Convenience wrapper that builds a fresh [`ArcIndex`] and uses every arc.
