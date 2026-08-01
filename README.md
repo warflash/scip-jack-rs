@@ -78,7 +78,7 @@ stub; the active solver uses `model::LpRelaxation` together with the separators
 under `src/separation/` instead.
 
 For the implementation audit, the current non-ignored test suite passes:
-93 library tests, 6 integration tests, and 16 SteinLib checks; 5 longer
+109 library tests, 6 integration tests, and 16 SteinLib checks; 5 longer
 benchmark/certificate tests remain ignored. Run the suite yourself with:
 
 ```text

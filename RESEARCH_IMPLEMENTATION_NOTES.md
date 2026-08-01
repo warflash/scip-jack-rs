@@ -721,6 +721,7 @@ terminal is violated.
 |---|---|---|
 | PACE Track 1 [1..140] @3 s | **137/140**, 51.9 s | 136/140, 53.3 s |
 | PACE Track 1 [155..200] @5 s | **21/46**, 153.7 s | 20/46, 156.0 s |
+| PACE Track 1 [155..200], unproved set | — | gains 182 |
 | SteinLib E @20 s | 19/20, 92.2 s | 19/20, **87.1 s** |
 | SteinLib D @5 s | 20/20, 15.7 s | 20/20, **15.1 s** |
 | SteinLib C @5 s | 20/20, 4.9 s | 20/20, **4.6 s** |
@@ -756,16 +757,25 @@ addresses that.
 
 | slice | round 3 | now |
 |---|---|---|
-| PACE Track 1 [1..140] @3 s | 135/140, 55.0 s | **137/140, 51.9 s** |
-| PACE Track 1 [155..200] @5 s | 21/46, 153.4 s | 21/46, 153.7 s |
+| PACE Track 1 [1..140] @3 s | 135/140, 55.0 s | **136–137/140, 51.9–52.4 s** |
+| PACE Track 1 [155..200] @5 s | 21/46, 153.4 s | 21/46, 153.3 s |
 | SteinLib B @5 s | 18/18, 1.2 s | 18/18, 1.6 s |
 | SteinLib C @5 s | 20/20, 4.4 s | 20/20, 4.9 s |
 | SteinLib D @5 s | 20/20, 15.3 s | 20/20, 15.7 s |
-| SteinLib E @20 s | 18/20, 104.0 s | **19/20, 92.2 s** |
+| SteinLib E @20 s | 18/20, 104.0 s | **19/20, 92.2–94.8 s** |
 
-Two more on Track 1 [1..140] *and* faster, one more on SteinLib E and 11 % faster.
-The [1..140] survivors are 24, 86, 87; 25 and 26 now close. No instance reports a
-proved value that disagrees with its reference optimum.
+[1..140] is quoted as a range because it is one: two runs of the committed binary
+gave 137 and 136, differing on instance025, which is exactly the one-instance
+flip this file's opening paragraph warns about. What is not noise is that 026
+went from unproved at 4.4 s to proved at 1.6 s, that the slice is 3–5 % faster,
+and that SteinLib E gained an instance while dropping 11 % of its wall clock.
+The survivors on [1..140] are 24, 86, 87 and sometimes 25.
+
+No instance reports a proved value that disagrees with its reference optimum.
+That was checked exhaustively rather than by inspection: across Track 1
+[1..140], Track 1 [155..200] and SteinLib E, every instance whose reported value
+differs from its reference — 23 of them — reports `TimeLimit`. There are no
+false proofs.
 
 ### What this round says about the next step
 
