@@ -100,6 +100,9 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
                 base_offset
             );
         }
+        if config.verbose {
+            eprintln!("[time] classical reduction took {:.2}s", start.elapsed().as_secs_f64());
+        }
         (ru, ri.terminals)
     } else {
         (graph, instance.terminals.clone())
@@ -136,7 +139,9 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             initial_upper_bound: incoming_ub,
             ..ReduceConfig::default()
         };
+        let tighten_start = Instant::now();
         let reduced = tighten(work_graph.clone(), terminals.clone(), &reduce_config);
+        let tighten_secs = tighten_start.elapsed().as_secs_f64();
         // Cap the first search so an unproved-but-improved incumbent still
         // leaves time for the second tightening pass to exploit it.
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -145,6 +150,14 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         } else {
             deadline
         };
+        if config.verbose {
+            eprintln!(
+                "[time] pass {pass}: tighten took {:.2}s, search gets {:.2}s, elapsed {:.2}s",
+                tighten_secs,
+                pass_deadline.saturating_duration_since(Instant::now()).as_secs_f64(),
+                start.elapsed().as_secs_f64(),
+            );
+        }
         let outcome = finish(reduced, &config, start, pass_deadline);
         // Both bounds are valid for the same instance, so keep the better of
         // each. A pass that fails to improve the incumbent can still have

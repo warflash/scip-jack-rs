@@ -75,10 +75,21 @@ pub struct LpRelaxation {
     /// not, because presolve runs afresh on every `run()` and throws the basis
     /// away.
     cold: bool,
-    /// Seconds a single LP solve may take, or infinity. A root model seeded with
-    /// a few thousand connectivity rows is a genuinely hard LP — on PACE
-    /// instance151 one solve ran for 33 seconds inside a 10-second budget, and
-    /// the search only checks the clock between solves.
+    /// Wall-clock seconds still available to the search, or infinity. A root
+    /// model seeded with a few thousand connectivity rows is a genuinely hard
+    /// LP — on PACE instance151 one solve ran for 33 seconds inside a 10-second
+    /// budget, and the loop only checks the clock between solves, so the backend
+    /// needs its own stop.
+    ///
+    /// HiGHS compares `time_limit` against a timer that *accumulates* across
+    /// `run()` calls on the same model, so the option must be set to the total
+    /// time the model is allowed to have consumed by the end of this solve, not
+    /// to the length of this solve. Setting the latter is worse than setting
+    /// nothing: once the accumulated time passes it, every further solve returns
+    /// immediately with a non-optimal status, the node is abandoned for want of a
+    /// valid bound, and the search stops. On SteinLib e18 that ended the run with
+    /// ten of its twenty-two seconds unspent and the dual bound four percent
+    /// short of where the previous solve had already been heading.
     pub time_limit_secs: f64,
     /// Last values actually pushed to HiGHS.
     presolve_on: bool,
@@ -209,12 +220,16 @@ impl LpRelaxation {
             }
         }
 
-        // Anti-symmetry: at most one orientation of each edge is used. One row per
-        // edge, and binding only where the relaxation actually wants to pay for
-        // both directions, which is rare — so they are separated on demand. On
-        // PACE instance199 that is 8,616 of the model's 23,000 structural rows.
+        // Anti-symmetry: at most one orientation of each edge is used.
+        //
+        // These are resident, not held back. Holding them back was tried and is
+        // measurably worse: on SteinLib e18 the lazy version solved a model with
+        // half the rows at 232 ms against the resident model's 170 ms, and got
+        // half as many cut rounds in the same budget. They bind often enough that
+        // re-admitting them a batch at a time disturbs the basis more than the
+        // rows cost to carry.
         for p in 0..num_pairs {
-            b.add_lazy(f64::NEG_INFINITY, 1.0, vec![(2 * p as u32, 1.0), (2 * p as u32 + 1, 1.0)]);
+            b.add_row(f64::NEG_INFINITY, 1.0, vec![(2 * p as u32, 1.0), (2 * p as u32 + 1, 1.0)]);
         }
 
         // FC-BCR block.
@@ -576,11 +591,16 @@ impl LpRelaxation {
             model.set_option("presolve", if self.cold { "on" } else { "off" });
             self.presolve_on = self.cold;
         }
-        if self.time_limit_secs.is_finite()
-            && (self.time_limit_secs - self.armed_limit).abs() > 0.5
-        {
-            model.set_option("time_limit", self.time_limit_secs.max(0.01));
-            self.armed_limit = self.time_limit_secs;
+        // Re-pushed only when the budget genuinely tightens. HiGHS treats an
+        // option assignment as a model event and drops the simplex state, so
+        // re-asserting a clock that has barely moved costs the warm start that
+        // makes an incremental cut loop affordable at all.
+        if self.time_limit_secs.is_finite() {
+            let budget = self.solve_time_secs + self.time_limit_secs.max(0.01);
+            if budget < self.armed_limit - 1.0 {
+                model.set_option("time_limit", budget);
+                self.armed_limit = budget;
+            }
         }
         self.cold = false;
 

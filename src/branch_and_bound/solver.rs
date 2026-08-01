@@ -631,20 +631,23 @@ impl BranchAndCutSolver {
                 return NodeResult::Pruned;
             }
 
-            // Tailing-off detection: if bound improvement < 0.1% for 3 consecutive rounds, stop
-            let improvement = if prev_bound > f64::NEG_INFINITY && prev_bound.abs() > 1e-10 {
-                (node_dual_bound - prev_bound) / prev_bound.abs()
-            } else {
-                1.0
-            };
+            // Stop when the relaxation stops getting stronger — not when it stops
+            // getting stronger *quickly*.
+            //
+            // The old test compared the round's gain against 0.1% of the bound
+            // itself, which is the wrong scale: on PACE instance161 the bound sits
+            // near 5,100 while 220 units of gap remain, so "0.1% of the bound" is
+            // five units a round and the loop declared victory with 4% of the gap
+            // still open and the whole point of the LP unrealised. What matters is
+            // whether another round moves the bound at all; if it does, separation
+            // is still buying something, and if it does not, no number of further
+            // rounds will.
+            let moved = node_dual_bound > prev_bound + 1e-9 * node_dual_bound.abs().max(1.0);
             prev_bound = node_dual_bound;
 
-            if improvement < 0.001 {
+            if !moved {
                 stall_rounds += 1;
-                if stall_rounds >= 3 && !is_root_node {
-                    break;
-                }
-                if stall_rounds >= 10 && is_root_node {
+                if stall_rounds >= if is_root_node { 3 } else { 2 } {
                     break;
                 }
             } else {
