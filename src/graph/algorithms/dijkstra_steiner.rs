@@ -427,7 +427,35 @@ impl Ord for Key {
 /// larger and the transform is the difference between closing the instance and
 /// not. Memory is only committed in the second case, and only when the dense
 /// label table — the same `n * M` shape — was itself affordable.
+///
+/// # Several packings at once
+///
+/// Two independently feasible packings may **not** be added: they price the same
+/// tree cost, and their sum can exceed the optimum. Their pointwise maximum can
+/// always be taken.
+///
+/// > **Potential lattice.** If `h_1, ..., h_p` each satisfy the valid-lower-bound
+/// > inequality `h(v,I) <= h(w,I') + smt((I\I') ∪ {v,w})` with `h(r0,{r0}) = 0`,
+/// > then so does `h = max_i h_i`.
+/// >
+/// > *Proof.* Let `i*` attain the maximum on the left. Then
+/// > `h(v,I) = h_{i*}(v,I) <= h_{i*}(w,I') + smt(...) <= h(w,I') + smt(...)`. The
+/// > base state is zero in every entry. ∎
+///
+/// Every `L_pack` is a valid lower bound by the argument above, so a family of
+/// packings from unrelated sources composes for free and the search's ordering
+/// stays correct. That is what lets an LP-derived packing be used *alongside* the
+/// ascent's rather than instead of it: neither dominates the other at every
+/// state, and the maximum is never wrong.
 pub struct PackingPotential {
+    layers: Vec<PackingLayer>,
+    /// `2^(k-1)`: the number of addressable collected sets.
+    num_masks: usize,
+}
+
+/// One packing's contribution. See [`PackingPotential`] for the mathematics; the
+/// fields are exactly the evaluation structure described there.
+struct PackingLayer {
     /// Distinct terminal masks among the raised sets, with their total weight.
     by_mask: Vec<(u32, Cost)>,
     /// For each vertex, the `(terminal mask, weight)` of every raised set that
@@ -435,13 +463,17 @@ pub struct PackingPotential {
     at_vertex: Vec<Vec<(u32, Cost)>>,
     /// `Z(v, I)` at `[v * num_masks + (I >> 1)]`, when it was affordable.
     subset_sums: Option<Vec<Cost>>,
-    /// `2^(k-1)`: the number of addressable collected sets.
     num_masks: usize,
 }
 
-impl PackingPotential {
-    /// Build from a dual-ascent packing. `terminal_index[v]` is the index of `v`
-    /// in the terminal list, or `u32::MAX`.
+/// Packings the potential will carry. The evaluation cost is linear in this, and
+/// the two sources that exist — the ascent's own packing and the one read off an
+/// LP dual — are what it is sized for.
+pub const MAX_PACKING_LAYERS: usize = 2;
+
+impl PackingLayer {
+    /// Build from one dual-ascent packing. `terminal_index[v]` is the index of
+    /// `v` in the terminal list, or `u32::MAX`.
     /// `root` is the search's root terminal, and every hypothesis of the proof
     /// above depends on no raised set containing it: the bound charges each set
     /// to an arc of a tree that has a vertex inside the set and the root
@@ -463,7 +495,7 @@ impl PackingPotential {
     /// table — the same `n * num_masks` shape — was itself affordable. The
     /// subset-sum table is built when it is, *and* when the break-even above
     /// says it pays.
-    pub fn new(
+    fn new(
         sets: &[(Cost, Vec<NodeId>)],
         terminal_index: &[u32],
         num_nodes: usize,
@@ -572,6 +604,93 @@ impl PackingPotential {
     }
 }
 
+impl PackingPotential {
+    /// Build from one or more packings, each rooted at `root`.
+    ///
+    /// Every hypothesis of the proof depends on no raised set containing the
+    /// root: the bound charges each set to an arc of a tree that has a vertex
+    /// inside the set and the root outside, and the goal state's potential is
+    /// zero only because no set witnesses the root.
+    ///
+    /// A dual ascent rooted at `root` never produces such a set, but a caller is
+    /// free to hand over a packing from any source, and one rooted elsewhere
+    /// silently breaks both. Rather than trust the caller, sets containing
+    /// `root` are dropped in [`PackingLayer::new`]. A sub-family of a packing is
+    /// still a packing, so dropping them costs strength and never validity.
+    ///
+    /// This is not hypothetical. Feeding a packing rooted at the solver's
+    /// preferred ascent root, which is chosen for bound strength and is usually
+    /// *not* the first terminal, produced dual bounds above the optimum on seven
+    /// PACE instances and reported them as proved.
+    ///
+    /// `num_masks` is `2^(k-1)`, and `affordable` says whether the dense label
+    /// table — the same `n * num_masks` shape — was itself affordable. The
+    /// subset-sum table is built when it is, *and* when the break-even above
+    /// says it pays.
+    pub fn new(
+        packings: &[&[(Cost, Vec<NodeId>)]],
+        terminal_index: &[u32],
+        num_nodes: usize,
+        root: NodeId,
+        num_masks: usize,
+        affordable: bool,
+        degree: &dyn Fn(usize) -> usize,
+    ) -> Self {
+        let layers = packings
+            .iter()
+            .take(MAX_PACKING_LAYERS)
+            .filter(|sets| !sets.is_empty())
+            .map(|sets| {
+                PackingLayer::new(
+                    sets,
+                    terminal_index,
+                    num_nodes,
+                    root,
+                    num_masks,
+                    affordable,
+                    degree,
+                )
+            })
+            .collect();
+        Self { layers, num_masks }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    /// The set-dependent part of each layer's bound, in layer order.
+    fn shared(&self, outstanding: u32) -> SharedTerms {
+        let mut out = SharedTerms::ZERO;
+        for (i, layer) in self.layers.iter().enumerate() {
+            out.0[i] = layer.shared(outstanding);
+        }
+        out
+    }
+
+    /// The pointwise maximum over the layers, which is what the lattice theorem
+    /// in this type's documentation licenses.
+    fn value(&self, v: NodeId, outstanding: u32, collected: u32, shared: &SharedTerms) -> Cost {
+        let mut best: Cost = 0.0;
+        for (i, layer) in self.layers.iter().enumerate() {
+            let value = layer.value(v, outstanding, collected, shared.0[i]);
+            if value > best {
+                best = value;
+            }
+        }
+        let _ = self.num_masks;
+        best
+    }
+}
+
+/// Per-layer `shared` values, carried inside the (Copy) per-mask cache.
+#[derive(Clone, Copy)]
+struct SharedTerms([Cost; MAX_PACKING_LAYERS]);
+
+impl SharedTerms {
+    const ZERO: Self = Self([0.0; MAX_PACKING_LAYERS]);
+}
+
 struct Csr {
     start: Vec<u32>,
     head: Vec<u32>,
@@ -672,17 +791,22 @@ pub fn dijkstra_steiner(
     label_budget: u64,
     deadline: Option<Instant>,
 ) -> Option<DijkstraSteinerResult> {
-    dijkstra_steiner_guided(graph, terminals, upper_bound, label_budget, deadline, None)
+    dijkstra_steiner_guided(graph, terminals, upper_bound, label_budget, deadline, &[])
 }
 
-/// [`dijkstra_steiner`] with a dual-ascent packing supplying the potential.
+/// [`dijkstra_steiner`] with one or more cut packings supplying the potential.
+///
+/// Every packing must be rooted at `terminals[0]`, which is the search's own
+/// root; sets holding it are discarded rather than trusted. The potential is
+/// their pointwise maximum, which is valid by the lattice theorem on
+/// [`PackingPotential`], and at most [`MAX_PACKING_LAYERS`] of them are used.
 pub fn dijkstra_steiner_guided(
     graph: &UndirectedGraph,
     terminals: &[NodeId],
     upper_bound: Cost,
     label_budget: u64,
     deadline: Option<Instant>,
-    packing: Option<&[(Cost, Vec<NodeId>)]>,
+    packings: &[&[(Cost, Vec<NodeId>)]],
 ) -> Option<DijkstraSteinerResult> {
     let k = terminals.len();
     if !(2..=MAX_TERMINALS).contains(&k) {
@@ -712,13 +836,13 @@ pub fn dijkstra_steiner_guided(
 
     let num_masks = 1usize << (k - 1);
     let labels = Labels::new(csr.num_nodes, num_masks);
-    let potential = packing.map(|sets| {
+    let potential = (!packings.is_empty()).then(|| {
         let mut terminal_index = vec![u32::MAX; csr.num_nodes];
         for (i, &t) in terminals.iter().enumerate() {
             terminal_index[t as usize] = i as u32;
         }
         PackingPotential::new(
-            sets,
+            packings,
             &terminal_index,
             csr.num_nodes,
             terminals[0],
@@ -727,6 +851,7 @@ pub fn dijkstra_steiner_guided(
             &|v| csr.degree(v),
         )
     });
+    let potential = potential.filter(|p| !p.is_empty());
 
     let root_bit = 1u32;
     let all_labels: u32 = if k == 32 { !1u32 } else { ((1u32 << k) - 1) & !1 };
@@ -839,8 +964,8 @@ pub fn dijkstra_steiner_guided(
 struct MaskInfo {
     /// `mst(R \ I) / 2`, the spanning-tree half of the 1-tree bound.
     mst_half: Cost,
-    /// The part of the packing potential that depends only on `R \ I`.
-    shared: Cost,
+    /// The part of each packing layer's potential that depends only on `R \ I`.
+    shared: SharedTerms,
     /// `d(I, R \ I)`, and the bit of a terminal of `R \ I` attaining it.
     hop: Cost,
     hop_bit: u32,
@@ -855,7 +980,7 @@ impl MaskInfo {
     /// starts at the illegal mask.
     const EMPTY: Self = Self {
         mst_half: 0.0,
-        shared: 0.0,
+        shared: SharedTerms::ZERO,
         hop: Cost::INFINITY,
         hop_bit: 0,
         witness: Cost::INFINITY,
@@ -1000,7 +1125,7 @@ impl Search<'_> {
         }
         let out = self.outstanding(mask);
         let mst_half = self.mst(out) / 2.0;
-        let shared = self.potential.as_ref().map_or(0.0, |p| p.shared(out));
+        let shared = self.potential.as_ref().map_or(SharedTerms::ZERO, |p| p.shared(out));
         // `d(I, R \ I)` over the terminal metric closure. Each terminal's
         // neighbours are pre-sorted by distance, so the inner scan stops at the
         // first one still outstanding — normally the first entry — rather than
@@ -1081,7 +1206,7 @@ impl Search<'_> {
         // The maximum of valid lower bounds is a valid lower bound, so the
         // packing bound simply joins the others.
         if let Some(p) = &self.potential {
-            best = best.max(p.value(v, out, mask, info.shared));
+            best = best.max(p.value(v, out, mask, &info.shared));
         }
         (best, first, first_bit)
     }
@@ -1228,7 +1353,7 @@ mod tests {
                     Cost::INFINITY,
                     u64::MAX,
                     None,
-                    Some(&da.sets),
+                    &[&da.sets],
                 );
                 let got = r.as_ref().and_then(|r| r.optimal);
                 assert!(
@@ -1243,7 +1368,7 @@ mod tests {
                         Cost::INFINITY,
                         budget,
                         None,
-                        Some(&da.sets),
+                        &[&da.sets],
                     ) else {
                         continue;
                     };
@@ -1365,7 +1490,8 @@ mod tests {
             let active = vec![true; idx.num_arcs()];
             let da = dual_ascent_packing(&idx, terminals[0], &terminals, &active, 1 << 20);
 
-            for guide in [None, Some(&da.sets[..])] {
+            let guides: [&[&[(Cost, Vec<NodeId>)]]; 2] = [&[], &[&da.sets[..]]];
+            for guide in guides {
                 // A cutoff exactly at the optimum is the tightest valid one and
                 // stacks the incumbent rule on top of the domination rule.
                 for cutoff in [Cost::INFINITY, dw.optimal_cost] {
@@ -1382,7 +1508,7 @@ mod tests {
                         got.is_some_and(|c| (c - dw.optimal_cost).abs() < 1e-6),
                         "{k} terminals, guided={}, cutoff={cutoff}: \
                          Dreyfus-Wagner says {}, search says {got:?}",
-                        guide.is_some(),
+                        !guide.is_empty(),
                         dw.optimal_cost
                     );
                 }

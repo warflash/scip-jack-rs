@@ -297,7 +297,7 @@ pub fn dual_ascent_masked(
     terminals: &[NodeId],
     active: &[bool],
 ) -> DualAscentResult {
-    ascend(idx, root, terminals, active, 0, 0)
+    ascend(idx, root, terminals, active, 0, 0, None)
 }
 
 /// [`dual_ascent_masked`], additionally returning the cuts it raised.
@@ -325,7 +325,7 @@ pub fn dual_ascent_cuts(
     active: &[bool],
     max_nnz: usize,
 ) -> DualAscentResult {
-    ascend(idx, root, terminals, active, max_nnz.max(1), 0)
+    ascend(idx, root, terminals, active, max_nnz.max(1), 0, None)
 }
 
 /// Dual ascent that also returns the raised sets, as a cut packing.
@@ -339,7 +339,48 @@ pub fn dual_ascent_packing(
     active: &[bool],
     max_set_nnz: usize,
 ) -> DualAscentResult {
-    ascend(idx, root, terminals, active, 0, max_set_nnz)
+    ascend(idx, root, terminals, active, 0, max_set_nnz, None)
+}
+
+/// Dual ascent against *residual* arc costs.
+///
+/// # Why this is sound, and what it is for
+///
+/// Let `lambda` be any feasible cut packing for `root`, with arc load
+/// `ell(a) = sum { lambda_W : a enters W }`, and let
+/// `cbar(a) = c(a) - ell(a) >= 0`. An ascent run against `cbar` returns a second
+/// packing `lambda'` with `sum { lambda'_W : a enters W } <= cbar(a)` for every
+/// arc, and every raised set misses `root`. Adding the two inequalities,
+///
+/// ```text
+/// sum { (lambda + lambda')_W : a enters W } <= c(a)     for every arc a,
+/// ```
+///
+/// so `lambda + lambda'` is a single feasible packing for the *original* costs,
+/// of value `sum lambda + sum lambda'`. Two packings that are each independently
+/// feasible against `c` may **not** be added; layering against the residual is
+/// what makes the sum legitimate.
+///
+/// This is the only way to strengthen a packing produced by an ascent, because
+/// that packing is *maximal*: after an ascent from `root` terminates, every
+/// terminal is reachable from `root` over zero-reduced-cost arcs, so every set
+/// missing the root is crossed by a saturated arc and admits no increase. A
+/// second ascent on the original costs therefore finds nothing. A packing that
+/// arrives from somewhere else — an LP dual, scaled to feasibility — leaves
+/// slack everywhere, and this recovers it.
+///
+/// `residual[a]` must be non-negative; it is the capacity still available on arc
+/// `a`. Entries beyond `idx.num_arcs()` are ignored, and missing entries are
+/// treated as zero.
+pub fn dual_ascent_packing_residual(
+    idx: &ArcIndex,
+    root: NodeId,
+    terminals: &[NodeId],
+    active: &[bool],
+    residual: &[Cost],
+    max_set_nnz: usize,
+) -> DualAscentResult {
+    ascend(idx, root, terminals, active, 0, max_set_nnz, Some(residual))
 }
 
 fn ascend(
@@ -349,9 +390,16 @@ fn ascend(
     active: &[bool],
     mut cut_nnz_budget: usize,
     set_nnz_budget: usize,
+    residual: Option<&[Cost]>,
 ) -> DualAscentResult {
     let num_arcs = idx.num_arcs();
-    let mut reduced: Vec<Cost> = (0..num_arcs).map(|a| idx.cost(a as ArcId)).collect();
+    let mut reduced: Vec<Cost> = match residual {
+        // A negative residual would let the ascent hand back weights the
+        // original costs cannot pay for, so it is clamped here rather than
+        // trusted.
+        Some(r) => (0..num_arcs).map(|a| r.get(a).copied().unwrap_or(0.0).max(0.0)).collect(),
+        None => (0..num_arcs).map(|a| idx.cost(a as ArcId)).collect(),
+    };
 
     let words = (idx.num_nodes() + 63) / 64;
     let mut comps: Vec<Component> = terminals

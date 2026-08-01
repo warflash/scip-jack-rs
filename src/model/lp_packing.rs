@@ -1,0 +1,732 @@
+//! Certified cut packings read out of an LP dual.
+//!
+//! # What this is for
+//!
+//! The goal-directed search in [`crate::graph::algorithms::dijkstra_steiner`] is
+//! limited by the strength of its A* potential, and that potential is a *cut
+//! packing*: non-negative weights `y_W` on vertex sets missing the root with
+//!
+//! ```text
+//! sum { y_W : a enters W } <= c(a)      for every arc a.                  (PACK)
+//! ```
+//!
+//! Until now the only source of one was Wong's dual ascent. That source is
+//! exhausted: after an ascent from `r0` terminates every terminal is reachable
+//! from `r0` over zero-reduced-cost arcs, so every set missing `r0` is crossed by
+//! a saturated arc and admits no increase whatsoever. The ascent's packing is
+//! **maximal**, and no further combinatorial step can improve it.
+//!
+//! The LP on the same relaxation reaches further, because it can *lower* some
+//! weights in order to raise others, which is an LP pivot and not an ascent
+//! step. How much further is worth stating precisely, since it bounds what this
+//! module can ever be worth: on PACE instance086 the ascent stops at 3268 and
+//! twenty seconds of cut loop reaches 3360 against an optimum of 3661, and on
+//! instance087 the numbers are 31, 32.1 and 36. The bidirected-cut relaxation
+//! itself is 8–11 % short on those instances, so no dual object built on it can
+//! close them. Where it does pay is the opposite regime — instances whose gap is
+//! a handful of units on a large base, where two or three units of extra
+//! potential is a quarter of the gap.
+//!
+//! This module takes that stronger dual and turns it back into an object
+//! satisfying (PACK), so the search can use it at every state and not only at
+//! the root.
+//!
+//! # The extraction, and why nothing about the LP has to be trusted
+//!
+//! The connectivity rows of the model are `sum_{a in A} y_a >= 1`. Let `lambda_A`
+//! be the multiplier the LP gave such a row. Three things stand between that
+//! number and a packing, and each is discharged by construction rather than by
+//! assumption.
+//!
+//! **1. `A` need not be `delta^-(W)` for any `W`.** Recover one:
+//!
+//! > **Lemma (set recovery).** For an arbitrary arc set `A` and a root `r`, let
+//! > `W(A)` be the set of vertices unreachable from `r` in `G - A`. Then
+//! > `r not in W(A)` and `delta^-(W(A)) subseteq A`.
+//! >
+//! > *Proof.* `r` reaches itself, so `r not in W(A)`. Let `(u,v)` be an arc with
+//! > `u not in W(A)` and `v in W(A)`. If `(u,v) not in A` then the path
+//! > witnessing `u`'s reachability extends along it and `v` is reachable — a
+//! > contradiction. So `(u,v) in A`. ∎
+//!
+//! The lemma holds for *any* `A`, so a row that is not a Steiner cut at all, or a
+//! separator that emitted a wrong one, can only produce a set whose boundary is
+//! contained in the row's support. Since the packing condition is then checked
+//! against `delta^-(W(A))`, which is a subset of `A`, a bogus row costs strength
+//! and never validity. (When `W(A)` is empty the row is dropped; it certifies
+//! nothing.)
+//!
+//! **2. The multipliers need not satisfy (PACK).** The model carries far more
+//! than connectivity rows — in-degree equalities, flow balance, anti-symmetry,
+//! edge-vertex coupling — and rows of `<=` sense contribute *negatively* to a
+//! column's dual sum, so the connectivity part alone may exceed `c(a)`. Two
+//! repairs are computed and the better one kept. Both produce a vector that
+//! satisfies (PACK) by construction:
+//!
+//! - **uniform scaling** by `1 / max(mu, 1)` with `mu = max_a load(a)/c(a)`;
+//! - **greedy admission** in decreasing weight order, each set admitted at the
+//!   largest weight the remaining capacity on `delta^-(W)` allows.
+//!
+//! Scaling a feasible-after-scaling vector is trivially feasible; greedy
+//! admission maintains `load(a) <= c(a)` as an invariant. Neither needs the LP to
+//! have been solved correctly.
+//!
+//! **3. Scaling throws away strength.** It also leaves slack on every arc, and
+//! *that* is recoverable: [`crate::graph::algorithms::dual_ascent_packing_residual`]
+//! runs Wong's ascent against `c - load` and returns a second packing feasible for
+//! the residual. Adding the two arc inequalities shows the sum is feasible for
+//! `c`. This is the one situation in which two packings may be added — they were
+//! never independently feasible against the same costs — and it is exactly where
+//! the maximality argument above does not apply, because the first layer did not
+//! come from an ascent.
+//!
+//! The value of the result is `sum y_W`, a valid lower bound on the instance by
+//! the packing theorem, and the sets are a valid A* potential for a search rooted
+//! at the same `r0`.
+
+use std::time::Instant;
+
+use crate::graph::algorithms::{dual_ascent_cuts, dual_ascent_packing_residual, ArcIndex};
+use crate::graph::{ArcId, Cost, DirectedGraph, NodeId};
+use crate::model::LpRelaxation;
+use crate::separation::FlowCutSeparator;
+
+/// A cut packing that has been checked against the arc costs.
+#[derive(Debug, Clone, Default)]
+pub struct CertifiedPacking {
+    /// `(y_W, W)` for every set with positive weight. No set contains the root.
+    pub sets: Vec<(Cost, Vec<NodeId>)>,
+    /// `sum y_W`. A valid lower bound on the cost of any arborescence rooted at
+    /// the root that reaches every raised set.
+    pub value: Cost,
+}
+
+impl CertifiedPacking {
+    pub fn is_empty(&self) -> bool {
+        self.sets.is_empty()
+    }
+
+    /// Re-check (PACK) from scratch, and that no set holds the root.
+    ///
+    /// Nothing in the pipeline depends on this passing — the construction is
+    /// feasible by invariant — but it is the statement the proofs above make, so
+    /// it is written down and tested rather than asserted in prose.
+    pub fn verify(&self, idx: &ArcIndex, root: NodeId, tolerance: Cost) -> bool {
+        let mut load = vec![0.0 as Cost; idx.num_arcs()];
+        let mut inside = vec![false; idx.num_nodes() + 1];
+        for (weight, members) in &self.sets {
+            if *weight < 0.0 || members.iter().any(|&v| v == root) {
+                return false;
+            }
+            for &v in members {
+                inside[v as usize] = true;
+            }
+            for &v in members {
+                for &a in idx.incoming(v) {
+                    if !inside[idx.tail(a) as usize] {
+                        load[a as usize] += *weight;
+                    }
+                }
+            }
+            for &v in members {
+                inside[v as usize] = false;
+            }
+        }
+        (0..idx.num_arcs())
+            .all(|a| load[a] <= idx.cost(a as ArcId) + tolerance)
+    }
+}
+
+/// A weighted arc set proposed as a packing member.
+type Candidate = (Cost, Vec<ArcId>);
+
+/// Turn weighted arc sets into a packing that satisfies (PACK).
+///
+/// See the module header: each `A` is replaced by the recovered set `W(A)` and
+/// its true boundary `delta^-(W(A)) subseteq A`, and the weights are then made
+/// feasible by whichever of uniform scaling and greedy admission retains more.
+pub fn certify(candidates: &[Candidate], idx: &ArcIndex, root: NodeId) -> CertifiedPacking {
+    let num_arcs = idx.num_arcs();
+    let num_nodes = idx.num_nodes() + 1;
+
+    // A vertex with no incident arc cannot be reached by any tree and cannot be
+    // a terminal of a solvable instance, so leaving it out of `W` changes
+    // neither the boundary nor any evaluation, and keeps the sets small.
+    let mut real = vec![false; num_nodes];
+    for a in 0..num_arcs {
+        real[idx.tail(a as ArcId) as usize] = true;
+        real[idx.head(a as ArcId) as usize] = true;
+    }
+
+    let mut blocked = vec![false; num_arcs];
+    let mut seen = vec![false; num_nodes];
+    let mut stack: Vec<NodeId> = Vec::new();
+    let mut recovered: Vec<(Cost, Vec<NodeId>, Vec<ArcId>)> = Vec::with_capacity(candidates.len());
+
+    for (weight, arcs) in candidates {
+        if !(*weight > 0.0) || arcs.is_empty() {
+            continue;
+        }
+        for &a in arcs {
+            blocked[a as usize] = true;
+        }
+        // Reachability from the root in `G - A`.
+        seen.iter_mut().for_each(|s| *s = false);
+        seen[root as usize] = true;
+        stack.clear();
+        stack.push(root);
+        while let Some(v) = stack.pop() {
+            for &a in idx.outgoing(v) {
+                if blocked[a as usize] {
+                    continue;
+                }
+                let h = idx.head(a);
+                if !seen[h as usize] {
+                    seen[h as usize] = true;
+                    stack.push(h);
+                }
+            }
+        }
+        for &a in arcs {
+            blocked[a as usize] = false;
+        }
+
+        let members: Vec<NodeId> = (0..num_nodes)
+            .filter(|&v| real[v] && !seen[v])
+            .map(|v| v as NodeId)
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        // `delta^-(W)`, which the lemma guarantees is a subset of `arcs`.
+        let mut boundary: Vec<ArcId> = Vec::new();
+        for &v in &members {
+            for &a in idx.incoming(v) {
+                if seen[idx.tail(a) as usize] {
+                    boundary.push(a);
+                }
+            }
+        }
+        if boundary.is_empty() {
+            // No arc enters `W`: the instance cannot connect it to the root at
+            // all, and its weight is unbounded rather than certifiable.
+            continue;
+        }
+        recovered.push((*weight, members, boundary));
+    }
+
+    if recovered.is_empty() {
+        return CertifiedPacking::default();
+    }
+
+    // Rule A: uniform scaling. `mu` is the worst overload ratio; dividing every
+    // weight by `max(mu, 1)` makes every arc inequality hold and leaves the
+    // vector non-negative.
+    let mut load = vec![0.0 as Cost; num_arcs];
+    for (w, _, boundary) in &recovered {
+        for &a in boundary {
+            load[a as usize] += *w;
+        }
+    }
+    let mut mu: Cost = 1.0;
+    for a in 0..num_arcs {
+        if load[a] <= 0.0 {
+            continue;
+        }
+        let c = idx.cost(a as ArcId);
+        if c <= 0.0 {
+            mu = Cost::INFINITY;
+            break;
+        }
+        mu = mu.max(load[a] / c);
+    }
+    let uniform_value: Cost =
+        if mu.is_finite() { recovered.iter().map(|(w, _, _)| *w).sum::<Cost>() / mu } else { 0.0 };
+
+    // Rule B: greedy admission. Heaviest first, each set taking the largest
+    // weight its boundary still has room for. `load(a) <= c(a)` is an invariant
+    // of the loop, so the result satisfies (PACK) whatever the order.
+    let mut order: Vec<usize> = (0..recovered.len()).collect();
+    order.sort_by(|&i, &j| {
+        recovered[j].0.partial_cmp(&recovered[i].0).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    load.iter_mut().for_each(|l| *l = 0.0);
+    let mut admitted: Vec<(usize, Cost)> = Vec::with_capacity(recovered.len());
+    let mut greedy_value: Cost = 0.0;
+    for &i in &order {
+        let (w, _, boundary) = &recovered[i];
+        let room = boundary
+            .iter()
+            .map(|&a| idx.cost(a as ArcId) - load[a as usize])
+            .fold(Cost::INFINITY, Cost::min);
+        let take = w.min(room).max(0.0);
+        if take <= 1e-12 {
+            continue;
+        }
+        for &a in boundary {
+            load[a as usize] += take;
+        }
+        greedy_value += take;
+        admitted.push((i, take));
+    }
+
+    if greedy_value >= uniform_value {
+        CertifiedPacking {
+            sets: admitted
+                .into_iter()
+                .map(|(i, w)| (w, recovered[i].1.clone()))
+                .collect(),
+            value: greedy_value,
+        }
+    } else {
+        CertifiedPacking {
+            sets: recovered.iter().map(|(w, m, _)| (*w / mu, m.clone())).collect(),
+            value: uniform_value,
+        }
+    }
+}
+
+/// Extend a certified packing by an ascent against its residual capacities.
+///
+/// The residual layer is feasible for `c - load`, so the concatenation is
+/// feasible for `c`; see [`dual_ascent_packing_residual`] for the one-line
+/// addition that proves it.
+pub fn extend_by_residual_ascent(
+    packing: CertifiedPacking,
+    idx: &ArcIndex,
+    root: NodeId,
+    terminals: &[NodeId],
+    max_set_nnz: usize,
+) -> CertifiedPacking {
+    let num_arcs = idx.num_arcs();
+    let mut residual: Vec<Cost> = (0..num_arcs).map(|a| idx.cost(a as ArcId)).collect();
+    let mut inside = vec![false; idx.num_nodes() + 1];
+    for (weight, members) in &packing.sets {
+        for &v in members {
+            inside[v as usize] = true;
+        }
+        for &v in members {
+            for &a in idx.incoming(v) {
+                if !inside[idx.tail(a) as usize] {
+                    residual[a as usize] -= *weight;
+                }
+            }
+        }
+        for &v in members {
+            inside[v as usize] = false;
+        }
+    }
+    // Floating-point slop can push a saturated arc a hair below zero; the ascent
+    // clamps, and clamping upward would be the unsound direction.
+    residual.iter_mut().for_each(|r| *r = r.max(0.0));
+
+    let active = vec![true; num_arcs];
+    let layer =
+        dual_ascent_packing_residual(idx, root, terminals, &active, &residual, max_set_nnz);
+
+    let mut sets = packing.sets;
+    sets.extend(layer.sets);
+    CertifiedPacking { sets, value: packing.value + layer.lower_bound }
+}
+
+/// The outcome of the bounded root cut loop.
+pub struct RootCertificate {
+    /// The LP's own dual bound, valid for the instance as given.
+    pub lp_bound: Cost,
+    /// A packing derived from the LP dual, extended by a residual ascent layer.
+    pub packing: CertifiedPacking,
+    /// Arcs no solution of cost at most `upper_bound` can use.
+    ///
+    /// # The rule, and the two ways it has been got wrong
+    ///
+    /// Let `z` be the LP optimum and `rc_a >= 0` the reduced cost of an arc
+    /// column resting at its lower bound. Any feasible point with `y_a = 1`
+    /// costs at least `z + rc_a`, so
+    ///
+    /// ```text
+    /// z + rc_a > UB   =>   no solution of cost <= UB uses a.
+    /// ```
+    ///
+    /// The inequality is strict, which is what keeps solutions of cost exactly
+    /// `UB` — including an optimum equal to the incumbent — alive.
+    ///
+    /// It must be `z`, not `ceil(z)`: a cut-loop optimum is not integral, and
+    /// rounding it up shrinks the gap the inequality is stated over. Doing that
+    /// once emptied PACE instance164's graph and announced a proved 5265 against
+    /// a true optimum of 5205. And `rc` must come from a solve that actually
+    /// reached optimality, because a backend that stops on its own clock leaves
+    /// the previous, smaller model's vector in place.
+    pub eliminated_arcs: Vec<ArcId>,
+    pub lp_solves: u64,
+}
+
+/// Solve a bounded root cut loop and read a certified packing off its dual.
+///
+/// The loop is the ordinary one: seed the model with the ascent's cuts, solve,
+/// separate violated Steiner cuts by max flow, repeat. It stops when a round
+/// finds nothing, when `deadline` passes, or after `max_rounds`. Every exit is
+/// safe — an LP relaxation's optimum is a lower bound however few cuts it holds,
+/// and a packing read off any feasible dual is certified by construction.
+///
+/// Returns `None` when no LP solve reached optimality, in which case there is no
+/// dual to read.
+pub fn root_certificate(
+    graph: &DirectedGraph,
+    root: NodeId,
+    terminals: &[NodeId],
+    upper_bound: Cost,
+    deadline: Instant,
+    max_rounds: usize,
+    max_set_nnz: usize,
+) -> Option<RootCertificate> {
+    let idx = ArcIndex::new(graph);
+    let active = vec![true; idx.num_arcs()];
+    let terminal_set: std::collections::HashSet<NodeId> = terminals.iter().copied().collect();
+    let steiner_nodes: Vec<NodeId> =
+        graph.nodes.iter().map(|n| n.id).filter(|v| !terminal_set.contains(v)).collect();
+
+    let mut lp = LpRelaxation::from_formulation(graph, root, terminals, &steiner_nodes);
+    let seed = dual_ascent_cuts(&idx, root, terminals, &active, 4_000_000);
+    for cut in &seed.cuts {
+        lp.add_lazy_steiner_cut(cut);
+    }
+
+    let mut separator = FlowCutSeparator::new(graph, root, terminals);
+    let mut lp_solves = 0u64;
+    let mut best_bound = seed.lower_bound;
+
+    // The duals are harvested after *every* optimal solve rather than after the
+    // last one. A solve that runs out of clock leaves `LpRelaxation` holding the
+    // multipliers of the previous, smaller model, whose row indices no longer
+    // name the same rows; pairing those with the current pool is the same class
+    // of mistake as reading stale reduced costs. Harvesting eagerly means the
+    // loop can be abandoned at any point and still hand back the strongest dual
+    // it actually proved.
+    let mut candidates: Option<Vec<Candidate>> = None;
+    let mut eliminated_arcs: Vec<ArcId> = Vec::new();
+
+    for _ in 0..max_rounds {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+        if remaining <= 0.0 {
+            break;
+        }
+        lp.time_limit_secs = remaining;
+        let obj = lp.solve();
+        lp_solves += 1;
+        if !lp.is_optimal() {
+            break;
+        }
+        best_bound = best_bound.max(obj);
+        candidates = Some(
+            lp.unit_arc_rows()
+                .into_iter()
+                .map(|(entries, dual)| {
+                    (dual, entries.iter().map(|&(c, _)| c as ArcId).collect())
+                })
+                .collect(),
+        );
+        if upper_bound.is_finite() {
+            // The bound grows monotonically over the loop and the reduced costs
+            // are read from the same solve as `obj`, so recomputing the set each
+            // round and keeping the largest is exactly the strongest licensed
+            // elimination and never mixes a bound with another solve's vector.
+            let fixed: Vec<ArcId> = (0..graph.num_arcs() as usize)
+                .filter(|&a| {
+                    let rc = lp.reduced_costs.get(a).copied().unwrap_or(0.0);
+                    rc > 0.0 && obj + rc > upper_bound
+                })
+                .map(|a| a as ArcId)
+                .collect();
+            if fixed.len() > eliminated_arcs.len() {
+                eliminated_arcs = fixed;
+            }
+        }
+
+        // Structural rows held back from the model are part of the relaxation,
+        // not optional strengthening; bringing in the violated ones is what makes
+        // the seeded ascent cuts count.
+        let structural = lp.separate_structural(4096);
+        let solution = lp.get_solution().to_vec();
+        let cuts = separator.separate_cuts(&solution);
+        if structural == 0 && cuts.is_empty() {
+            // The point satisfies every connectivity requirement, so this is the
+            // cut relaxation's own optimum and no further round can move it.
+            break;
+        }
+        for cut in cuts.iter().take(400) {
+            lp.add_steiner_cut(&cut.cut_arcs);
+        }
+        // Rows that have not been binding for several solves are dropped. The
+        // bound stays valid whatever the pool holds — an LP over fewer rows is a
+        // weaker relaxation, never an invalid one — and an unbounded pool is
+        // what makes a 125-vertex model cost 80 ms a solve.
+        lp.prune_cuts();
+    }
+
+    let candidates = candidates?;
+    let packing = certify(&candidates, &idx, root);
+    let packing = extend_by_residual_ascent(packing, &idx, root, terminals, max_set_nnz);
+
+    debug_assert!(packing.verify(&idx, root, 1e-6), "extracted packing violates (PACK)");
+
+    Some(RootCertificate { lp_bound: best_bound, packing, eliminated_arcs, lp_solves })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::NodeType;
+
+    fn triangle() -> (DirectedGraph, Vec<NodeId>) {
+        let mut g = DirectedGraph::new(4);
+        g.add_node(1, NodeType::Terminal, 0.0);
+        g.add_node(2, NodeType::Terminal, 0.0);
+        g.add_node(3, NodeType::Terminal, 0.0);
+        g.add_node(4, NodeType::Steiner, 0.0);
+        for (u, v, c) in [(1, 4, 1.0), (2, 4, 1.0), (3, 4, 1.0), (1, 2, 3.0)] {
+            g.add_arc(u, v, c);
+            g.add_arc(v, u, c);
+        }
+        (g, vec![1, 2, 3])
+    }
+
+    /// The recovery lemma, exercised on arc sets that are *not* cuts.
+    #[test]
+    fn recovered_boundary_is_contained_in_the_row_support() {
+        let (g, _) = triangle();
+        let idx = ArcIndex::new(&g);
+        let root = 1;
+        for take in 1..(1u32 << idx.num_arcs().min(10)) {
+            let arcs: Vec<ArcId> =
+                (0..idx.num_arcs()).filter(|i| take >> i & 1 == 1).map(|i| i as ArcId).collect();
+            let p = certify(&[(1.0, arcs.clone())], &idx, root);
+            for (_, members) in &p.sets {
+                assert!(!members.contains(&root));
+                for &v in members {
+                    for &a in idx.incoming(v) {
+                        if !members.contains(&idx.tail(a)) {
+                            assert!(
+                                arcs.contains(&a),
+                                "boundary arc {a} escaped the row support {arcs:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whatever weights are proposed, the certified result satisfies (PACK).
+    #[test]
+    fn certification_is_feasible_for_arbitrary_weights() {
+        let (g, _) = triangle();
+        let idx = ArcIndex::new(&g);
+        let root = 1;
+        let mut seed = 12345u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..200 {
+            let mut candidates: Vec<Candidate> = Vec::new();
+            for _ in 0..(1 + rng() % 5) {
+                let arcs: Vec<ArcId> = (0..idx.num_arcs())
+                    .filter(|_| rng() % 2 == 0)
+                    .map(|i| i as ArcId)
+                    .collect();
+                // Deliberately huge weights: the repair has to do real work.
+                candidates.push(((rng() % 50) as Cost, arcs));
+            }
+            let p = certify(&candidates, &idx, root);
+            assert!(p.verify(&idx, root, 1e-9), "certified packing is infeasible");
+            assert!(p.value >= -1e-12);
+        }
+    }
+
+    /// A residual layer on top of a certified packing is still one packing, and
+    /// the combined value is the sum.
+    #[test]
+    fn residual_layer_stays_feasible() {
+        let (g, terminals) = triangle();
+        let idx = ArcIndex::new(&g);
+        let root = terminals[0];
+        // Start from a deliberately weak first layer so the ascent has room.
+        let base = certify(&[(0.5, vec![0, 2])], &idx, root);
+        let combined = extend_by_residual_ascent(base.clone(), &idx, root, &terminals, 1 << 20);
+        assert!(combined.verify(&idx, root, 1e-6));
+        assert!(combined.value >= base.value - 1e-9);
+        // Optimum of the triangle instance is 3; a packing can never exceed it.
+        assert!(combined.value <= 3.0 + 1e-6, "packing value {} exceeds the optimum", combined.value);
+    }
+
+    /// The property the whole module exists for, checked against enumeration.
+    ///
+    /// For every state `(v, S)` of a small instance, the potential
+    /// `L_pack(v,S) = sum { y_W : W meets S ∪ {v} }` must not exceed the cost of
+    /// a cheapest tree spanning `S ∪ {v}`, and the search driven by it must
+    /// return the true optimum. Both are checked on packings read out of an LP
+    /// dual — the case the ascent's own tests never reach, because an ascent
+    /// packing is laminar-ish and an LP dual is not.
+    #[test]
+    fn lp_packings_bound_every_state() {
+        use crate::graph::algorithms::dijkstra_steiner_guided;
+        use crate::graph::UndirectedGraph;
+
+        let mut seed = 0xC0FF_EE12_3456_789Du64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut checked = 0;
+        for _ in 0..60 {
+            let n = 4 + (rng() % 4) as u32;
+            let k = 2 + (rng() % 3) as u32;
+            let mut ug = UndirectedGraph::new(n);
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = v <= k;
+                ug.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 3 != 0 {
+                        ug.add_edge(u, v, 1.0 + (rng() % 9) as Cost);
+                    }
+                }
+            }
+            let g = DirectedGraph::from_undirected(&ug);
+            let idx = ArcIndex::new(&g);
+            let root = terminals[0];
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            let Some(cert) =
+                root_certificate(&g, root, &terminals, Cost::INFINITY, deadline, 200, 1 << 20)
+            else {
+                continue;
+            };
+            assert!(cert.packing.verify(&idx, root, 1e-6));
+
+            // Enumerate every connected vertex subset holding the root and take
+            // its cheapest spanning tree: that is an upper bound on
+            // `smt(S ∪ {v})` for every `S ∪ {v}` it contains, and the minimum
+            // over the subsets containing a given requirement is exactly it.
+            let mut best = vec![Cost::INFINITY; 1usize << n];
+            for sub in 0u32..(1u32 << n) {
+                if sub >> (root - 1) & 1 == 0 {
+                    continue;
+                }
+                if let Some(c) = spanning_cost(&ug, sub, n) {
+                    // Every superset requirement is served by this tree.
+                    if c < best[sub as usize] {
+                        best[sub as usize] = c;
+                    }
+                }
+            }
+            // Downward closure: a tree on `sub` serves every requirement inside.
+            for sub in 0u32..(1u32 << n) {
+                let mut bits = sub;
+                while bits != 0 {
+                    let b = bits & bits.wrapping_neg();
+                    bits ^= b;
+                    let smaller = sub ^ b;
+                    if best[sub as usize] < best[smaller as usize] {
+                        best[smaller as usize] = best[sub as usize];
+                    }
+                }
+            }
+
+            for req in 0u32..(1u32 << n) {
+                if req >> (root - 1) & 1 == 0 || !best[req as usize].is_finite() {
+                    continue;
+                }
+                let potential: Cost = cert
+                    .packing
+                    .sets
+                    .iter()
+                    .filter(|(_, members)| {
+                        members.iter().any(|&v| v >= 1 && req >> (v - 1) & 1 == 1)
+                    })
+                    .map(|(w, _)| *w)
+                    .sum();
+                assert!(
+                    potential <= best[req as usize] + 1e-6,
+                    "potential {potential} exceeds smt {} on requirement {req:b}",
+                    best[req as usize]
+                );
+            }
+
+            let guided = dijkstra_steiner_guided(
+                &ug,
+                &terminals,
+                Cost::INFINITY,
+                u64::MAX,
+                None,
+                &[&cert.packing.sets],
+            )
+            .and_then(|r| r.optimal);
+            let plain = dijkstra_steiner_guided(&ug, &terminals, Cost::INFINITY, u64::MAX, None, &[])
+                .and_then(|r| r.optimal);
+            assert_eq!(
+                guided.map(|c| (c * 1e6) as i64),
+                plain.map(|c| (c * 1e6) as i64),
+                "LP guidance changed the answer"
+            );
+            checked += 1;
+        }
+        assert!(checked > 20, "only {checked} instances exercised");
+    }
+
+    /// Cheapest spanning tree of the induced subgraph on `sub`, or `None` when it
+    /// is disconnected. Kruskal over a handful of edges.
+    fn spanning_cost(g: &crate::graph::UndirectedGraph, sub: u32, n: u32) -> Option<Cost> {
+        let members: Vec<u32> = (1..=n).filter(|&v| sub >> (v - 1) & 1 == 1).collect();
+        if members.is_empty() {
+            return Some(0.0);
+        }
+        let mut edges: Vec<(Cost, u32, u32)> = g
+            .edges
+            .iter()
+            .filter(|e| sub >> (e.src - 1) & 1 == 1 && sub >> (e.dst - 1) & 1 == 1)
+            .map(|e| (e.cost, e.src, e.dst))
+            .collect();
+        edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let mut parent: Vec<u32> = (0..=n).collect();
+        fn find(p: &mut Vec<u32>, x: u32) -> u32 {
+            if p[x as usize] != x {
+                let r = find(p, p[x as usize]);
+                p[x as usize] = r;
+            }
+            p[x as usize]
+        }
+        let mut total = 0.0;
+        let mut joined = 1;
+        for (c, u, v) in edges {
+            let (a, b) = (find(&mut parent, u), find(&mut parent, v));
+            if a != b {
+                parent[a as usize] = b;
+                total += c;
+                joined += 1;
+            }
+        }
+        (joined == members.len()).then_some(total)
+    }
+
+    #[test]
+    fn root_certificate_never_exceeds_the_optimum() {
+        let (g, terminals) = triangle();
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        let cert =
+            root_certificate(&g, terminals[0], &terminals, Cost::INFINITY, deadline, 8, 1 << 20)
+                .expect("root LP should solve");
+        let idx = ArcIndex::new(&g);
+        assert!(cert.packing.verify(&idx, terminals[0], 1e-6));
+        assert!(cert.lp_bound <= 3.0 + 1e-6, "lp bound {}", cert.lp_bound);
+        assert!(cert.packing.value <= 3.0 + 1e-6, "packing {}", cert.packing.value);
+    }
+}

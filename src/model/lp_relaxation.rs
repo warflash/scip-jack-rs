@@ -44,6 +44,10 @@ pub struct LpRelaxation {
     pub objective: Vec<Cost>,
     pub solution: Vec<f64>,
     pub reduced_costs: Vec<f64>,
+    /// Row multipliers of the last optimal solve, in the model's row order:
+    /// `structural` first, then `cuts`. Only meaningful when
+    /// [`LpRelaxation::is_optimal`] holds; see [`LpRelaxation::unit_arc_rows`].
+    pub row_duals: Vec<f64>,
     pub dual_bound: f64,
     pub status: LpStatus,
     pub solve_count: u64,
@@ -359,6 +363,7 @@ impl LpRelaxation {
             objective,
             solution: vec![0.0; b.col_cost.len()],
             reduced_costs: vec![0.0; b.col_cost.len()],
+            row_duals: Vec::new(),
             dual_bound: f64::NEG_INFINITY,
             status: LpStatus::NotSolved,
             solve_count: 0,
@@ -687,6 +692,7 @@ impl LpRelaxation {
                 let sol = solved.get_solution();
                 self.solution = sol.columns().to_vec();
                 self.reduced_costs = sol.dual_columns().to_vec();
+                self.row_duals = sol.dual_rows().to_vec();
                 self.dual_bound = self
                     .solution
                     .iter()
@@ -748,6 +754,42 @@ impl LpRelaxation {
 
     pub fn num_cuts(&self) -> usize {
         self.cuts.len()
+    }
+
+    /// Every row of the shape `sum_{a in A} y_a >= 1` over arc columns only,
+    /// paired with the multiplier the last optimal solve gave it.
+    ///
+    /// This is the raw material for a certified cut packing. Two families of the
+    /// model have this shape and no others do: the separated Steiner cuts and the
+    /// dual-ascent seeds, and the terminal in-degree equalities
+    /// `y(delta^-(t)) = 1`, whose row is `delta^-({t})` and whose multiplier is
+    /// usable exactly when it is non-negative — an equality row priced downwards
+    /// is not a `>=` multiplier and is dropped here.
+    ///
+    /// The caller is not asked to trust that `A` is a cut of anything.
+    /// [`crate::model::lp_packing`] recovers a vertex set from `A` alone and
+    /// verifies the packing condition against the arc costs, so a row that is not
+    /// a Steiner cut at all can only weaken the resulting bound.
+    ///
+    /// The model's row order is `structural` then `cuts`, which is the order
+    /// [`LpRelaxation::rebuild`] and [`LpRelaxation::push_cut`] both maintain, so
+    /// index `i` of `row_duals` names the `i`-th row of that concatenation.
+    pub fn unit_arc_rows(&self) -> Vec<(&[(u32, f64)], f64)> {
+        if !self.is_optimal() {
+            return Vec::new();
+        }
+        let num_vars = self.num_vars;
+        self.structural
+            .iter()
+            .chain(self.cuts.iter().map(|c| &c.row))
+            .zip(self.row_duals.iter().copied())
+            .filter(|&(row, dual)| {
+                dual > 1e-9
+                    && row.lo == 1.0
+                    && row.entries.iter().all(|&(c, v)| c < num_vars && v == 1.0)
+            })
+            .map(|(row, dual)| (row.entries.as_slice(), dual))
+            .collect()
     }
 }
 

@@ -804,6 +804,177 @@ scratchpad, hypergraphic component pricing, become the right next object; until
 then a stronger relaxation is a strictly more expensive one that would be solved
 even less often.
 
+## 2026-08-01 (fifth round): a packing the ascent cannot reach
+
+The previous handoff named one well-posed target: **certify a cut packing out of
+the LP's own dual**, because the search's potential is a dual-ascent packing and
+that packing is provably maximal. This round implements it, and two things came
+out that the handoff did not predict — one about how much of the LP survives the
+extraction, and one about where the gain actually lands.
+
+### 22. Reading a packing off an LP dual, trusting nothing
+
+New module `src/model/lp_packing.rs`; the proofs are inline there. The
+connectivity rows of the model are `sum_{a in A} y_a >= 1` with a multiplier
+`lambda_A` from the LP. Three obstacles sit between that and a cut packing, and
+each is discharged by construction rather than by trusting the LP or the
+separator that produced the row.
+
+**The row need not be a cut.** It is not assumed to be:
+
+> **Set recovery.** For an *arbitrary* arc set `A` and root `r`, let `W(A)` be
+> the vertices unreachable from `r` in `G - A`. Then `r ∉ W(A)` and
+> `δ⁻(W(A)) ⊆ A`.
+>
+> *Proof.* `r` reaches itself. If `(u,v)` has `u ∉ W(A)`, `v ∈ W(A)` and
+> `(u,v) ∉ A`, the path witnessing `u`'s reachability extends along it. ∎
+
+Because the packing condition is then checked against `δ⁻(W(A))`, a row that is
+not a Steiner cut at all — a bad separator, a row family the extractor
+misclassified — can only cost strength. This is what makes the whole extraction
+safe to point at *every* unit-coefficient `>= 1` row in the model, including the
+terminal in-degree equalities `y(δ⁻(t)) = 1`, whose set is `{t}`.
+
+**The multipliers need not be feasible.** The model carries `<=` rows —
+anti-symmetry, edge-vertex coupling — whose duals enter a column's sum
+negatively, so the connectivity part alone can exceed `c(a)`. Two repairs are
+computed and the better kept: uniform scaling by `1/max(mu,1)`, and greedy
+admission in decreasing weight order at whatever the remaining capacity on
+`δ⁻(W)` allows. Both are feasible by construction, neither needs the LP to have
+been solved correctly.
+
+**Scaling throws strength away — and leaves slack that is recoverable.** This is
+the scratchpad's §12.7 residual stacking, and it is the one place the maximality
+argument of §15 does not apply, because the first layer did not come from an
+ascent. With `ell(a)` the arc load of a feasible packing and `cbar = c - ell >= 0`,
+an ascent against `cbar` returns a second packing feasible for `cbar`; adding the
+two arc inequalities makes the sum a single packing feasible for `c`.
+
+**Measured, on the reduced instance, 20 s of cut loop:**
+
+| instance | ascent | root LP | certified packing | as % of the LP |
+|---|---|---|---|---|
+| PACE 086 | 3268 | 3360 | 3343 | 99.5 % |
+| PACE 087 | 31 | 32.12 | 32.11 | 100.0 % |
+| PACE 113 | 2193 | 2193 | **2201** | 100.4 % |
+
+The extraction is essentially lossless. On 113 the packing exceeds the LP bound
+it was read from, which is not a contradiction — the LP had solved only three
+times and its value is the optimum of a *subset* of the cut relaxation, while the
+residual ascent contributes sets that subset never had.
+
+### 23. Neither packing dominates, so the potential is a lattice maximum
+
+`PackingPotential` now carries a family of packings and evaluates their pointwise
+maximum. That is licensed exactly:
+
+> **Potential lattice.** If each `h_i` satisfies
+> `h(v,I) <= h(w,I') + smt((I\I') ∪ {v,w})` with `h(r0,{r0}) = 0`, so does
+> `max_i h_i` — take `i*` attaining the maximum on the left and chain.
+
+It is not decoration. On PACE 087 at a 400 k label budget the ascent packing
+closes the instance at 391,156 labels, the LP packing **fails to close it at
+all**, and their maximum closes it at 387,527. A pure swap would have lost the
+instance.
+
+### 24. Where the gain lands, and where the ceiling is
+
+The handoff assumed the instances the search cannot close (24, 25, 86, 87) would
+be the beneficiaries. They are not, and measuring why is the more useful half of
+this round.
+
+| instance | ascent | converged-ish root LP | optimum |
+|---|---|---|---|
+| PACE 086 | 3268 | 3372 (1005 solves, 60 s) | 3661 |
+| PACE 087 | 31 | 32.1 (447 solves, 20 s) | 36 |
+
+**The bidirected-cut relaxation is 8–11 % short on those instances.** No object
+built on that relaxation — a packing, a reduced cost, an LP bound — can close
+them, and the measurements agree: reduced-cost fixing against the LP eliminates
+**zero** arcs on both (it would need a reduced cost above 304 on 086), and the
+better potential cuts the labels-to-close only from 307,287 to 292,991. The
+search's *own* frontier bound is far stronger than any root bound here — 3482 at
+50,000 labels against the root LP's 3372 — which says plainly that on these
+instances the search is the dual engine and the relaxation is not.
+
+The gain lands in the opposite regime: instances whose absolute gap is a handful
+of units on a large base. PACE instance174, verbose:
+
+```
+[reduce] |V|=247 |E|=487 |R|=28   LB=2800454  UB=2800466
+[dsearch] attempt 0: 258048 labels, optimal None
+[certify] lp bound 2800444.8, packing 2800457.0, 5 solves (ascent 2800454.0)
+[dsearch] attempt 1:  68736 labels, optimal Some(2800466.0)
+```
+
+Three units of extra potential on a gap of twelve — a quarter of it — and the
+label count falls 3.75×. Note that the packing (2800457) beats *both* the ascent
+(2800454) and the LP bound it was extracted from (2800444.8, only five solves
+deep); the residual layer is what put it there.
+
+### 25. Scheduling that cannot lose
+
+The second attempt is paid for only after the first has failed. The first search
+keeps the budget share it always had, so any instance the cheap potential already
+closes is untouched; the root cut loop and the retry come out of what is left.
+The LP's reduced costs also eliminate arcs — `LP_opt + rc_a > UB` strictly, with
+the raw objective and only from a solve that reached optimality, both per §7 —
+and an edge is deleted from the *search's* graph when both its arcs go, which
+shrinks the `n · 2^(k-1)` state space. `work_graph` is left alone so the
+branch-and-cut's inherited incumbent keeps its arc numbering.
+
+The root loop harvests duals after *every* optimal solve rather than after the
+last one, because a solve that runs out of clock leaves the previous, smaller
+model's multipliers in place and their row indices no longer name the same rows.
+That is the same class of mistake as §7's stale reduced costs, and it is why an
+earlier version of this loop returned nothing at all on instance113.
+
+### Round summary
+
+| slice | round 4 | now |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 136/140, 54.6 s | 136/140, 54.0 s |
+| PACE Track 1 [155..200] @5 s | 21/46, 153.1 s | **24/46, 145.8 s** |
+| SteinLib B @5 s | 18/18, 1.14 s | 18/18, 1.29 s |
+| SteinLib C @5 s | 20/20, 4.82 s | 20/20, 4.99 s |
+| SteinLib D @5 s | 20/20, 15.6 s | 20/20, 15.6 s |
+| SteinLib E @20 s | 19/20, 94.3 s | 19/20, 93.4 s |
+
+Both sides built from the same tree, control at `cf7e6a7`. Instances 169, 174
+and 178 move from unproved to proved and do so reproducibly on repeated single
+runs; every other slice is inside noise. Across [1..140], [155..200] and
+SteinLib E no instance reports a value differing from its reference under an
+`Optimal` status.
+
+`src/bin/certify_probe.rs` is the tool the tables above came from: it reports the
+ascent bound, the root LP after a converged separation loop, the certified
+packing, the eliminable arc count, and the search's frontier under each potential
+at a fixed label budget.
+
+### What this round says about the next step
+
+Section 24 is the finding to carry forward, and it retires a standing assumption.
+The 2–3 % dual gap on the large instances was being treated as one problem; it is
+two, and they need opposite things.
+
+1. **Small-gap-on-large-base instances** (the [155..200] block, 169/174/178 and
+   their neighbours) are limited by *potential strength in absolute units*, and
+   that is now addressable — this round moved three of them. More of the same
+   lever: a longer or better-converged root loop, and a second certificate after
+   the incumbent improves.
+2. **Large-gap instances** (24, 25, 86, 87) are limited by the **integrality gap
+   of the bidirected-cut relaxation itself**, measured here at 8–11 %. Every
+   remaining dual direction over that relaxation is capped by it. This is the
+   first hard evidence in this file that §6 of the scratchpad — hypergraphic
+   full-component pricing — is not merely the next idea but the *only* listed one
+   that can move these, and it is also why §15's maximality result felt like a
+   dead end: the ceiling was never the packing, it was the polytope.
+
+The corollary for the search is that its frontier bound, not the root bound, is
+the strongest dual object available on those instances, and it is produced by
+primal-side pruning. Strengthening Lemma 15's witness families is therefore a
+more direct attack on 24/25/86/87 than any further dual work.
+
 ---
 
 ## Where the remaining loss is
@@ -819,6 +990,9 @@ Open directions, unchanged in priority except that direction 1 is now closed:
 
 1. ~~Voronoi-radius bound reductions~~ — implemented, proved, measured; too weak
    to matter (§2). Do not revisit the decomposition for deletion power.
+1b. ~~A cut packing certified out of the LP dual~~ — implemented, proved,
+   measured (§22–§25). It is near-lossless and it moves the small-absolute-gap
+   instances; it is capped by the relaxation's own integrality gap on the rest.
 2. **Matroid-corrected cut packing.** Still absent. The active LP has the
    FC-BCR-inspired block plus cycle/partition/terminal-free cut families and
    seeded dual-ascent cut packing, but no single checkable certificate and no
