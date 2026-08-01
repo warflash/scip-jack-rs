@@ -5,6 +5,7 @@ pub mod blocks;
 pub mod bottleneck;
 pub mod csr;
 pub mod nearest_vertex;
+pub mod sd_closure;
 pub mod vertex_test;
 
 use std::collections::{HashMap, HashSet, BinaryHeap};
@@ -431,6 +432,9 @@ pub fn preprocess_bounded(
     let max_id = rg.nodes.iter().map(|n| n.id as usize).max().unwrap_or(0);
     let mut watch = vertex_test::StarWatch::new(max_id);
     let mut edge_watch = bottleneck::EdgeWatch::new();
+    // The star test's multi-hop witness forest, carried across rounds and
+    // re-validated rather than rebuilt. See [`vertex_test::ChainHops::refresh`].
+    let mut hops = None;
 
     loop {
         let (deg_removed, fixed, _) = degree::degree_reductions(&mut rg);
@@ -460,7 +464,8 @@ pub fn preprocess_bounded(
         if expired() {
             break;
         }
-        let vt_removed = vertex_test::vertex_reductions_watched(&mut rg, deadline, &mut watch);
+        let vt_removed =
+            vertex_test::vertex_reductions_watched(&mut rg, deadline, &mut watch, &mut hops);
         if expired() {
             break;
         }

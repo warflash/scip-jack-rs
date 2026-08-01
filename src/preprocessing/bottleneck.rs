@@ -51,10 +51,22 @@
 //! against *all* terminals; longer chains are checked against each endpoint's
 //! [`NEAREST_TERMINALS`] closest terminals. Restricting the chain endpoints can
 //! only raise the computed value, so the test stays conservative and sound.
+//!
+//! # The restriction, and when it is lifted
+//!
+//! That endpoint restriction is pure loss: `s` is what the proof above needs, and
+//! anything above it merely fails to delete. [`super::sd_closure`] computes the
+//! same minimum **exactly**, over all `|R|^2` chain-endpoint pairs, in `O(|V||R|)`
+//! time and `O(|V||R|)` memory, by reading the terminal bottleneck off the
+//! Kruskal reconstruction tree of the metric-closure MST instead of materialising
+//! it. This pass uses it whenever those tables fit and falls back to the
+//! restricted evaluation when they do not — a memory bound, not a quality dial,
+//! since the fallback is exactly what shipped before.
 
 use crate::graph::{Cost, NodeId};
 
 use super::csr::Csr;
+use super::sd_closure::SdClosure;
 use super::ReducibleGraph;
 
 /// Chain endpoints are searched among this many nearest terminals per vertex.
@@ -95,13 +107,30 @@ const MAX_DENSE_TERMINALS: usize = 3000;
 ///
 /// Measured across the PACE Track 1 set, the reduction fixpoint is bit-identical
 /// with and without the watch, so the loss is nil in practice.
+///
+/// Under the exact closure the caveat above disappears entirely — `s` itself is
+/// what is computed, and it is monotone — but a *third* hazard appears in its
+/// place: the pass can switch from the restricted evaluation to the exact one
+/// between rounds, as the graph shrinks past the closure's memory bound. An edge
+/// that failed the weaker test may pass the stronger one, so [`EdgeWatch`] also
+/// records which test produced each failure and re-tests when the test changes.
 pub struct EdgeWatch {
     failed: Vec<bool>,
+    /// Whether the failures recorded in `failed` came from the exact closure.
+    exact: bool,
 }
 
 impl EdgeWatch {
     pub fn new() -> Self {
-        Self { failed: Vec::new() }
+        Self { failed: Vec::new(), exact: false }
+    }
+
+    /// Drop the memory if the test that produced it is not the one about to run.
+    fn set_mode(&mut self, exact: bool) {
+        if self.exact != exact {
+            self.exact = exact;
+            self.failed.clear();
+        }
     }
 
     pub fn invalidate_all(&mut self) {
@@ -132,16 +161,6 @@ pub fn bottleneck_reductions(graph: &mut ReducibleGraph) -> u32 {
 }
 
 pub fn bottleneck_reductions_watched(graph: &mut ReducibleGraph, watch: &mut EdgeWatch) -> u32 {
-    // Nothing to test means nothing to compute: the `|R|` Dijkstras below are the
-    // whole cost of this pass and they must not run for an empty candidate list.
-    let any_dirty = graph
-        .edges
-        .iter()
-        .any(|e| graph.is_edge_valid(e.id) && !graph.contracted_edges.contains(&e.id) && !watch.is_clean(e.id));
-    if !any_dirty {
-        return 0;
-    }
-
     let terminals: Vec<NodeId> = graph
         .terminals
         .iter()
@@ -154,14 +173,36 @@ pub fn bottleneck_reductions_watched(graph: &mut ReducibleGraph, watch: &mut Edg
     let mut terminals = terminals;
     terminals.sort_unstable();
 
+    // Which test will run is decided by a size predicate, so it is known before
+    // any distance is computed — which is what lets the watch be consulted only
+    // after it has been told about a change of test.
+    let num_nodes = graph.nodes.iter().map(|n| n.id as usize).max().unwrap_or(0) + 1;
+    watch.set_mode(SdClosure::affordable(num_nodes, terminals.len()));
+
+    // Nothing to test means nothing to compute: the `|R|` Dijkstras below are the
+    // whole cost of this pass and they must not run for an empty candidate list.
+    let any_dirty = graph
+        .edges
+        .iter()
+        .any(|e| graph.is_edge_valid(e.id) && !graph.contracted_edges.contains(&e.id) && !watch.is_clean(e.id));
+    if !any_dirty {
+        return 0;
+    }
+
     let csr = Csr::build(graph);
     let dist: Vec<Vec<Cost>> = terminals.iter().map(|&t| csr.dijkstra(t)).collect();
 
-    let bottleneck = (terminals.len() <= MAX_DENSE_TERMINALS)
-        .then(|| terminal_bottleneck(&terminals, &dist));
-
-    // The nearest terminals of each vertex, as indices into `terminals`.
-    let nearest = nearest_terminals(&terminals, &dist, csr.num_nodes);
+    // The exact closure when it fits, the nearest-terminal restriction when it
+    // does not. Both are upper bounds on `s`, which is all the proof needs.
+    let exact = SdClosure::build(&terminals, &dist, csr.num_nodes);
+    let (bottleneck, nearest) = if exact.is_some() {
+        (None, Vec::new())
+    } else {
+        (
+            (terminals.len() <= MAX_DENSE_TERMINALS).then(|| terminal_bottleneck(&terminals, &dist)),
+            nearest_terminals(&terminals, &dist, csr.num_nodes),
+        )
+    };
 
     let candidates: Vec<(u32, NodeId, NodeId, Cost)> = graph
         .edges
@@ -176,7 +217,12 @@ pub fn bottleneck_reductions_watched(graph: &mut ReducibleGraph, watch: &mut Edg
 
     let mut removed = 0;
     for (eid, u, v, cost) in candidates {
-        if special_distance(u, v, cost, &terminals, &dist, bottleneck.as_ref(), &nearest) {
+        let dominated = match exact {
+            // `cost - 1e-9` keeps the inequality strict, as the proof requires.
+            Some(ref sd) => sd.below(u, v, cost - 1e-9),
+            None => special_distance(u, v, cost, &terminals, &dist, bottleneck.as_ref(), &nearest),
+        };
+        if dominated {
             graph.remove_edge(eid);
             removed += 1;
         } else {
