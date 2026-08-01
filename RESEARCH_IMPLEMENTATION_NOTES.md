@@ -982,26 +982,39 @@ certified packing is 72.0 against an ascent bound of 72.0 — the same potential
 and the retry is skipped. On instance174 it is 2800457 against 2800454, and the
 retry closes the instance.
 
-SteinLib C: 8.42 s without the gate, 6.67 s with it, 20/20 either way.
+SteinLib C: 8.42 s without the gate, 6.67 s with it, and 5.81 s once the root
+loop also pulls its held-back rows in geometric batches instead of a flat 4096 —
+which is what `add_lazy_steiner_cut` documents and what the branch-and-cut has
+always done. 20/20 throughout.
 
 ### Round summary
 
 | slice | round 4 | now |
 |---|---|---|
-| PACE Track 1 [1..140] @3 s | 136/140, 54.6 s | 136/140, **50.9 s** |
+| PACE Track 1 [1..140] @3 s | 136/140, 54.6 s | 136/140, **51.9 s** |
 | PACE Track 1 [155..200] @5 s | 21/46, 153.1 s | **26/46, 139.4 s** |
-| SteinLib B @5 s | 18/18, 1.14 s | 18/18, 1.39 s |
-| SteinLib C @5 s | 20/20, 4.82 s | 20/20, 6.67 s |
+| SteinLib B @5 s | 18/18, 1.14 s | 18/18, 1.35 s |
+| SteinLib C @5 s | 20/20, 4.82 s | 20/20, 5.81 s |
 | SteinLib D @5 s | 20/20, 15.6 s | 20/20, 15.6 s |
-| SteinLib E @20 s | 19/20, 94.3 s | 19/20, **89.4 s** |
+| SteinLib E @20 s | 19/20, 94.3 s | 19/20, **92.8 s** |
 
 Both sides built from the same tree, control at `cf7e6a7`. Five instances move
 from unproved to proved — 169, 174 and 178 from the certificate (§22–§25), 188
 and 192 from the widening (§26) — and all five do so reproducibly on repeated
 single runs. Every other slice is inside noise except SteinLib C, which pays
-1.9 s: a single instance, c18, where the search is now attempted, fails, and
+1 s: a single instance, c18, where the search is now attempted, fails, and
 hands back to a branch-and-cut that closes it in 0.38 s. That is the measured
 price of the widening and it is recorded rather than tuned away.
+
+The named survivors of the winnable block — 187, 190, 193, 194 — were chased and
+the reason they hold out is measured. Their certificate LPs manage **two solves**
+inside any budget tried (5,690 rows at 173 ms a solve on instance187) and return
+a bound *below* the ascent's, so the packing is the ascent's, so §27's gate
+correctly declines the retry. There is nothing left to extract there without a
+converged LP: the ascent packing is maximal, so no LP set can be added on top of
+it, and the pointwise maximum the search already uses is the strongest object
+available from this relaxation. 193 does close on a good run and loses the flip
+on a bad one.
 
 Across [1..140], [141..154], [155..200] and SteinLib B/C/D/E, no instance
 reports a value differing from its reference under an `Optimal` status.

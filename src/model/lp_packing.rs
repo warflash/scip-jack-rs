@@ -91,6 +91,10 @@ use crate::graph::{ArcId, Cost, DirectedGraph, NodeId};
 use crate::model::LpRelaxation;
 use crate::separation::FlowCutSeparator;
 
+/// Arc entries the ascent may record while producing the LP's seed rows. Same
+/// cap the branch-and-cut uses; dropping a cut costs at most its own multiplier.
+const ASCENT_CUT_NNZ: usize = 400_000;
+
 /// A cut packing that has been checked against the arc costs.
 #[derive(Debug, Clone, Default)]
 pub struct CertifiedPacking {
@@ -386,10 +390,18 @@ pub fn root_certificate(
         graph.nodes.iter().map(|n| n.id).filter(|v| !terminal_set.contains(v)).collect();
 
     let mut lp = LpRelaxation::from_formulation(graph, root, terminals, &steiner_nodes);
-    let seed = dual_ascent_cuts(&idx, root, terminals, &active, 4_000_000);
+    let seed = dual_ascent_cuts(&idx, root, terminals, &active, ASCENT_CUT_NNZ);
     for cut in &seed.cuts {
         lp.add_lazy_steiner_cut(cut);
     }
+    // Geometric batches, for the reason `add_lazy_steiner_cut` documents: the
+    // seed is thousands of rows wide, a flat batch either makes the first solve a
+    // cold simplex on a model several times the structural one or costs a re-solve
+    // per batch. Growing it keeps the model small when few rows are wanted and
+    // converges in a handful of solves when many are. On PACE instance187 a flat
+    // batch of 4096 left the loop with two solves inside its budget and a bound
+    // *below* the ascent's.
+    let mut batch = 500usize;
 
     let mut separator = FlowCutSeparator::new(graph, root, terminals);
     let mut lp_solves = 0u64;
@@ -445,7 +457,8 @@ pub fn root_certificate(
         // Structural rows held back from the model are part of the relaxation,
         // not optional strengthening; bringing in the violated ones is what makes
         // the seeded ascent cuts count.
-        let structural = lp.separate_structural(4096);
+        let structural = lp.separate_structural(batch);
+        batch = batch.saturating_mul(4);
         let solution = lp.get_solution().to_vec();
         let cuts = separator.separate_cuts(&solution);
         if structural == 0 && cuts.is_empty() {
