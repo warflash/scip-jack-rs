@@ -249,8 +249,70 @@ fn star_signature(csr: &Csr, v: NodeId, scratch: &mut Vec<(NodeId, u64)>) -> u64
 
 /// Only vertices of degree at most this are examined. The number of subsets to
 /// check grows as `2^k` and the star cost grows with `k`, so high-degree
-/// vertices are both expensive to test and unlikely to pass.
+/// vertices are both expensive to test and unlikely to pass. Above it the
+/// polynomial sufficient condition takes over; see [`sorted_path_condition`].
 const MAX_DEGREE: usize = 8;
+
+/// The `O(k^2)` sufficient condition that replaces the `2^k` enumeration above
+/// [`MAX_DEGREE`].
+///
+/// > **Lemma (sorted path).** Suppose that for every pair `a, b` in `N(v)`
+/// >
+/// > ```text
+/// > s(a, b) <= max( c(v,a), c(v,b) ).
+/// > ```
+/// >
+/// > Then `mst_s(Q) <= sum over u in Q of c(v,u)` for every `Q` in `N(v)` with
+/// > `|Q| >= 2`, so the star test of this module applies and `v` is deletable.
+///
+/// *Proof.* Write `Q = {u_1, ..., u_p}` ordered so that `c_1 <= ... <= c_p`, with
+/// `c_i = c(v, u_i)`. The path `u_1 - u_2 - ... - u_p` is a spanning tree of `Q`
+/// in the `s` metric, so
+///
+/// ```text
+/// mst_s(Q) <= sum_{i=1}^{p-1} s(u_i, u_{i+1})
+///          <= sum_{i=1}^{p-1} max(c_i, c_{i+1})
+///          =  sum_{i=2}^{p} c_i
+///          <= sum_{i=1}^{p} c_i.
+/// ```
+///
+/// The middle equality is the whole point of sorting: consecutive maxima along an
+/// ascending sequence are just the sequence with its first term dropped. ∎
+///
+/// The hypothesis is strictly stronger than what the exact test needs — `s(a,b)`
+/// only has to be at most `c_a + c_b` for the pair `Q = {a,b}` itself — so this
+/// finds fewer vertices. What it buys is that it costs `O(k^2)` comparisons and
+/// one bounded search per neighbour instead of `2^k` spanning-tree computations,
+/// which is the difference between running on a graph of average degree a hundred
+/// and not running at all. Below [`MAX_DEGREE`] the exact test is used, because
+/// there it is both affordable and stronger.
+///
+/// Two economies make it cheap in practice. Every quantity involved is at most
+/// `max_u c(v,u)`, so the searches are cut off there rather than at the star's
+/// total cost — a far smaller radius. And the condition binds hardest on the
+/// cheapest pair, so the neighbours are visited in ascending cost order and the
+/// scan stops at the first violation, which for most candidates is after two
+/// searches.
+/// Bounded searches the polynomial branch may run over a whole sweep.
+///
+/// The branch costs about two bounded Dijkstras per high-degree candidate — the
+/// scan stops at the first violated pair — so its total cost is roughly
+/// `2 * (candidates above MAX_DEGREE) * (m + n log n)`. On a graph where that is
+/// large the branch is also where it is least likely to fire, and paying for it
+/// anyway is a measured loss: on PACE instance024, 640 vertices of degree six
+/// hundred over 204,454 edges, running it cost 270 million edge relaxations a
+/// sweep and took instance025 from proved to unproved at a three-second limit.
+///
+/// The gate is therefore the estimate, computed once per sweep before any search
+/// runs, and the fallback is the behaviour that shipped before: high-degree
+/// vertices are simply not candidates.
+const NTDK_WORK_BUDGET: f64 = 3.0e7;
+
+fn sorted_path_condition(sd: &[Cost], star: &[(NodeId, Cost)], k: usize, i: usize) -> bool {
+    // Only the pairs involving `i` are new; the rest were checked when they were
+    // added.
+    (0..i).all(|j| sd[i * k + j] <= star[i].1.max(star[j].1) + 1e-9)
+}
 
 /// One sweep with no memory of previous sweeps.
 pub fn vertex_reductions(graph: &mut ReducibleGraph, deadline: Option<Instant>) -> u32 {
@@ -290,6 +352,22 @@ pub fn vertex_reductions_watched(
     // until a candidate actually survives the watch. Most rounds of a long
     // fixpoint have none, and paying for them unconditionally cost PACE
     // instance197 its whole reduction budget.
+    // Whether the polynomial branch is affordable this sweep; see
+    // [`NTDK_WORK_BUDGET`]. Counting the candidates costs one pass over the
+    // degrees and decides the question before any search runs.
+    let high_degree = graph
+        .nodes
+        .iter()
+        .filter(|n| {
+            graph.is_node_valid(n.id) && !graph.is_terminal(n.id) && graph.degree(n.id) > MAX_DEGREE
+        })
+        .count();
+    let live_edges = graph.edges.iter().filter(|e| graph.is_edge_valid(e.id)).count();
+    let sweep_work = 2.0
+        * high_degree as f64
+        * (live_edges as f64 + csr.num_nodes as f64 * (csr.num_nodes.max(2) as f64).log2());
+    let polynomial_branch = sweep_work <= NTDK_WORK_BUDGET;
+
     let chains = SdClosure::affordable(csr.num_nodes, terminals.len());
     watch.set_mode(chains);
     if !chains {
@@ -332,14 +410,26 @@ pub fn vertex_reductions_watched(
         });
         star.dedup_by_key(|&mut (u, _)| u);
         let k = star.len();
-        // Both of these depend on the star alone, so they are failures the
-        // signature fully accounts for.
-        if !(3..=MAX_DEGREE).contains(&k) {
+        // A failure that depends on the star alone is one the signature fully
+        // accounts for.
+        if k < 3 || (k > MAX_DEGREE && !polynomial_branch) {
             watch.mark_failed(v, signature);
             continue;
         }
+        // Above `MAX_DEGREE` the exact test is unaffordable and the sorted-path
+        // condition takes over; ordering the star by cost is what makes that
+        // condition provable and what lets the scan stop early.
+        let exact = k <= MAX_DEGREE;
+        star.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        let radius: Cost = star.iter().map(|&(_, c)| c).sum();
+        // The exact test spends up to the whole star; the sorted-path condition
+        // never compares against more than its largest edge, so it can search a
+        // far smaller radius.
+        let radius: Cost = if exact {
+            star.iter().map(|&(_, c)| c).sum()
+        } else {
+            star.iter().map(|&(_, c)| c).fold(0.0, Cost::max)
+        };
         if !radius.is_finite() {
             watch.mark_failed(v, signature);
             continue;
@@ -348,23 +438,29 @@ pub fn vertex_reductions_watched(
         // Distances in `G - v` from each neighbour, truncated at `radius`.
         // Only the entries at terminals and at the other star members are ever
         // read, so the full distance array is never retained.
-        let width = terminals.len() + k;
+        //
+        // The rows are built one at a time so the sorted-path scan can abandon
+        // the candidate at the first violated pair, which for most of them is
+        // after two searches rather than `k`.
+        let base = terminals.len();
+        let width = base + k;
+        let mut sd = vec![Cost::INFINITY; k * k];
+        if !hops_ready {
+            hops_ready = true;
+            ChainHops::refresh(hops_cache, graph, &csr, &terminals);
+        }
         csr.mask(v);
         dist.clear();
-        for &(u, _) in &star {
-            csr.dijkstra_into(&[u], radius, &mut ws);
+        let mut failed_early = false;
+        for i in 0..k {
+            csr.dijkstra_into(&[star[i].0], radius, &mut ws);
             let mut row = Vec::with_capacity(width);
             row.extend(terminals.iter().map(|&t| ws.dist[t as usize]));
             row.extend(star.iter().map(|&(w, _)| ws.dist[w as usize]));
             dist.push(row);
-        }
-        csr.unmask(v);
 
-        // Pairwise special-distance upper bounds.
-        let base = terminals.len();
-        let mut sd = vec![Cost::INFINITY; k * k];
-        for i in 0..k {
-            for j in (i + 1)..k {
+            // Special-distance upper bounds against every earlier neighbour.
+            for j in 0..i {
                 let mut best = dist[i][base + j];
                 for t in 0..base {
                     let (a, b) = (dist[i][t], dist[j][t]);
@@ -375,17 +471,24 @@ pub fn vertex_reductions_watched(
                 sd[i * k + j] = best;
                 sd[j * k + i] = best;
             }
+            if let Some(ref h) = *hops_cache {
+                h.tighten_row(v, &dist, base, k, i, &mut sd, &mut chain_scratch);
+            }
+            if !exact && !sorted_path_condition(&sd, &star, k, i) {
+                failed_early = true;
+                break;
+            }
         }
-        // Chains of length two and above, when the sweep is carrying the forest.
-        if !hops_ready {
-            hops_ready = true;
-            ChainHops::refresh(hops_cache, graph, &csr, &terminals);
-        }
-        if let Some(ref h) = *hops_cache {
-            h.tighten(v, &dist, base, k, &mut sd, &mut chain_scratch);
-        }
+        csr.unmask(v);
 
-        if !star_is_dominated(&star, &sd, k) {
+        let dominated = if failed_early {
+            false
+        } else if exact {
+            star_is_dominated(&star, &sd, k)
+        } else {
+            true
+        };
+        if !dominated {
             watch.mark_failed(v, signature);
             continue;
         }
@@ -588,92 +691,97 @@ impl ChainHops {
     /// Lower every `sd[i * k + j]` to the multi-hop chain bound for candidate `v`.
     ///
     /// `dist[i][0..base]` must hold `d_{G-v}(star_i, terminal_t)`.
-    fn tighten(
+    /// Lower the multi-hop bound on the pairs involving star member `row`.
+    ///
+    /// `dist` holds one row per star member up to and including `row`, in the
+    /// order the caller computed them; nothing beyond `row` is read. Doing this
+    /// per row rather than per candidate is what lets the caller abandon a
+    /// high-degree candidate at the first pair that fails the sorted-path
+    /// condition.
+    #[allow(clippy::too_many_arguments)]
+    fn tighten_row(
         &self,
         v: NodeId,
         dist: &[Vec<Cost>],
         base: usize,
         k: usize,
+        row: usize,
         sd: &mut [Cost],
         scratch: &mut ChainScratch,
     ) {
         debug_assert_eq!(base, self.terminals.len());
-        // Every search was truncated at the star's own cost, so on a sparse graph
-        // most terminals are simply out of range and contribute nothing but an
-        // infinity. Collecting the reachable ones first turns the `O(k^2 |R|)`
-        // minimisation below into `O(k^2 |reachable|)`, and lets a candidate that
-        // reaches no terminal at all skip the forest entirely — which is the
-        // common case, and the difference between this test costing a fifth of the
-        // reduction budget and costing five times it.
-        scratch.reach.clear();
+        debug_assert!(dist.len() == row + 1);
+
+        // Every search was truncated at the radius the caller chose, so on a
+        // sparse graph most terminals are simply out of range and contribute
+        // nothing but an infinity. Collecting the reachable ones turns the
+        // minimisation below into `O(|reachable|)` per pair, and lets a row that
+        // reaches no terminal skip the forest entirely.
         scratch.reach.resize(k, Vec::new());
-        let mut any = false;
-        for i in 0..k {
-            let r = &mut scratch.reach[i];
+        {
+            let r = &mut scratch.reach[row];
             r.clear();
             for t in 0..base {
-                if dist[i][t].is_finite() {
+                if dist[row][t].is_finite() {
                     r.push(t as u32);
                 }
             }
-            any |= !r.is_empty();
         }
-        if !any {
+
+        // The witness forest depends on the candidate, not on the row, so it is
+        // built once — when the first row arrives — and reused.
+        if row == 0 {
+            scratch.blocked.clear();
+            scratch.blocked.resize(self.edges.len(), false);
+            for &e in &self.through[v as usize] {
+                scratch.blocked[e as usize] = true;
+            }
+            scratch.edges.clear();
+            for (e, &edge) in self.edges.iter().enumerate() {
+                if !self.retired[e] && !scratch.blocked[e] {
+                    scratch.edges.push(edge);
+                }
+            }
+            let forest = scratch.forest.get_or_insert_with(|| BottleneckForest::build(0, &[]));
+            forest.rebuild(base, &scratch.edges, &mut scratch.uf);
+            scratch.g.clear();
+            scratch.g.resize(k * base, Cost::INFINITY);
+        }
+        if scratch.reach[row].is_empty() {
+            // An all-infinite row has an all-infinite half-closure, so it can
+            // neither be tightened nor tighten anything.
             return;
         }
+        let Some(forest) = scratch.forest.as_ref() else { return };
+        forest.half_closure(
+            &dist[row][..base],
+            &mut scratch.g[row * base..(row + 1) * base],
+            &mut scratch.m,
+            &mut scratch.acc,
+        );
 
-        // The forest of hops that survive both this candidate and every earlier
-        // deletion. `edges` is already weight-sorted, and filtering preserves it.
-        scratch.blocked.clear();
-        scratch.blocked.resize(self.edges.len(), false);
-        for &e in &self.through[v as usize] {
-            scratch.blocked[e as usize] = true;
-        }
-        scratch.edges.clear();
-        for (e, &edge) in self.edges.iter().enumerate() {
-            if !self.retired[e] && !scratch.blocked[e] {
-                scratch.edges.push(edge);
-            }
-        }
-        let forest = scratch.forest.get_or_insert_with(|| BottleneckForest::build(0, &[]));
-        forest.rebuild(base, &scratch.edges, &mut scratch.uf);
-
-        scratch.g.clear();
-        scratch.g.resize(k * base, Cost::INFINITY);
-        for i in 0..k {
-            // A star member that reaches no terminal has an all-infinite row, and
-            // the half-closure of an all-infinite row is all infinite.
-            if scratch.reach[i].is_empty() {
+        // Both directions of every pair `(row, j)`: the half-closure of `row`
+        // against `j`'s reachable terminals, and `j`'s against `row`'s.
+        for j in 0..row {
+            if scratch.reach[j].is_empty() {
                 continue;
             }
-            forest.half_closure(
-                &dist[i][..base],
-                &mut scratch.g[i * base..(i + 1) * base],
-                &mut scratch.m,
-                &mut scratch.acc,
-            );
-        }
-        for i in 0..k {
-            if scratch.reach[i].is_empty() {
-                continue;
+            let mut best = sd[row * k + j];
+            for &t in &scratch.reach[j] {
+                let cand = scratch.g[row * base + t as usize].max(dist[j][t as usize]);
+                if cand < best {
+                    best = cand;
+                }
             }
-            for j in 0..k {
-                if j == i {
-                    continue;
+            for &t in &scratch.reach[row] {
+                let cand = scratch.g[j * base + t as usize].max(dist[row][t as usize]);
+                if cand < best {
+                    best = cand;
                 }
-                // `max(g_i(t), d(b, t))` is infinite unless `b` reaches `t`, so
-                // only `b`'s own reachable set can contribute.
-                let mut best = sd[i * k + j];
-                for &t in &scratch.reach[j] {
-                    let cand = scratch.g[i * base + t as usize].max(dist[j][t as usize]);
-                    if cand < best {
-                        best = cand;
-                    }
-                }
-                if best < sd[i * k + j] {
-                    sd[i * k + j] = best;
-                    sd[j * k + i] = best;
-                }
+            }
+            if best < sd[row * k + j] {
+                sd[row * k + j] = best;
+                sd[j * k + row] = best;
             }
         }
     }
@@ -1017,6 +1125,82 @@ mod tests {
             );
         }
         assert!(ran > 100, "only {ran} cases were actually checked");
+    }
+
+    /// The exhaustive gate for the sorted-path condition, which the subset brute
+    /// force cannot reach: it caps out at twenty edges, and a vertex only takes
+    /// the polynomial branch once its degree exceeds [`MAX_DEGREE`], which needs
+    /// a graph dense enough to have far more edges than that.
+    ///
+    /// Dreyfus-Wagner is the oracle instead — exact for any edge count at these
+    /// vertex counts — and every graph here is complete or near-complete on nine
+    /// to twelve vertices, so every Steiner candidate has degree eight or more.
+    #[test]
+    fn the_polynomial_condition_never_changes_the_optimum() {
+        use crate::graph::algorithms::dreyfus_wagner;
+
+        let mut seed = 0x1D0C_5E4D_2026_0801u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let mut ran = 0;
+        let mut took_the_branch = 0;
+        for _ in 0..600 {
+            let n = 9 + (rng() % 4) as u32;
+            let mut g = UndirectedGraph::new(n);
+            let k = 2 + (rng() % 4) as u32;
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = v <= k;
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    // Dense on purpose: a sparse graph never leaves the exact
+                    // branch and the test would prove nothing.
+                    if rng() % 8 != 0 {
+                        g.add_edge(u, v, 1.0 + (rng() % 9) as Cost);
+                    }
+                }
+            }
+            let Some(before) = dreyfus_wagner(&g, &terminals) else { continue };
+            ran += 1;
+
+            let inst = instance(&g, terminals.clone());
+            let mut rg = ReducibleGraph::from_instance(&inst, &g);
+            let high = rg
+                .nodes
+                .iter()
+                .any(|nd| !rg.is_terminal(nd.id) && rg.degree(nd.id) > MAX_DEGREE);
+            if high {
+                took_the_branch += 1;
+            }
+            vertex_reductions(&mut rg, None);
+
+            let (ri, ru) = rg.to_instance();
+            let after = if ri.terminals.len() < 2 {
+                rg.offset
+            } else {
+                let Some(dw) = dreyfus_wagner(&ru, &ri.terminals) else {
+                    panic!("reduction disconnected the terminals");
+                };
+                dw.optimal_cost + rg.offset
+            };
+            assert!(
+                (after - before.optimal_cost).abs() < 1e-9,
+                "reduction changed the optimum: {} -> {after}",
+                before.optimal_cost
+            );
+        }
+        assert!(ran > 200, "only {ran} cases were checked");
+        assert!(took_the_branch > 100, "only {took_the_branch} cases had a high-degree candidate");
     }
 
     fn brute(n: u32, edges: &[(NodeId, NodeId, Cost)], terminals: &[NodeId]) -> Option<Cost> {

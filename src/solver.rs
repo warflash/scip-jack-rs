@@ -25,7 +25,10 @@ use crate::graph::algorithms::{
 };
 use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, SteinerInstance, UndirectedGraph};
 use crate::io;
-use crate::model::{root_certificate, verify_solution};
+use crate::model::{
+    hyp_certificate, hyp_work, root_certificate, verify_solution, HYP_UNITS_PER_SECOND,
+    HYP_WORK_CEILING,
+};
 use crate::preprocessing::preprocess_until;
 use crate::root_reduce::{tighten, ReduceConfig};
 
@@ -183,6 +186,12 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     // once the first pass has already run the reductions to a fixpoint — the
     // search continues instead of starting over. See [`SteinerSearch`].
     let mut search_cache: Option<SteinerSearch> = None;
+    // Root bounds an earlier pass proved, restated for the current pass's graph
+    // exactly as `incoming_ub` is, and a note on whether the branch-and-cut has
+    // been observed to do anything on this instance. The first pass assumes it
+    // does; only a pass that watched it solve nothing says otherwise.
+    let mut carried_lower_bound: Cost = 0.0;
+    let mut branch_and_cut_works = true;
 
     for pass in 0..2 {
         // Split the remaining budget explicitly. Tightening will happily use
@@ -222,7 +231,15 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         }
         // `finish` reports for `pass_graph`; `carried_offset` puts it back on the
         // scale of the graph the loop started with, which is what `best` holds.
-        let mut outcome = finish(reduced, &config, start, pass_deadline, &mut search_cache);
+        let mut outcome = finish(
+            reduced,
+            &config,
+            start,
+            pass_deadline,
+            &mut search_cache,
+            &mut carried_lower_bound,
+            &mut branch_and_cut_works,
+        );
         outcome.primal_bound += carried_offset;
         outcome.dual_bound += carried_offset;
         // Both bounds are valid for the same instance, so keep the better of
@@ -246,6 +263,7 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         carried_offset += next_offset;
         // Restated for the graph the next pass will run on.
         incoming_ub = b.primal_bound - carried_offset;
+        carried_lower_bound = (carried_lower_bound - next_offset).max(0.0);
         if pass_terminals.len() < 2 {
             break;
         }
@@ -310,6 +328,8 @@ fn finish(
     start: Instant,
     deadline: Instant,
     search_cache: &mut Option<SteinerSearch>,
+    carried_lower_bound: &mut Cost,
+    branch_and_cut_works: &mut bool,
 ) -> SolveResult {
 
     if config.verbose {
@@ -364,7 +384,8 @@ fn finish(
     // An abandoned run is not wasted: its frontier is a valid lower bound on the
     // optimum of `work_graph`, derived combinatorially, and it is fed to the
     // branch-and-cut below as a seed.
-    let mut search_lower_bound = root_lower_bound;
+    // Anything an earlier pass proved about this instance is still true of it.
+    let mut search_lower_bound = root_lower_bound.max(*carried_lower_bound);
     if terminals.len() >= 2 {
         run_search(
             &work_graph,
@@ -373,6 +394,7 @@ fn finish(
             root_upper_bound,
             config,
             deadline,
+            *branch_and_cut_works,
             search_cache,
             &mut search_lower_bound,
         );
@@ -394,6 +416,81 @@ fn finish(
             };
         }
     }
+
+    // The hypergraphic relaxation, when its subset table is affordable and the
+    // search has already been shown not to need the budget.
+    //
+    // This is a *different* relaxation, not a strengthening of the bidirected cut
+    // one, and where it fits it can be dramatically stronger: PACE instance024 has
+    // 640 vertices, 204,454 edges and nine terminals after reduction, and its dual
+    // certifies 1,756 — the optimum — in 0.17 s, against 1,752 from the dual
+    // ascent and 1,752 from a twenty-second cut loop that manages eighteen solves
+    // on a graph that dense.
+    //
+    // It runs *after* the goal-directed search rather than before it, for the
+    // reason the certificate loop already runs late: on 024 and 025 the binding
+    // constraint is the primal, not the dual — the heuristic reaches 1,757 against
+    // a true 1,756 — and the search is what closes them. Given the budget first,
+    // the certificate took that budget, proved a bound nobody needed, and cost
+    // instance025 its proof on three runs out of three.
+    //
+    // The bound is taken as a maximum with the others and never added to them;
+    // see [`crate::model::hypergraphic`] for why its state potential is not handed
+    // to the search at all.
+    if *carried_lower_bound <= 0.0 {
+        let hyp_units = hyp_work(terminals.len(), work_graph.num_nodes, work_graph.edges.len());
+        let hyp_secs = hyp_units / HYP_UNITS_PER_SECOND;
+        let budget = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+        // An attempt that runs out of clock costs its budget and returns nothing,
+        // so the decision comes from the estimate before the work starts. The
+        // deadline is still passed, at three times the estimate, so a mis-estimate
+        // cannot run away.
+        if hyp_units <= HYP_WORK_CEILING && hyp_secs * 2.0 <= budget {
+            if let Some(h) = hyp_certificate(
+                &work_graph,
+                &terminals,
+                Some(Instant::now() + std::time::Duration::from_secs_f64(hyp_secs * 3.0)),
+            ) {
+                if config.verbose {
+                    eprintln!(
+                        "[hyp] bound {:.1} over {} partitions (ascent {:.1})",
+                        h.lower_bound,
+                        h.partitions.len(),
+                        root_lower_bound
+                    );
+                }
+                search_lower_bound = search_lower_bound.max(h.lower_bound);
+                *carried_lower_bound = carried_lower_bound.max(h.lower_bound);
+            } else if config.verbose {
+                eprintln!("[hyp] no certificate");
+            }
+        } else if config.verbose {
+            eprintln!(
+                "[hyp] skipped: {} terminals, {} nodes, {} edges, {:.2}s estimated against {:.2}s",
+                terminals.len(),
+                work_graph.num_nodes,
+                work_graph.edges.len(),
+                hyp_secs,
+                budget,
+            );
+        }
+    }
+    if search_lower_bound >= root_upper_bound - config.gap_tolerance.max(1e-6)
+        && root_upper_bound.is_finite()
+    {
+        return SolveResult {
+            status: SolveStatus::Optimal,
+            primal_bound: root_upper_bound + offset,
+            dual_bound: root_upper_bound + offset,
+            gap_pct: 0.0,
+            nodes_processed: 0,
+            cuts_added: 0,
+            lp_solves: 0,
+            time_secs: start.elapsed().as_secs_f64(),
+            verified: true,
+            method: SolveMethod::AscendAndPrune,
+        };
+    }
     let root_lower_bound = search_lower_bound;
 
     let directed = DirectedGraph::from_undirected(&work_graph);
@@ -408,6 +505,8 @@ fn finish(
     }
 
     let (solution, stats) = solver.solve();
+    // Whether it did anything at all, for the next pass to act on.
+    *branch_and_cut_works = stats.lp_solves > 0 || stats.nodes_processed > 0;
 
     let mut verified = false;
     let mut primal = root_upper_bound;
@@ -492,6 +591,7 @@ fn run_search(
     root_upper_bound: Cost,
     config: &SolverConfig,
     deadline: Instant,
+    branch_and_cut_works: bool,
     cache: &mut Option<SteinerSearch>,
     search_lower_bound: &mut Cost,
 ) {
@@ -545,7 +645,21 @@ fn run_search(
         // The first phase keeps the share it always had, so an instance the cheap
         // potential already closes is untouched by any of this. Everything the
         // certificate costs comes out of what is left after that phase failed.
-        let slice = Instant::now() + budget.mul_f64(0.5);
+        //
+        // The exception is measured rather than guessed. A branch-and-cut that
+        // has already run on this instance and solved *no* LP and opened *no*
+        // node is not going to contribute: on PACE instance024 its model has
+        // 205,726 rows and it cannot finish a single solve inside any share it
+        // could be given. When that has been observed, the search keeps the whole
+        // budget instead of handing half of it to a phase known to do nothing.
+        // SteinLib c18 is why this is a measurement and not a rule: there the
+        // branch-and-cut closes the instance in 0.38 s after the search fails, so
+        // it must keep its share until it has been seen to fail.
+        let slice = if branch_and_cut_works {
+            Instant::now() + budget.mul_f64(0.5)
+        } else {
+            deadline
+        };
         let left = DS_LABEL_BUDGET.saturating_sub(search.labels_settled());
         let r = search.run(left, Some(slice));
         if config.verbose {

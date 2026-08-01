@@ -5,3 +5,8 @@
 # Locally acquired external benchmark corpora (large, reproducible downloads).
 /benchmarks/pace2018/
 /benchmarks/pace2018-results/
+
+# Measurement scratch: frozen control binaries and per-instance sweep CSVs.
+/tmp/control/
+/tmp/measure/
+/tmp/cmp*.sh

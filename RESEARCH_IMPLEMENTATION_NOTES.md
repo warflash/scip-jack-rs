@@ -1052,6 +1052,365 @@ more direct attack on 24/25/86/87 than any further dual work.
 
 ---
 
+---
+
+## 2026-08-01 (sixth round): continuity, exact special distances, and a second relaxation
+
+This round ran the seven-item programme end to end. Two of the items were the
+ones that moved the benchmark; two produced measured negative results and were
+reverted or gated; one produced a relaxation that is stronger than anything else
+in the solver on the instances where it fits, and is useless on the rest.
+
+Control frozen at `7f72e18`, binary preserved. `benchmarks/measure.sh` is the
+per-instance harness every table below came from: it parses the solver's own
+verbose trace, so it runs unmodified against the control.
+
+### 28. What the control actually looks like, per instance
+
+The starting point, re-measured rather than quoted:
+
+| slice | proved | total time |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 136/140 | 51.9 s |
+| PACE Track 1 [155..200] @5 s | 26/46 | 140.0 s |
+| SteinLib B @5 s | 18/18 | 1.1 s |
+| SteinLib C @5 s | 20/20 | 6.1 s |
+| SteinLib D @5 s | 20/20 | 15.5 s |
+| SteinLib E @20 s | 19/20 | 90.1 s |
+
+Per instance the sweep also records the reduced `|V|/|E|/|R|`, both root bounds,
+the labels the search settled and the solves the certificate managed. Two things
+in it reset the priorities the previous round left:
+
+- **024, 025, 086, 087 are not dual-limited.** 086 and 087 have 125 vertices, 750
+  edges and 13 terminals — a state space of `125 * 2^12 = 512,000` labels — and
+  the search settled 688,128 and 794,624 across its four disjoint attempts
+  without finishing any of them. 024 and 025 have nine terminals and settled
+  under 41,000 of a possible 163,840. All four were being handed the same work
+  four times.
+- **The primal is a large part of the remaining gap on [155..200].** 161: primal
+  5,260 against an optimum of 5,199 and a dual of 5,138 — the two gaps are the
+  same size. 172: 7,413 against 7,299. 189: 20,915 against 20,678. 200: 6,478
+  against 6,393.
+
+### 29. The special distance was guessing at its own chain
+
+`bottleneck.rs` evaluated
+
+```text
+s(u,v) = min over terminals i, j of max( d(i,u), B(i,j), d(j,v) )
+```
+
+over each endpoint's four nearest terminals. That is an upper bound on `s`, so it
+was sound, and it was pure loss: `s` is exactly what the deletion proof needs and
+anything above it merely fails to delete.
+
+`preprocessing/sd_closure.rs` computes it exactly over all `|R|^2` pairs in
+`O(|V| |R|)` time and memory. The device is the **Kruskal reconstruction tree**
+of the terminal metric-closure MST: `B(i,j)` is the weight of the LCA of leaves
+`i` and `j`, so the half-closure
+
+```text
+g(x, j) = min over i of max( d(i,x), B(i,j) )
+        = min over ancestors A of leaf j of max( weight(A), m_x(A) ),
+```
+
+with `m_x(A)` the least `d(leaf, x)` over `A`'s leaves, is two linear passes over
+a tree with `2|R| - 1` nodes — one post-order minimum and one pre-order running
+minimum. No `|R| x |R|` matrix is ever built. Then
+`s(u,v) = min_j max( g(u,j), d(j,v) )`.
+
+Measured on the reductions alone: **identical fixpoints** on the dense PACE block
+and on SteinLib. Twenty-five terminals is few enough that the nearest four
+already covered them. It is kept because it is strictly stronger, costs the same
+asymptotically, and is what the star test below needed.
+
+### 30. Transplanted hops: multi-hop chains inside the star test
+
+The star test — delete a Steiner vertex `v` when `mst_s(Q) <= sum_{u in Q} c(v,u)`
+for every `Q ⊆ N(v)` — is the strongest reduction in the pipeline, and its `s` was
+the *zero- and one-hop* bound only. The module comment said why: longer chains
+need the terminal bottleneck matrix **of `G - v`**, the matrix of `G` is an upper
+bound on the wrong side, and `|R|` Dijkstras per candidate is unaffordable.
+
+> **Lemma (transplanted hops).** Fix one shortest path `P_tt'` per edge of the
+> terminal metric-closure MST. For any vertex set `X`, let `M_X` be the sub-forest
+> of MST edges whose fixed path avoids `X`. Then for terminals in the same
+> component of `M_X`, the maximum weight on their `M_X` path bounds
+> `B_{G-X}(t,t')` from above.
+
+*Proof.* Each surviving edge is realised by a path of `G` disjoint from `X`, hence
+a path of `G - X` of exactly its weight; concatenating gives a terminal chain of
+`G - X` whose bottleneck is the path maximum. ∎
+
+`X` is the candidate together with everything the sweep has already deleted.
+Terminals in different components get infinity, which is sound and costs only
+deletions. With `M_X` in hand the `BottleneckForest` machinery from §29 gives the
+multi-hop bound in `O(|R|)` per star member per candidate and **no extra Dijkstra
+at all**.
+
+The witnesses are stored — vertices *and* edges of each fixed path — and
+**re-validated** against the live graph each sweep rather than recomputed; the
+forest is rebuilt only when the terminal set changes or half of it has been
+retired. That is what makes it affordable: rebuilding every sweep cost PACE
+instance197 4.2 of the 5.5 seconds its reduction then took, against 1.3 s with
+the cache.
+
+Measured: strictly better fixpoints on the sparse block — instance197 goes to
+6,598 nodes and 11,641 edges with an offset of 156, against 6,609 / 11,655 / 96;
+instance200 to 5,225 / 9,062 against 5,245 / 9,098 — and **SteinLib D 15.5 s ->
+14.0 s, E 90.1 s -> 69.3 s**. The dense block is untouched, because at average
+degree a hundred no vertex is a candidate at all.
+
+### 31. A polynomial star test, and why it is gated
+
+The exact test enumerates `2^k` subsets of `N(v)`, so `MAX_DEGREE = 8` and on a
+graph of average degree a hundred it examines nothing. There is a polynomial
+sufficient condition:
+
+> **Lemma (sorted path).** If `s(a,b) <= max(c(v,a), c(v,b))` for every pair in
+> `N(v)`, then `mst_s(Q) <= sum_{u in Q} c(v,u)` for every `Q`.
+
+*Proof.* Order `Q` by ascending `c_i` and use the path `u_1 - ... - u_p`:
+`sum_{i<p} max(c_i, c_{i+1}) = sum_{i>=2} c_i <= sum_i c_i`. ∎
+
+It is `O(k^2)` comparisons plus one bounded search per neighbour, the radius
+drops from the star's total cost to its largest edge, and ordering by cost means
+the scan stops at the first violated pair — usually after two searches.
+
+**Measured as a net loss and gated.** On PACE Track 1 [1..140] at 3 s it took
+139/140 to 137/140: instance024 and instance025 have 640 vertices of degree six
+hundred over 204,454 edges, the branch cost 270 million edge relaxations a sweep,
+and the search that actually closes those instances lost the time. It now runs
+only when `2 * (candidates above MAX_DEGREE) * (m + n log n)` is inside a work
+budget, which excludes exactly that shape. The lemma and the code are kept
+because the estimate, not the rule, is what changes with the instance.
+
+### 32. The search was being started four times, and the passes were competing
+
+Two structural losses of the same shape: work done, discarded, and done again
+worse.
+
+**The search.** Everything a Dijkstra-Steiner run learns lives in the settled
+labels, the open queue, and the Lemma-15 witnesses, and a run stopped by a
+deadline keeps all three. The solver created it from scratch four times — two
+attempts inside each of two passes. `SteinerSearch` now owns that state and
+`run` continues it.
+
+The certificate phase strengthens a *running* search instead of starting a new
+one, and that needs an argument:
+
+> **Resumption under a changed potential.** Let `h_1`, `h_2` both be valid lower
+> bounds. Run A* with `h_1` until a set `D` of labels is settled, re-key every
+> open entry with `h_2`, and continue. Every label the continuation settles
+> carries its true optimal value.
+
+*Proof.* A settled label's value is a property of the graph, not of the
+potential: A* with any valid `h` settles in nondecreasing `g + h` order and the
+standard argument gives each settled label its optimal `g`. The continuation is
+then A* with the valid potential `h_2` from a frontier whose keys are exactly
+`g + h_2` — which is what the re-key restores — and no label of `D` can improve.
+∎
+
+The re-key is mandatory, not cosmetic. A stale `h_1` key lets a label pop below
+its true `g + h_2`, and the frontier value the search reports as a lower bound
+stops bounding anything.
+
+**The passes.** Tightening is a monotone fixpoint, and the second pass restarted
+it from the graph the solve began with — repeating the first pass's work under a
+shorter deadline, so getting less far. On instance161 pass 0 reached 33,379 edges
+and a bound of 5,138; pass 1 returned 40,857 and 5,134, and the solver finished
+on the weaker of the two. Each pass now hands the next its own reduced instance,
+with the offset carried so the bounds stay on one scale. That also makes the
+graph unchanged often enough for `SteinerSearch::applies_to` to recognise it and
+resume across passes.
+
+**Measured, PACE Track 1 [1..140] @3 s: 136/140 -> 139/140.** 025, 086 and 087
+close; each settles a few hundred thousand labels per slice and needs about their
+sum. [155..200] holds at 26/46 — the pass carry-forward is what recovers
+instance188, which the search change alone had cost.
+
+### 33. Two primal moves that change where the tree branches
+
+Key-path exchange rewires one corridor at a time and leaves the branching
+structure exactly as the construction built it. On instance161 that is where the
+primal stops: the reduced-cost-guided construction lands at 5,354, iterated local
+search takes it to 5,260 in fifty-one iterations, then stalls for fifty more
+against an optimum of 5,199. No single key path is wrong; the branch point is.
+
+`heuristics/key_vertex.rs` adds the two moves that are:
+
+- **Key-vertex elimination.** Delete a non-terminal vertex of tree-degree at
+  least three and reconnect the `d` pieces through `G - v`. The reconnection is a
+  Voronoi step — one multi-source Dijkstra with every surviving vertex a source
+  at distance zero — and the join is read off an *arc*:
+  `min over (x,y) with different owners of dist(x) + c(x,y) + dist(y)`. Reading
+  it off a settled vertex is the natural-looking mistake and it is wrong: every
+  component vertex starts at zero, so a join running directly between two
+  components is never relaxed into view. On a triangle of terminals that is every
+  join there is.
+- **Vertex insertion.** The MST of the subgraph induced on `V(T) + {w}` contains
+  `T`, so it is never worse and is better exactly when `w` shortcuts a detour.
+
+**Measured small, and recorded as small:** instance200 6,495 -> 6,484,
+instance195 56 -> 55, nothing else moves. The primal on the [155..200] block is
+one to three percent above the optimum and these moves recover a tenth of that.
+The remaining primal gap is the largest single unexplained quantity in this file.
+
+### 34. What three hundred LP solves were being spent on
+
+The root cut loop needed 308 solves and ninety seconds to converge on PACE
+instance172 — 243 vertices, 1,215 edges — and nobody could say why. `RoundStat`
+now records the bound, the structural rows pulled in, the cuts installed, the row
+count and the time per round, and `certify_probe` prints it:
+
+```
+  round      bound  struct   cuts    rows    secs
+      0    6602.00     301     21    1997   0.028
+      7    6948.60      41     10    2329   0.024
+     32    7041.72      12     11    3201   0.058
+    112    7079.17       1     10    4429   0.485
+    307    7105.26       1     10    6401   0.725
+```
+
+The separator returns about **ten cuts a round against a cap of four hundred**,
+the first eight rounds buy 350 of the 500 available units, and every round after
+that buys about one. The rows are not too few to install; they are too shallow.
+
+**In-out separation, proved and measured as a loss.** Separate the midpoint of
+the segment between a feasible point `y_in` and the LP optimum `y*` rather than
+`y*`. It is sound — feasibility gives `y_in(δ⁺(W)) >= 1`, midpoint violation
+gives `y*(δ⁺(W)) + y_in(δ⁺(W)) < 2`, so `y*(δ⁺(W)) < 1` — and it needs no step
+size if the midpoint is used and `y_in` halved towards `y*` whenever the midpoint
+separates nothing, which is bisection. Implemented with the incumbent
+arborescence as `y_in`: **7,059 against 7,071** at an eight-second budget,
+**7,097 against 7,105** at ninety seconds. The trace says why: the incumbent sits
+at 8,223 against an LP optimum near 7,100, so the midpoint is nowhere near the
+optimal face and exposes the same shallow cuts one max-flow round later. The
+proof is recorded on `root_certificate`; the code is not.
+
+**What the trace does reward** is the held-back structural pool, which feeds
+forty rows a round while it lasts and is the ascent's own cut family. Seeding it
+from ascents rooted at several terminals as well — keeping only the sets that
+also miss the model's root, since the rest are not valid Steiner cuts for this
+arborescence — costs microseconds. The bound after seven rounds rises from 6,935
+to **6,982** and after sixteen from 7,014 to **7,036**. The converged value is
+unchanged: this is front-loading, which is what the solver's quarter of the clock
+actually buys.
+
+Also worth recording from the same probe: the search's own frontier bound reaches
+**7,156.86** at 50,000 labels under the LP-derived packing, above the *converged*
+LP value of 7,105. The frontier, not the root, remains the strongest dual object
+on this instance.
+
+### 35. A second relaxation, and where it is dramatic
+
+`model/hypergraphic.rs` is the full-component relaxation, as a standalone
+certificate. For a partition `P` of `R` put `r(P) = |P| - 1` and
+`r_K(P) = (parts of P met by R_K) - 1`; the dual is
+
+```text
+max sum_P r(P) lambda_P   s.t.  sum_P r_K(P) lambda_P <= c_K  for every K,  lambda >= 0.
+```
+
+> **Every feasible dual is a lower bound on the Steiner optimum.**
+
+*Proof.* Expose an optimal tree's full components in a connected order. One
+meeting `q_i` parts lowers the number of part-groups by at most `q_i - 1 =
+r_{K_i}(P)`, and the `p` groups must end as one, so
+`sum_i r_{K_i}(P) >= r(P)` and the tree's indicator is primal feasible. Weak
+duality does the rest. ∎
+
+The failure mode of restricted hypergraphic masters is omitting *constraints* —
+the resulting `lambda` can violate an unpriced component and its objective can
+exceed the optimum. This module omits none. It enumerates **every** terminal
+subset `S` and charges it with `smt(S)`, which is a lower bound on the cost of
+any full component on `S`, so the constraint is harder and the certificate stays
+valid; and every `smt(S)` comes out of **one** Dreyfus-Wagner table, since the
+`l(v,S)` recursion computes all `2^{|R|}` of them at once. There is no pricing
+step because nothing is left to price. Restricting the *variables* to a partition
+family is always safe — the omitted ones are zero in the full dual — and the
+family is every partition when `Bell(|R|)` fits, otherwise the bipartitions plus
+the all-singletons partition.
+
+The value is recomputed from the returned multipliers and every constraint
+re-checked; a violation is repaired by scaling, which is sound because the system
+is homogeneous on the left with nonnegative right-hand sides.
+
+**Measured, PACE instance024** — 640 vertices, 204,454 edges, nine terminals
+after reduction:
+
+| object | bound | time |
+|---|---|---|
+| dual ascent | 1,752 | 0.03 s |
+| root cut LP (18 solves) | 1,752 | 20 s |
+| certified packing | 1,752 | — |
+| **hypergraphic dual** | **1,756** | **0.17 s** |
+| optimum | 1,756 | |
+
+It certifies the optimum, at the root, in a sixth of a second, on an instance
+where the bidirected-cut LP cannot finish two dozen solves in twenty seconds.
+That is the first object in this file that is *categorically* stronger than the
+cut relaxation rather than a better-converged version of it.
+
+**And it does not currently close anything**, because on 024 and 025 the binding
+constraint is the primal: the heuristic reaches 1,757 against a true 1,756. Given
+the budget before the search, the certificate took it, proved a bound nobody
+needed, and cost instance025 its proof on three runs out of three. It now runs
+*after* the search, on budget the search has been shown not to need, and is gated
+on a work-to-time estimate — an attempt that runs out of clock costs its budget
+and returns nothing, so the decision has to be made before the work starts.
+
+**It is not a state potential.** `H_lambda(S) = sum_P lambda_P r_S(P)` does bound
+every tree spanning `S` and is subadditive under the merge, but it fails the
+Dijkstra-Steiner validity condition, and the witness is three terminals on a unit
+triangle with the singleton partition priced at one: `H(R) = 2`, `H({r,a}) = 1`,
+and validity would demand `2 <= 1 + smt({b}) = 1`. The search is not offered it,
+and no maximum is taken with the cut packing — an inconsistent potential corrupts
+the settling order rather than merely being weak.
+
+### Round summary
+
+| slice | control | now |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 136/140, 51.9 s | **139/140**, 51.5 s |
+| PACE Track 1 [155..200] @5 s | 26/46, 140.0 s | 26/46, 145.0 s |
+| SteinLib B @5 s | 18/18, 1.1 s | 18/18, 1.5 s |
+| SteinLib C @5 s | 20/20, 6.1 s | 20/20, 5.8 s |
+| SteinLib D @5 s | 20/20, 15.5 s | 20/20, **11.6 s** |
+| SteinLib E @20 s | 19/20, 90.1 s | 19/20, **68.5 s** |
+
+025, 086 and 087 move from unproved to proved. No instance reports a value
+differing from its reference under an `Optimal` status, on any slice. The library
+suite is 127 tests, including exhaustive small-graph enumeration for every new
+rule — the transplanted-hop bound against subset brute force, the polynomial star
+condition against Dreyfus-Wagner on dense nine-to-twelve-vertex graphs, the
+subset table against `dreyfus_wagner` on every subset, and the hypergraphic dual
+against the optimum with an independent feasibility re-check.
+
+### What this round says about the next step
+
+1. **The primal is now the largest identified loss.** On [155..200] the
+   incumbents run one to three percent above the optimum and the dual gaps are
+   the same size or smaller — 161 is 5,260/5,138 against 5,199, 172 is
+   7,413/7,079 against 7,299. Two topological moves recovered a tenth of it.
+   Nothing in this file explains the rest.
+2. **The hypergraphic relaxation is the strongest dual object available and its
+   reach is a `3^k n` table.** Extending it past a dozen terminals needs exact
+   pricing rather than enumeration, which is §6.1 step 4 of the scratchpad and
+   the one obligation this implementation sidesteps by never omitting a
+   constraint. That is the direction with the most head-room.
+3. **The cut loop's convergence is a facet-count problem, not a degeneracy
+   problem.** In-out separation was the textbook remedy and it lost. What the
+   trace supports is a wider *seed*, and the multi-root ascent family is the
+   cheapest version of that; stronger families — partition rows at the root
+   rather than only in the branch-and-cut — are the untested one.
+4. **The search's frontier beats the converged root LP** on instance172 and is
+   now continuous. Strengthening Lemma 15's witness families remains the most
+   direct dual lever on the instances where the search is attemptable at all.
+
+---
+
 ## Where the remaining loss is
 
 Re-measured this session, PACE Track 1 [155..200] at 5 s: 15/46 proved. The

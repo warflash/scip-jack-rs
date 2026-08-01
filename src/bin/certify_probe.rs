@@ -66,6 +66,25 @@ fn main() {
     let da = dual_ascent_masked(&idx, root, &terminals, &active);
     println!("ascent           {:10.2}   ({:.2}s)", da.lower_bound + offset, t.elapsed().as_secs_f64());
 
+    // The hypergraphic certificate, when the subset table is affordable. It is a
+    // different relaxation, not a strengthening of the one below, so the two are
+    // reported side by side rather than combined.
+    if scip_jack::model::hyp_is_affordable(terminals.len(), ru.num_nodes, ru.edges.len()) {
+        let t = Instant::now();
+        match scip_jack::model::hyp_certificate(&ru, &terminals, Some(Instant::now() + Duration::from_secs_f64(budget))) {
+            Some(h) => println!(
+                "hypergraphic     {:10.2}   ({} partitions, repair {:.6}, {:.2}s)",
+                h.lower_bound + offset,
+                h.partitions.len(),
+                h.repair_ratio,
+                t.elapsed().as_secs_f64()
+            ),
+            None => println!("hypergraphic      unavailable"),
+        }
+    } else {
+        println!("hypergraphic      out of range ({} terminals, {} nodes)", terminals.len(), ru.num_nodes);
+    }
+
     let ub: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(f64::INFINITY);
 
     let t = Instant::now();
