@@ -224,15 +224,21 @@ impl Hasher for LabelHasher {
     fn write_u32(&mut self, value: u32) {
         self.write_u64(value as u64);
     }
+    fn write_u128(&mut self, value: u128) {
+        // The packed label key is `(mask << 32) | vertex`. Folding the halves
+        // keeps the whole key in the hash without falling back to the byte-wise
+        // path, which is the hot structure of the search.
+        self.write_u64((value >> 64) as u64 ^ (value as u64));
+    }
     fn finish(&self) -> u64 {
         self.0
     }
 }
 
-type LabelMap<V> = HashMap<u64, V, BuildHasherDefault<LabelHasher>>;
+type LabelMap<V> = HashMap<LabelKey, V, BuildHasherDefault<LabelHasher>>;
 /// Keyed by terminal-set bitmask. Same reasoning as [`LabelMap`]: these are
 /// probed once per settled label and the default SipHash is pure overhead.
-type MaskMap<V> = HashMap<u32, V, BuildHasherDefault<LabelHasher>>;
+type MaskMap<V> = HashMap<Mask, V, BuildHasherDefault<LabelHasher>>;
 
 /// Storage for the label costs.
 ///
@@ -252,7 +258,7 @@ impl Labels {
 
     fn new(num_nodes: usize, num_masks: usize) -> Self {
         match num_nodes.checked_mul(num_masks) {
-            Some(cells) if cells <= Self::DENSE_CAP => Labels::Dense {
+            Some(cells) if cells > 0 && cells <= Self::DENSE_CAP => Labels::Dense {
                 cost: vec![Cost::INFINITY; cells],
                 settled: vec![false; cells],
                 num_nodes,
@@ -262,7 +268,7 @@ impl Labels {
     }
 
     #[inline]
-    fn get(&self, mask: u32, v: NodeId) -> Option<(Cost, bool)> {
+    fn get(&self, mask: Mask, v: NodeId) -> Option<(Cost, bool)> {
         match self {
             Labels::Dense { cost, settled, num_nodes } => {
                 let i = mask as usize * *num_nodes + v as usize;
@@ -274,7 +280,7 @@ impl Labels {
     }
 
     #[inline]
-    fn put(&mut self, mask: u32, v: NodeId, value: Cost, done: bool) {
+    fn put(&mut self, mask: Mask, v: NodeId, value: Cost, done: bool) {
         match self {
             Labels::Dense { cost, settled, num_nodes } => {
                 let i = mask as usize * *num_nodes + v as usize;
@@ -288,15 +294,29 @@ impl Labels {
     }
 }
 
+/// A terminal subset. One bit per terminal, bit `i` for `terminals[i]`.
+///
+/// The width of this word is the only thing that bounds how many terminals the
+/// search can address, and the bound is an implementation choice rather than a
+/// mathematical one: the search never sweeps the state space, it settles the
+/// labels an incumbent and a potential fail to prune. PACE instance188 has 37
+/// terminals after reduction, a nominal state space of `414 * 2^36`, and an
+/// incumbent twenty units above the ascent bound — a shape that closes in tens
+/// of thousands of labels and that a 32-bit mask simply refused to attempt.
+type Mask = u64;
+
+/// `(subset, vertex)` packed into one integer key.
+type LabelKey = u128;
+
 #[inline]
-fn pack(mask: u32, v: NodeId) -> u64 {
-    ((mask as u64) << 32) | v as u64
+fn pack(mask: Mask, v: NodeId) -> LabelKey {
+    ((mask as LabelKey) << 32) | v as LabelKey
 }
 
 use crate::graph::{Cost, NodeId, UndirectedGraph};
 
 /// Largest terminal count the bitmask state can address.
-const MAX_TERMINALS: usize = 32;
+const MAX_TERMINALS: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct DijkstraSteinerResult {
@@ -457,10 +477,10 @@ pub struct PackingPotential {
 /// fields are exactly the evaluation structure described there.
 struct PackingLayer {
     /// Distinct terminal masks among the raised sets, with their total weight.
-    by_mask: Vec<(u32, Cost)>,
+    by_mask: Vec<(Mask, Cost)>,
     /// For each vertex, the `(terminal mask, weight)` of every raised set that
     /// contains it.
-    at_vertex: Vec<Vec<(u32, Cost)>>,
+    at_vertex: Vec<Vec<(Mask, Cost)>>,
     /// `Z(v, I)` at `[v * num_masks + (I >> 1)]`, when it was affordable.
     subset_sums: Option<Vec<Cost>>,
     num_masks: usize,
@@ -504,17 +524,17 @@ impl PackingLayer {
         affordable: bool,
         degree: &dyn Fn(usize) -> usize,
     ) -> Self {
-        let mut grouped: HashMap<u32, Cost> = HashMap::new();
-        let mut at_vertex: Vec<Vec<(u32, Cost)>> = vec![Vec::new(); num_nodes];
+        let mut grouped: HashMap<Mask, Cost> = HashMap::new();
+        let mut at_vertex: Vec<Vec<(Mask, Cost)>> = vec![Vec::new(); num_nodes];
         for (weight, members) in sets {
             if *weight <= 0.0 || members.contains(&root) {
                 continue;
             }
-            let mut mask = 0u32;
+            let mut mask = 0 as Mask;
             for &v in members {
                 if let Some(&i) = terminal_index.get(v as usize) {
                     if i != u32::MAX {
-                        mask |= 1u32 << i;
+                        mask |= (1 as Mask) << i;
                     }
                 }
             }
@@ -535,7 +555,7 @@ impl PackingLayer {
                 continue;
             }
             list.sort_unstable_by_key(|&(m, _)| m);
-            let mut merged: Vec<(u32, Cost)> = Vec::with_capacity(list.len());
+            let mut merged: Vec<(Mask, Cost)> = Vec::with_capacity(list.len());
             for &(m, w) in list.iter() {
                 match merged.last_mut() {
                     Some(last) if last.0 == m => last.1 += w,
@@ -575,7 +595,7 @@ impl PackingLayer {
     /// The part of the bound that depends only on the outstanding set. Every
     /// neighbour reached by a growth step shares it, and on a graph of average
     /// degree several hundred that is the whole cost of the evaluation.
-    fn shared(&self, outstanding: u32) -> Cost {
+    fn shared(&self, outstanding: Mask) -> Cost {
         let mut total = 0.0;
         for &(mask, weight) in &self.by_mask {
             if mask & outstanding != 0 {
@@ -588,7 +608,7 @@ impl PackingLayer {
     /// `collected` is the label's own terminal set; `outstanding` its
     /// complement plus the root. They carry the same information, and the two
     /// evaluation paths each want one of them.
-    fn value(&self, v: NodeId, outstanding: u32, collected: u32, shared: Cost) -> Cost {
+    fn value(&self, v: NodeId, outstanding: Mask, collected: Mask, shared: Cost) -> Cost {
         if let Some(table) = &self.subset_sums {
             return shared + table[v as usize * self.num_masks + (collected >> 1) as usize];
         }
@@ -660,7 +680,7 @@ impl PackingPotential {
     }
 
     /// The set-dependent part of each layer's bound, in layer order.
-    fn shared(&self, outstanding: u32) -> SharedTerms {
+    fn shared(&self, outstanding: Mask) -> SharedTerms {
         let mut out = SharedTerms::ZERO;
         for (i, layer) in self.layers.iter().enumerate() {
             out.0[i] = layer.shared(outstanding);
@@ -670,7 +690,7 @@ impl PackingPotential {
 
     /// The pointwise maximum over the layers, which is what the lattice theorem
     /// in this type's documentation licenses.
-    fn value(&self, v: NodeId, outstanding: u32, collected: u32, shared: &SharedTerms) -> Cost {
+    fn value(&self, v: NodeId, outstanding: Mask, collected: Mask, shared: &SharedTerms) -> Cost {
         let mut best: Cost = 0.0;
         for (i, layer) in self.layers.iter().enumerate() {
             let value = layer.value(v, outstanding, collected, shared.0[i]);
@@ -834,7 +854,10 @@ pub fn dijkstra_steiner_guided(
         }
     }
 
-    let num_masks = 1usize << (k - 1);
+    // `2^(k-1)`, or zero when the collected-set lattice does not fit in a
+    // machine word. Only the dense label table and the subset-sum transform are
+    // indexed by it; the search itself never enumerates it.
+    let num_masks = 1usize.checked_shl(k as u32 - 1).unwrap_or(0);
     let labels = Labels::new(csr.num_nodes, num_masks);
     let potential = (!packings.is_empty()).then(|| {
         let mut terminal_index = vec![u32::MAX; csr.num_nodes];
@@ -853,9 +876,13 @@ pub fn dijkstra_steiner_guided(
     });
     let potential = potential.filter(|p| !p.is_empty());
 
-    let root_bit = 1u32;
-    let all_labels: u32 = if k == 32 { !1u32 } else { ((1u32 << k) - 1) & !1 };
-    let goal_key = ((all_labels as u64) << 32) | terminals[0] as u64;
+    let root_bit: Mask = 1;
+    let all_labels: Mask = if k == Mask::BITS as usize {
+        !1
+    } else {
+        (((1 as Mask) << k) - 1) & !1
+    };
+    let goal_key = pack(all_labels, terminals[0]);
 
     let nearest_order: Vec<Vec<u32>> = (0..k)
         .map(|i| {
@@ -876,7 +903,7 @@ pub fn dijkstra_steiner_guided(
         root_bit,
         potential,
         info_cache: MaskMap::default(),
-        cur_mask: u32::MAX,
+        cur_mask: Mask::MAX,
         cur_info: MaskInfo::EMPTY,
         mst_cache: MaskMap::default(),
         label: labels,
@@ -887,7 +914,7 @@ pub fn dijkstra_steiner_guided(
 
     // Base labels: the singleton tree at each non-root terminal.
     for (i, &t) in terminals.iter().enumerate().skip(1) {
-        let mask = 1u32 << i;
+        let mask = (1 as Mask) << i;
         state.offer(t, mask, 0.0);
     }
 
@@ -896,7 +923,7 @@ pub fn dijkstra_steiner_guided(
     let mut optimal = None;
 
     while let Some((Reverse(Key(key)), packed)) = state.heap.pop() {
-        let mask = (packed >> 32) as u32;
+        let mask = (packed >> 32) as Mask;
         let v = (packed & 0xFFFF_FFFF) as u32;
         let g = match state.label.get(mask >> 1, v) {
             Some((_, true)) => continue, // already settled
@@ -968,11 +995,11 @@ struct MaskInfo {
     shared: SharedTerms,
     /// `d(I, R \ I)`, and the bit of a terminal of `R \ I` attaining it.
     hop: Cost,
-    hop_bit: u32,
+    hop_bit: Mask,
     /// `U(I)`: the cheapest known Lemma-15 witness for `I`, and its anchor set
     /// `S(I)`. Only ever decreases.
     witness: Cost,
-    anchor: u32,
+    anchor: Mask,
 }
 
 impl MaskInfo {
@@ -995,7 +1022,7 @@ struct Search<'a> {
     /// For each terminal, the other terminals in order of increasing distance.
     nearest_order: &'a [Vec<u32>],
     k: usize,
-    root_bit: u32,
+    root_bit: Mask,
     potential: Option<PackingPotential>,
     /// Everything about a label that depends on its terminal set alone.
     info_cache: MaskMap<MaskInfo>,
@@ -1005,7 +1032,7 @@ struct Search<'a> {
     /// graph of average degree several hundred a hash probe per offer is the
     /// dominant cost of the whole search. `u32::MAX` is not a legal mask — bit
     /// zero is the root's and is never set — so it serves as "empty".
-    cur_mask: u32,
+    cur_mask: Mask,
     cur_info: MaskInfo,
     mst_cache: MaskMap<Cost>,
     /// Cost of each reached label, and whether it has been settled.
@@ -1015,14 +1042,14 @@ struct Search<'a> {
     /// settlement scans it, so it is quadratic in the labels settled at a vertex
     /// and a hash probe per entry is what made a 125-vertex instance take
     /// seconds.
-    settled_masks: Vec<Vec<(u32, Cost)>>,
-    heap: BinaryHeap<(Reverse<Key>, u64)>,
+    settled_masks: Vec<Vec<(Mask, Cost)>>,
+    heap: BinaryHeap<(Reverse<Key>, LabelKey)>,
     upper_bound: Cost,
 }
 
 impl Search<'_> {
     /// Offer `value` as the cost of the label `(v, mask)`.
-    fn offer(&mut self, v: NodeId, mask: u32, value: Cost) {
+    fn offer(&mut self, v: NodeId, mask: Mask, value: Cost) {
         if self.label.get(mask >> 1, v).is_some_and(|(old, done)| done || old <= value + 1e-12) {
             return;
         }
@@ -1058,7 +1085,7 @@ impl Search<'_> {
     ///
     /// `ia` is the witness of `a`, read once by the caller because the settled
     /// side of every merge at a vertex is the same set.
-    fn offer_merge(&mut self, v: NodeId, a: u32, ia: &MaskInfo, b: u32, value: Cost) {
+    fn offer_merge(&mut self, v: NodeId, a: Mask, ia: &MaskInfo, b: Mask, value: Cost) {
         // `U(I1 ∪ I2) <= U(I1) + U(I2)` when the anchor sets permit it. At least
         // one side's anchors must avoid the other side's terminals; then every
         // component of the combined witness holds an anchor that is still
@@ -1084,7 +1111,7 @@ impl Search<'_> {
     ///
     /// Every settled set has been through `load_info`, so this only returns
     /// `None` for sets the search has never touched.
-    fn peek_info(&self, mask: u32) -> Option<MaskInfo> {
+    fn peek_info(&self, mask: Mask) -> Option<MaskInfo> {
         if mask == self.cur_mask {
             return Some(self.cur_info);
         }
@@ -1092,7 +1119,7 @@ impl Search<'_> {
     }
 
     /// The set-dependent part of a label's evaluation, through a one-entry memo.
-    fn info(&mut self, mask: u32) -> MaskInfo {
+    fn info(&mut self, mask: Mask) -> MaskInfo {
         if mask != self.cur_mask {
             self.flush();
             let loaded = self.load_info(mask);
@@ -1107,7 +1134,7 @@ impl Search<'_> {
     /// Delaying it is safe: a witness only ever decreases, so a reader that
     /// misses an improvement prunes less, never more.
     fn flush(&mut self) {
-        if self.cur_mask == u32::MAX {
+        if self.cur_mask == Mask::MAX {
             return;
         }
         if let Some(entry) = self.info_cache.get_mut(&self.cur_mask) {
@@ -1116,10 +1143,10 @@ impl Search<'_> {
                 entry.anchor = self.cur_info.anchor;
             }
         }
-        self.cur_mask = u32::MAX;
+        self.cur_mask = Mask::MAX;
     }
 
-    fn load_info(&mut self, mask: u32) -> MaskInfo {
+    fn load_info(&mut self, mask: Mask) -> MaskInfo {
         if let Some(&cached) = self.info_cache.get(&mask) {
             return cached;
         }
@@ -1131,7 +1158,7 @@ impl Search<'_> {
         // first one still outstanding — normally the first entry — rather than
         // sweeping the whole complement.
         let mut hop = Cost::INFINITY;
-        let mut hop_bit = 0u32;
+        let mut hop_bit = 0 as Mask;
         let mut inside = mask;
         while inside != 0 {
             let i = inside.trailing_zeros() as usize;
@@ -1143,7 +1170,7 @@ impl Search<'_> {
                 }
                 if out >> t & 1 == 1 {
                     hop = d;
-                    hop_bit = 1u32 << t;
+                    hop_bit = (1 as Mask) << t;
                     break;
                 }
             }
@@ -1159,12 +1186,13 @@ impl Search<'_> {
 
     /// The outstanding terminal set of a label: the root plus everything the
     /// label has not yet collected.
-    fn outstanding(&self, mask: u32) -> u32 {
-        let all: u32 = if self.k == 32 { u32::MAX } else { (1u32 << self.k) - 1 };
+    fn outstanding(&self, mask: Mask) -> Mask {
+        let all: Mask =
+            if self.k == Mask::BITS as usize { Mask::MAX } else { ((1 as Mask) << self.k) - 1 };
         (all & !mask) | self.root_bit
     }
 
-    fn heuristic(&mut self, v: NodeId, mask: u32) -> Cost {
+    fn heuristic(&mut self, v: NodeId, mask: Mask) -> Cost {
         let info = self.info(mask);
         self.evaluate(v, mask, &info).0
     }
@@ -1172,10 +1200,10 @@ impl Search<'_> {
     /// The A* potential, plus the distance from `v` to the nearest outstanding
     /// terminal and which one it is — quantities the potential computes anyway
     /// and the Lemma-15 witness needs.
-    fn evaluate(&self, v: NodeId, mask: u32, info: &MaskInfo) -> (Cost, Cost, u32) {
+    fn evaluate(&self, v: NodeId, mask: Mask, info: &MaskInfo) -> (Cost, Cost, Mask) {
         let out = self.outstanding(mask);
         let mut first = Cost::INFINITY;
-        let mut first_bit = 0u32;
+        let mut first_bit = 0 as Mask;
         let mut second = Cost::INFINITY;
         let mut farthest: Cost = 0.0;
         let mut count = 0usize;
@@ -1191,7 +1219,7 @@ impl Search<'_> {
             if d < first {
                 second = first;
                 first = d;
-                first_bit = 1u32 << i;
+                first_bit = (1 as Mask) << i;
             } else if d < second {
                 second = d;
             }
@@ -1212,7 +1240,7 @@ impl Search<'_> {
     }
 
     /// Minimum spanning tree of a terminal subset in the metric closure.
-    fn mst(&mut self, mask: u32) -> Cost {
+    fn mst(&mut self, mask: Mask) -> Cost {
         if let Some(&cached) = self.mst_cache.get(&mask) {
             return cached;
         }
@@ -1537,5 +1565,71 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 50, "only {checked} instances exercised");
+    }
+
+    /// Beyond 32 terminals, where neither brute force nor Dreyfus-Wagner can
+    /// follow, on instances whose optimum is known by construction.
+    ///
+    /// A path of terminals, with Steiner vertices hung off it as pendants and
+    /// chords priced above the whole path. The minimal subtree spanning the
+    /// terminals is the path itself: every path edge separates two terminals, a
+    /// pendant is a Steiner leaf and never belongs to an inclusion-minimal tree,
+    /// and no chord is affordable. So the optimum is the path's total cost, and
+    /// the vertex count is decoupled from the terminal count.
+    ///
+    /// This is the property the `Mask` width exists for. With a 32-bit mask
+    /// every instance here returns `None`.
+    #[test]
+    fn addresses_more_than_thirty_two_terminals() {
+        use crate::graph::algorithms::{dual_ascent_packing, ArcIndex};
+        use crate::graph::DirectedGraph;
+
+        let mut rng = rng_from(0x51DE_0BED_9911_2244);
+        let mut checked = 0;
+        for _ in 0..12 {
+            let k = 33 + (rng() % 8) as u32;
+            let pendants = 1 + (rng() % 10) as u32;
+            let n = k + pendants;
+            let mut g = UndirectedGraph::new(n);
+            for v in 1..=k {
+                g.add_node(v, NodeType::Terminal, 0.0);
+            }
+            for v in (k + 1)..=n {
+                g.add_node(v, NodeType::Steiner, 0.0);
+            }
+            let mut total: Cost = 0.0;
+            for v in 1..k {
+                let cost = 1.0 + (rng() % 20) as Cost;
+                g.add_edge(v, v + 1, cost);
+                total += cost;
+            }
+            let terminals: Vec<NodeId> = (1..=k).collect();
+            for v in (k + 1)..=n {
+                g.add_edge(1 + (rng() % k as u64) as u32, v, 1.0 + (rng() % 5) as Cost);
+            }
+            for _ in 0..4 {
+                let u = 1 + (rng() % n as u64) as u32;
+                let w = 1 + (rng() % n as u64) as u32;
+                if u != w {
+                    g.add_edge(u, w, total + 1.0);
+                }
+            }
+
+            let directed = DirectedGraph::from_undirected(&g);
+            let idx = ArcIndex::new(&directed);
+            let active = vec![true; idx.num_arcs()];
+            let da = dual_ascent_packing(&idx, terminals[0], &terminals, &active, 1 << 22);
+            let got =
+                dijkstra_steiner_guided(&g, &terminals, total, 4_000_000, None, &[&da.sets])
+                    .expect("more than 32 terminals must be addressable");
+            assert!(
+                got.optimal.is_some_and(|c| (c - total).abs() < 1e-6),
+                "{k} terminals: the path costs {total}, search says {:?}",
+                got.optimal
+            );
+            assert!(got.lower_bound <= total + 1e-6);
+            checked += 1;
+        }
+        assert_eq!(checked, 12);
     }
 }

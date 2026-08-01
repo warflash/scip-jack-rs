@@ -475,7 +475,15 @@ fn finish(
                     search_graph.edges.len(),
                 );
             }
-            if cert.packing.is_empty() {
+            // Retry only when the object the search actually consumes got
+            // stronger. The potential is the packing, so the test is on the
+            // packing's own value: if it did not rise above the bound the first
+            // attempt already ran under, the second attempt would sweep the same
+            // state space against a potential no stronger at the root, and the
+            // budget belongs to the branch-and-cut instead. This is a measured
+            // fact about the two objects, not an estimate of how long a rerun
+            // would take.
+            if cert.packing.value <= root_lower_bound + 1e-9 {
                 break;
             }
             lp_guide = cert.packing.sets;

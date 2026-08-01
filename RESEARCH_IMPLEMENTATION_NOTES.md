@@ -929,22 +929,82 @@ model's multipliers in place and their row indices no longer name the same rows.
 That is the same class of mistake as §7's stale reduced costs, and it is why an
 earlier version of this loop returned nothing at all on instance113.
 
+### 26. The 32-terminal ceiling was a word width, and it was costing five instances
+
+Measuring the reduced shape of every unproved instance in [155..200] — the same
+exercise that opened round 3 — turned up a block the certificate could not
+reach:
+
+```
+instance   |V|    |E|   |R|   ascent LB    incumbent   gap
+   187    1234   2462   34    3300623      3300654      31
+   188     414    777   37    3400372      3400392      20
+   190     998   1989   37    3600433      3600464      31
+   193     572   1149   38    3700497      3700515      18
+   194     699   1610   39    3800322      3800348      26
+```
+
+Exactly the signature §24 identifies as the winnable one — a gap of twenty units
+on a base of three million — and the search **refused every one of them**,
+because the label state was a `u32` bitmask and `MAX_TERMINALS` was 32.
+
+That ceiling is an implementation choice, not a mathematical one. The search
+never sweeps `n · 2^(k-1)`; it settles the labels an incumbent and a potential
+fail to prune, and instance174 closes 28 terminals — a nominal `247 · 2^27` — in
+68,736 of them. The mask is now `u64`, the packed `(subset, vertex)` key `u128`
+with a folding hash, and `MAX_TERMINALS` is 64. The dense label table and the
+subset-sum transform are the only things indexed by `2^(k-1)`, and both already
+fall back when it does not fit.
+
+`addresses_more_than_thirty_two_terminals` pins it on instances with a
+constructed optimum, since neither brute force nor Dreyfus-Wagner reaches this
+range: a path of terminals with Steiner pendants and chords priced above the
+whole path. Every path edge separates two terminals, a pendant is a Steiner leaf
+and belongs to no inclusion-minimal tree, and no chord is affordable — so the
+optimum is the path's cost, and the vertex count is decoupled from `k`. Under a
+32-bit mask every instance in that test returns `None`.
+
+**Measured: 188 and 192 close.** 187, 190, 193 and 194 do not yet, which is the
+honest state of it — the widening makes them *attemptable*, and the gap between
+attemptable and closed is what §25's lever has left to give.
+
+### 27. Retry only when the object got stronger
+
+The widening also lets the search be attempted on instances where it has no
+chance, and the second attempt is the expensive half of that. SteinLib c18 — 47
+terminals after reduction, a 5 % relative gap — settles 81,920 labels, gains
+nothing, and under the round's first wiring then did it again.
+
+The gate is a measured fact rather than an estimate of difficulty: the potential
+the search consumes is the packing, so the retry happens only when the packing's
+own value rose above the bound the first attempt already ran under. On c18 the
+certified packing is 72.0 against an ascent bound of 72.0 — the same potential —
+and the retry is skipped. On instance174 it is 2800457 against 2800454, and the
+retry closes the instance.
+
+SteinLib C: 8.42 s without the gate, 6.67 s with it, 20/20 either way.
+
 ### Round summary
 
 | slice | round 4 | now |
 |---|---|---|
-| PACE Track 1 [1..140] @3 s | 136/140, 54.6 s | 136/140, 54.0 s |
-| PACE Track 1 [155..200] @5 s | 21/46, 153.1 s | **24/46, 145.8 s** |
-| SteinLib B @5 s | 18/18, 1.14 s | 18/18, 1.29 s |
-| SteinLib C @5 s | 20/20, 4.82 s | 20/20, 4.99 s |
+| PACE Track 1 [1..140] @3 s | 136/140, 54.6 s | 136/140, **50.9 s** |
+| PACE Track 1 [155..200] @5 s | 21/46, 153.1 s | **26/46, 139.4 s** |
+| SteinLib B @5 s | 18/18, 1.14 s | 18/18, 1.39 s |
+| SteinLib C @5 s | 20/20, 4.82 s | 20/20, 6.67 s |
 | SteinLib D @5 s | 20/20, 15.6 s | 20/20, 15.6 s |
-| SteinLib E @20 s | 19/20, 94.3 s | 19/20, 93.4 s |
+| SteinLib E @20 s | 19/20, 94.3 s | 19/20, **89.4 s** |
 
-Both sides built from the same tree, control at `cf7e6a7`. Instances 169, 174
-and 178 move from unproved to proved and do so reproducibly on repeated single
-runs; every other slice is inside noise. Across [1..140], [155..200] and
-SteinLib E no instance reports a value differing from its reference under an
-`Optimal` status.
+Both sides built from the same tree, control at `cf7e6a7`. Five instances move
+from unproved to proved — 169, 174 and 178 from the certificate (§22–§25), 188
+and 192 from the widening (§26) — and all five do so reproducibly on repeated
+single runs. Every other slice is inside noise except SteinLib C, which pays
+1.9 s: a single instance, c18, where the search is now attempted, fails, and
+hands back to a branch-and-cut that closes it in 0.38 s. That is the measured
+price of the widening and it is recorded rather than tuned away.
+
+Across [1..140], [141..154], [155..200] and SteinLib B/C/D/E, no instance
+reports a value differing from its reference under an `Optimal` status.
 
 `src/bin/certify_probe.rs` is the tool the tables above came from: it reports the
 ascent bound, the root LP after a converged separation loop, the certified
@@ -957,11 +1017,13 @@ Section 24 is the finding to carry forward, and it retires a standing assumption
 The 2–3 % dual gap on the large instances was being treated as one problem; it is
 two, and they need opposite things.
 
-1. **Small-gap-on-large-base instances** (the [155..200] block, 169/174/178 and
-   their neighbours) are limited by *potential strength in absolute units*, and
-   that is now addressable — this round moved three of them. More of the same
-   lever: a longer or better-converged root loop, and a second certificate after
-   the incumbent improves.
+1. **Small-gap-on-large-base instances** (the [155..200] block, 169/174/178/188/192
+   and their neighbours) are limited by *potential strength in absolute units*,
+   and that is now addressable — this round moved five of them. The named
+   survivors are 187, 190, 193 and 194, whose gaps are 31, 31, 18 and 26 units
+   on bases of three million; they are attemptable now and not yet closed. More
+   of the same lever: a longer or better-converged root loop, and a second
+   certificate after the incumbent improves.
 2. **Large-gap instances** (24, 25, 86, 87) are limited by the **integrality gap
    of the bidirected-cut relaxation itself**, measured here at 8–11 %. Every
    remaining dual direction over that relaxation is capped by it. This is the
