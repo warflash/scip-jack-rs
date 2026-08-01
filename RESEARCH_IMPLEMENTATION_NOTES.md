@@ -385,6 +385,145 @@ an exact multi-way separator is a well-posed target (§3.3), and the hypergraphi
 component pricing of §6 is the only listed direction that attacks the residual
 2–3% head on.
 
+
+## 2026-08-01 (third round): the exact search
+
+### 9. The instances that would not close were not branch-and-cut problems
+
+Measuring the *reduced* size of every unproved instance was the whole round.
+PACE Track 1 [1..140] at 3 s, terminals after reduction:
+
+```
+24,25,26: 9    50: 10    113: 11    85,86,87: 13    114: 16
+124: 17   135: 18   156: 24   ...   199: 114   200: 135
+```
+
+Twelve of the thirteen unproved instances have **at most 24 terminals**. Three
+have nine. The branch-and-cut was being asked to close instances that a
+few-terminal exact algorithm should eat, and `dw_is_affordable` was right to
+refuse them — Dreyfus–Wagner costs `3^k n` whether or not the instance is easy.
+
+### 10. Dijkstra–Steiner, and why the published bound is not enough
+
+Hougardy–Silvanus–Vygen keep the Dreyfus–Wagner recurrence but settle labels in
+order of `l + L`, `L` bounding the cost still to come, and stop at the goal. The
+paper's notion is a **valid lower bound**: `L(r0,{r0}) = 0` and
+`L(v,I) <= L(w,I') + smt((I\I') ∪ {v,w})`, which gives both admissibility and the
+monotonicity A* needs.
+
+Their strongest published bound is the **1-tree bound**
+`min_{i≠j∈I} (d(v,i)+d(v,j))/2 + mst(I)/2`, proved by doubling a tree into a tour
+and deleting `v`. It goes through a tour, so it gives away a factor of two by
+construction — and these instances have gaps of *two units*. Measured on
+instance085 (13 terminals, 125 vertices, optimum 20): **376,832 labels settled
+out of a possible 512,000, and it never reached the optimum.**
+
+### 11. The bound that works was already being computed and discarded
+
+Dual ascent produces a **cut packing**: weights `y_W` on vertex sets missing the
+root with `sum { y_W : a enters W } <= c(a)`. The solver used only `sum y_W`, a
+single number. But a packing bounds every *sub*-requirement of the instance:
+
+> **Proposition.** For `r0 ∈ S`, `L_pack(v,S) := sum { y_W : W meets S ∪ {v} }`
+> satisfies `L_pack(v,S) <= smt(S ∪ {v})`.
+>
+> *Proof.* Let `T` span `S ∪ {v}`, oriented from `r0`. Each counted `W` meets
+> `V(T)` and misses `r0 ∈ V(T)`, so `T` has an arc entering `W`. Charging each
+> `W` to one such arc, `sum y_W <= sum_{a∈T} sum{y_W : a enters W} <= c(T)`. ∎
+
+And it is a *valid* lower bound in the paper's sense, both parts falling straight
+out of the packing condition:
+
+- **growth** `(v,I) → (u,I)`: the difference is the weight of sets holding `v`,
+  missing `u` and missing `S`; every one is entered by the arc `(u,v)`, so the
+  difference is at most `c(u,v)`;
+- **merge** `(v,I) + (v,J)`: the difference is the weight of sets meeting `J` and
+  missing `v`; the subtree behind `(v,J)` meets each and misses `v`, so the same
+  charging bounds the difference by `l(v,J)`;
+- **at the goal** `S = {r0}` and no raised set holds `r0`, so the potential is 0.
+
+Dual ascent reaches 90–99 % of the optimum where the tour bound reaches ~50 %,
+and all of that strength transfers to every state.
+
+| instance | 1-tree bound | packing potential |
+|---|---|---|
+| 085 (13 T) | 376,832 labels, unsolved | **69,648 labels, solved** |
+| 113 (11 T) | 430,080 labels, unsolved | **22,160 labels, solved** |
+| 124 (17 T) | unsolved | **3,371 labels, bound reaches the incumbent** |
+
+### 12. An abandoned search still pays
+
+> **Proposition.** While the goal is unsettled, the minimum key in the open queue
+> is a lower bound on `smt(R)`.
+>
+> *Proof.* Some label of an optimal derivation is unsettled with all its
+> predecessors settled, so it was inserted with its correct `l`, and
+> `key = l + L <= smt(R)` since `L` bounds the remaining cost. The incumbent
+> pruning only removes labels with key above `U >= smt(R)`, so it survives. ∎
+
+So the search is given a label budget and a deadline and abandons itself safely,
+handing back a combinatorial dual bound computed without an LP. On instance124
+that bound reaches the incumbent and closes the instance outright.
+
+### 13. The bug, recorded because it was silent
+
+The potential is valid only for sets missing the **search's** root. The solver
+was handing over a packing from its *preferred ascent root*, which is chosen for
+bound strength and is usually a different terminal. Sets containing the search
+root then made the goal's potential nonzero and inflated every key: **seven
+instances reported dual bounds above the optimum as proved** (156: 9752 vs 9714,
+181: 22021 vs 21757, 086: 3664 vs 3661, …).
+
+Two repairs, because one was not enough: the ascent is rooted at the search root,
+*and* `PackingPotential` drops any set containing it rather than trusting the
+caller — a sub-family of a packing is still a packing, so this costs strength and
+never validity. The new test drives every terminal as the ascent root and checks
+the answer and every intermediate bound; reverting either repair makes it fail.
+
+The lesson generalises: a potential function carries hypotheses, and a caller
+that supplies the object silently violates them. The hypothesis is now enforced
+where the object is built.
+
+### 14. Implementation, where it changed the outcome
+
+- labels live in a flat array when `n * 2^(k-1)` fits and a hash map otherwise;
+- the merge loop carries costs alongside masks, so it needs no lookup — it is
+  quadratic in the labels settled per vertex and a hash probe per entry is what
+  made a 125-vertex instance take seconds;
+- packing sets sharing a terminal mask are summed per vertex, bounding the
+  evaluation by the number of distinct masks rather than the number of raised
+  sets, which on a degree-639 graph is the whole cost.
+
+### Round summary
+
+| slice | round 2 | now |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 128/140, 71.1 s | **135/140, 56.7 s** |
+| PACE Track 1 [155..200] @5 s | 16/46, 171.6 s | **21/46, 153.4 s** |
+| SteinLib B @5 s | 18/18, 1.2 s | 18/18, 1.2 s |
+| SteinLib C @5 s | 20/20, 4.4 s | 20/20, 4.5 s |
+| SteinLib D @5 s | 20/20, 15.5 s | 20/20, 15.3 s |
+| SteinLib E @20 s | 18/20, 104.0 s | 18/20, 104.1 s |
+
+156 proved against 144, on both slices faster, no false proofs.
+
+### What is left, in order
+
+1. **The search is the solver on few-terminal instances; make it the solver on
+   more of them.** The remaining unproved [1..140] cases are 24/25/26 (nine
+   terminals but average degree 639) and 86/87 (13 terminals, gap of 3). The
+   first group is bounded by neighbour scans, the second by the packing's
+   strength. A second ascent from a different root gives a second packing, and
+   the maximum of two valid lower bounds is valid — untested.
+2. **Lemma 15 of the paper** (prune `(v,I)` when some cheaper subgraph already
+   connects `I` to an outstanding terminal) is the pruning the authors report as
+   decisive, and it is not implemented. A cheap instance is
+   `mst(I) + min_{i∈I, t∉I} d(i,t) < l(v,I)`.
+3. **The 2–3 % dual gap on the many-terminal instances** (199: 114 terminals,
+   200: 135) is untouched by any of this. That remains §6 of the scratchpad —
+   hypergraphic component pricing — and it is now the only frontier left where
+   neither reduction nor exact search applies.
+
 ---
 
 ## Where the remaining loss is
