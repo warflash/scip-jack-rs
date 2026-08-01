@@ -39,9 +39,14 @@
 //!
 //! # What is dispatched on
 //!
-//! The width of the decomposition of the graph the DP is about to run on, and
-//! the state cap the DP enforces on itself. Both are computed from the object
-//! itself. Nothing here looks at the instance.
+//! Not the width — [`crate::graph::algorithms::steiner_td::work_estimate`],
+//! which is what the decomposition in hand will actually cost in table entries
+//! touched. A width of six on a thirty-vertex ground set is instantaneous and
+//! on a 250-vertex one is seconds, and gating on the width alone was measured
+//! as a loss. The allowance against it is self-scaling: an exact step may be
+//! predicted to cost no more than the local search that produced its input.
+//! Every quantity in that decision is computed from the object itself; nothing
+//! here looks at the instance.
 //!
 //! Two ground sets are offered, richest first:
 //!

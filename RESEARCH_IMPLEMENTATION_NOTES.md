@@ -1801,6 +1801,76 @@ The solver is not wired to any of it — a bound a twelfth of the ascent's is no
 worth the clock — so the pipeline measurements are unchanged: [155..200] holds
 at 26/46 in 146 s. 145 library tests.
 
+### 41. Round summary, and what the round says about the next step
+
+Every slice re-measured against the frozen control (`ef30a07`) on the same
+tree, final binary:
+
+| slice | control | now |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 139/140, 49.9 s | 139/140, 54.5 s |
+| PACE Track 1 [155..200] @5 s | 26/46, 141.2 s | 26/46, 146.4 s |
+| SteinLib B @5 s | 18/18, 1.5 s | 18/18, 1.5 s |
+| SteinLib C @5 s | 20/20, 5.8 s | 20/20, 6.1 s |
+| SteinLib D @5 s | 20/20, 11.6 s | 20/20, **11.0 s** |
+| SteinLib E @20 s | 19/20, 68.5 s | 19/20, 68.7 s |
+
+No instance reports a value differing from its reference under an `Optimal`
+status on any slice. 127 library tests at the start of the round, **145** now.
+
+**Pass counts did not move, and that is the round's honest headline.** What
+moved is underneath them:
+
+- instance162's primal 5,259 -> **5,193**, the optimum; instance024's
+  1,757 -> **1,756**, the optimum; instance194 -2.
+- instance172's root LP 7,086 -> **7,121** and its certified packing
+  7,073 -> **7,105**, in half the solves.
+- instance189's certified packing +19 and its dual +16.
+
+Three directions were **closed with proof**, which is the other thing this round
+bought:
+
+1. **Treewidth DP on the instance** (§36). The reduced instances decompose at
+   58 to 66 against an affordability threshold near ten. instance195's bounds
+   meet at 49, so its width is settled exactly.
+2. **Coarsened hypergraphic pricing** (§40). Capped at the cost of connecting
+   `h` representatives, by a one-line proposition. No choice of clustering
+   escapes it.
+3. **Ranking cut families by depth against each other** (§39). Raises the LP
+   bound and starves the packing the search consumes, which is a strictly worse
+   trade in this pipeline.
+
+And two primal directions were closed by measurement (§38): the combined
+topological neighbourhood inside the ILS loop, and fixed-prefix recombination.
+
+**What this round says about the next step.**
+
+1. **instance024 is the cheapest unclaimed proof in this file.** Its primal now
+   reaches 1,756 and the hypergraphic dual certifies exactly 1,756 in 0.17 s.
+   Both objects are in the same binary and never meet, because by the time the
+   certificate is offered the pass has 0.00 s left. That is budget ordering, not
+   mathematics — and the notes' own rule against clock dials is what has stopped
+   anyone touching it. The principled version is a dispatch on the *measured*
+   observation the solver already makes: a branch-and-cut that has solved no LP
+   and opened no node is not going to, and the budget it is being handed should
+   go to the certificate that would close the instance.
+2. **The primal remains the largest identified loss on the dense block.**
+   instance163 sits 63 units high and instance161-165 one to three percent high,
+   and the exact recombination's ground set on those instances saturates at
+   forty-odd vertices because the graph has average degree 104. The
+   width-bounded exact neighbourhood is the right object and the width cap binds
+   almost immediately; what is missing is a *sparsification* of the ground set
+   that keeps the optimum, not a bigger cap.
+3. **The search's frontier is still the strongest dual object** where the search
+   runs at all, and the certified packing feeding it is now materially stronger
+   on the instances where partition rows fire. Strengthening Lemma 15's witness
+   families remains the most direct lever, and it is now the only untried one on
+   the list.
+4. **Nothing here helps 197-200.** The search cannot address 101 terminals, the
+   instance's width is 66, the hypergraphic dual is capped by §40, and the
+   exact recombination improves their primal by a fraction of a percent. That
+   group needs an object none of this round produced.
+
 ---
 
 ## Where the remaining loss is
