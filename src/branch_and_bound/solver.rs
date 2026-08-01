@@ -12,7 +12,10 @@ use crate::graph::algorithms::{
 /// it; beyond that the LP costs more per solve than the bound is worth.
 const ASCENT_CUT_NNZ: usize = 400_000;
 use crate::model::{LpRelaxation, LpStatus, SteinerSolution};
-use crate::separation::{FlowCutSeparator, CycleCutSeparator, PartitionSeparator, TfCutSeparator};
+use crate::separation::{
+    ActivationRankSeparator, CycleCutSeparator, FlowCutSeparator, PartitionSeparator,
+    TfCutSeparator,
+};
 use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
 use crate::heuristics::sph::{mst_prune, shortest_path_heuristic, SphResult, SphWorkspace};
 use crate::heuristics::{RecombinationHeuristic, PrimalHeuristic};
@@ -34,6 +37,12 @@ pub struct SolverConfig {
     pub cycle_cuts: bool,
     /// Separate terminal-partition inequalities.
     pub partition_cuts: bool,
+    /// Separate activation-rank inequalities. Off by default: with the
+    /// in-degree equality `y(delta^-(v)) = s_v` in the model, the family is
+    /// implied and the separator provably finds nothing, at a cost of one max
+    /// flow per terminal per round. It is kept as a diagnostic -- switching it
+    /// on is how the implication gets re-checked if the formulation changes.
+    pub activation_rank_cuts: bool,
     /// Separate terminal-free boundary inequalities `x(delta(S)) >= 2 x_e`.
     pub tf_cuts: bool,
 }
@@ -50,6 +59,7 @@ impl Default for SolverConfig {
             preprocess: true,
             cycle_cuts: true,
             partition_cuts: true,
+            activation_rank_cuts: false,
             tf_cuts: true,
         }
     }
@@ -554,10 +564,12 @@ impl BranchAndCutSolver {
             &self.terminals,
         );
         let mut tf_sep = TfCutSeparator::new(&self.graph, &self.terminals);
+        let mut ar_sep = ActivationRankSeparator::new(&self.graph);
 
         let no_cycle = !self.config.cycle_cuts;
         let no_partition = !self.config.partition_cuts;
         let no_tf = !self.config.tf_cuts;
+        let no_ar = !self.config.activation_rank_cuts;
 
         let node_deadline = self.deadline;
         let mut prev_bound = f64::NEG_INFINITY;
@@ -713,8 +725,30 @@ impl BranchAndCutSolver {
                 Vec::new()
             };
 
+            // Activation-rank cuts. The separation is exact, so the only reason
+            // to hold it back is cost: one max flow per anchor. It runs when the
+            // connectivity separators have gone quiet, which is where the bound
+            // stops moving and a rank argument is what is left to say.
+            // Unguarded on purpose when enabled: as a diagnostic it has to run
+            // at every point the loop visits, not only at the quiet ones.
+            let ar_cuts = if !no_ar {
+                let s_values = {
+                    let lp = self.base_lp.as_ref().unwrap();
+                    let mut values = vec![0.0; lp.node_col.len()];
+                    for (v, col) in lp.node_col.iter().enumerate() {
+                        if let Some(c) = col {
+                            values[v] = lp.get_solution().get(*c as usize).copied().unwrap_or(0.0);
+                        }
+                    }
+                    values
+                };
+                ar_sep.find_violated_cuts(&lp_solution, &s_values, &self.terminals)
+            } else {
+                Vec::new()
+            };
+
             if flow_cuts.is_empty() && cycle_cuts.is_empty()
-                && partition_cuts.is_empty() && tf_cuts.is_empty() {
+                && partition_cuts.is_empty() && tf_cuts.is_empty() && ar_cuts.is_empty() {
                 break;
             }
 
@@ -788,7 +822,24 @@ impl BranchAndCutSolver {
                 }
             }
 
+            // Activation-rank rows carry activation columns, so they are built
+            // against the LP's own column map rather than from arcs alone.
+            let mut new_ar_rows: Vec<(Vec<(u32, f64)>, f64)> = Vec::new();
+            for cut in ar_cuts.iter().take(8) {
+                let node_col = self.base_lp.as_ref().unwrap().node_col.clone();
+                let Some((entries, hi)) = ar_sep.row(cut, &node_col) else { continue };
+                let mut sig: Vec<ArcId> = entries.iter().map(|&(c, _)| c).collect();
+                sig.sort();
+                if self.cut_signatures.insert(sig) {
+                    new_ar_rows.push((entries, hi));
+                    self.total_cuts_added += 1;
+                }
+            }
+
             let lp = self.base_lp.as_mut().unwrap();
+            for (entries, hi) in new_ar_rows {
+                lp.add_upper_cut(entries, hi);
+            }
             for arcs in &new_cut_arcs {
                 lp.add_steiner_cut(arcs);
             }
@@ -909,12 +960,38 @@ impl BranchAndCutSolver {
         //   - var at lb=0: rc >= 0, meaning any solution using this arc costs at least LP_bound + rc
         //   - Therefore: if LP_bound + rc > UB, this arc can never be in an optimal integer solution
         // All cuts added are globally valid, so root fixings are global.
+        //
+        // The optimality check is not a formality. Reduced-cost fixing is a
+        // statement about an *optimal* basis: `rc_a` bounds the objective
+        // increase from forcing `y_a` up only when the current point is optimal
+        // for the current model. When a solve stops on its own clock, HiGHS
+        // reports a non-optimal status and `LpRelaxation` leaves `solution`,
+        // `reduced_costs` and `dual_bound` holding the values from the previous
+        // solve -- a *different, smaller* model. Pairing that stale reduced-cost
+        // vector with the current gap is not a weak bound, it is a wrong one.
+        //
+        // It fires: on PACE instance164 a root LP with 43,054 rows timed out and
+        // the block then fixed 78,442 of 81,716 arcs, emptying the graph and
+        // letting the search report a proved optimum of 5265 against a true
+        // optimum of 5205.
         if is_root_node
+            && self.base_lp.as_ref().is_some_and(|lp| lp.is_optimal())
             && self.tree.global_primal_bound < f64::INFINITY
             && lp_solution.len() >= self.graph.num_arcs() as usize
         {
-            let gap = self.tree.global_primal_bound - node_dual_bound;
-            if gap > 1e-6 {
+            // The gap must be measured against the *raw* LP objective, not the
+            // lifted one. Reduced-cost fixing rests on
+            //
+            //     cost of any solution using arc a  >=  LP_opt + rc_a,
+            //
+            // so the sound test is `LP_opt + rc_a > UB`. Substituting
+            // `ceil(LP_opt)` for `LP_opt` shrinks the gap and drops arcs the
+            // inequality does not license: `ceil(LP_opt) + rc_a > UB` says
+            // nothing about `LP_opt + rc_a` unless the LP optimum happens to be
+            // integral, and a cut-loop LP optimum essentially never is.
+            let lp_objective = self.base_lp.as_ref().unwrap().get_dual_bound();
+            let gap = self.tree.global_primal_bound - lp_objective.min(node_dual_bound);
+            if gap > 1e-6 && lp_objective.is_finite() {
                 let num_arcs = self.graph.num_arcs() as usize;
                 let rc = &self.base_lp.as_ref().unwrap().reduced_costs;
                 let sol = &lp_solution;

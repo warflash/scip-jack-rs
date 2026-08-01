@@ -51,6 +51,10 @@ pub struct LpRelaxation {
     pub solve_time_secs: f64,
     /// Number of model rebuilds triggered by cut-pool pruning.
     pub rebuilds: u64,
+    /// Column index of the activation variable of each vertex id, when the
+    /// vertex exists. Exposed so a separator can read `s` off a solution and
+    /// write rows over it; see `separation::activation_rank`.
+    pub node_col: Vec<Option<u32>>,
 
     /// Column description: (objective coefficient, lower bound, upper bound).
     col_cost: Vec<f64>,
@@ -179,6 +183,17 @@ impl LpRelaxation {
             b.add_col(objective[i], 0.0, 1.0);
         }
 
+        // Activation columns come first, because the in-degree rows below are
+        // stated against them.
+        let terminal_set: std::collections::HashSet<NodeId> = terminals.iter().copied().collect();
+        let max_node_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) as usize;
+        let mut s_col: Vec<Option<u32>> = vec![None; max_node_id + 1];
+        for node in &graph.nodes {
+            let fixed = terminal_set.contains(&node.id) || node.id == root;
+            let (lb, ub) = if fixed { (1.0, 1.0) } else { (0.0, 1.0) };
+            s_col[node.id as usize] = Some(b.add_col(0.0, lb, ub));
+        }
+
         let in_arcs = |v: NodeId| -> Vec<u32> {
             graph.delta_minus(v).iter().map(|&(_, a)| a).collect()
         };
@@ -197,9 +212,42 @@ impl LpRelaxation {
             b.add_row(1.0, 1.0, in_arcs(t).into_iter().map(|a| (a, 1.0)).collect());
         }
 
-        // (3c) at most one arc enters a Steiner node.
+        // (3c) a Steiner node is entered exactly as often as it is active:
+        //
+        //     y(delta^-(v)) = s_v      for every non-root vertex.
+        //
+        // Valid because an arborescence gives every non-root vertex it contains
+        // exactly one parent and every vertex it omits none, which is precisely
+        // what `s_v` records.
+        //
+        // This replaces `y(delta^-(v)) <= 1`, and the difference is the whole
+        // point. With the weak version the model can leave a vertex half active
+        // while routing a full unit of flow through it, and `s` becomes a free
+        // variable that the objective never sees. With the equality, `s` is
+        // determined by `y`.
+        //
+        // It is also what makes the activation-rank family redundant rather than
+        // missing. For a set `U` holding a terminal but not the root,
+        //
+        //     x(E(U)) = sum_{v in U} y(delta^-(v)) - y(delta^-(U))
+        //             = s(U) - y(delta^-(U))
+        //             <= s(U) - 1,
+        //
+        // the last step being the Steiner cut on `U`, which the max-flow
+        // separator already produces exactly. So every rank inequality anchored
+        // at a terminal follows from this row plus a connectivity row, and the
+        // separate rank separator has nothing left to contribute -- which is
+        // exactly what it measured before this row existed: it found violated
+        // rows by the dozen and moved the bound by nothing, because the rows it
+        // found were the ones this equality was failing to imply.
         for &v in steiner_nodes {
-            b.add_row(0.0, 1.0, in_arcs(v).into_iter().map(|a| (a, 1.0)).collect());
+            let mut row: Vec<(u32, f64)> = in_arcs(v).into_iter().map(|a| (a, 1.0)).collect();
+            if let Some(sv) = s_col[v as usize] {
+                row.push((sv, -1.0));
+                b.add_row(0.0, 0.0, row);
+            } else {
+                b.add_row(0.0, 1.0, row);
+            }
         }
 
         // (4) flow balance: an entered Steiner node must be left.
@@ -233,14 +281,6 @@ impl LpRelaxation {
         }
 
         // FC-BCR block.
-        let terminal_set: std::collections::HashSet<NodeId> = terminals.iter().copied().collect();
-        let max_node_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) as usize;
-        let mut s_col: Vec<Option<u32>> = vec![None; max_node_id + 1];
-        for node in &graph.nodes {
-            let fixed = terminal_set.contains(&node.id) || node.id == root;
-            let (lb, ub) = if fixed { (1.0, 1.0) } else { (0.0, 1.0) };
-            s_col[node.id as usize] = Some(b.add_col(0.0, lb, ub));
-        }
 
         // A tree on k used vertices has exactly k-1 edges. This single dense row
         // carries a large share of the FC-BCR strength: without it the root gaps
@@ -301,6 +341,7 @@ impl LpRelaxation {
         let var_ub = vec![1.0; num_arcs as usize];
 
         let mut lp = Self {
+            node_col: s_col.clone(),
             num_vars: num_arcs,
             objective,
             solution: vec![0.0; b.col_cost.len()],
@@ -480,6 +521,17 @@ impl LpRelaxation {
     pub fn add_cut(&mut self, arc_ids: &[ArcId], coefficients: &[f64], rhs: f64) {
         let entries = arc_ids.iter().zip(coefficients).map(|(&a, &c)| (a, c)).collect();
         self.push_cut(RowData { entries, lo: rhs, hi: f64::INFINITY });
+    }
+
+    /// Add a general `<= hi` row over arbitrary columns, arc or activation.
+    ///
+    /// Column indices below `num_vars` are arcs; the rest are the activation
+    /// columns published by [`LpRelaxation::node_col`].
+    pub fn add_upper_cut(&mut self, entries: Vec<(u32, f64)>, hi: f64) {
+        if entries.is_empty() {
+            return;
+        }
+        self.push_cut(RowData { entries, lo: f64::NEG_INFINITY, hi });
     }
 
     /// Add a cycle inequality `sum_{e in C} (y_uv + y_vu) <= |C| - 1`.
@@ -801,5 +853,151 @@ mod tests {
         assert_eq!(lp.num_cuts(), 1, "the binding Steiner cut must survive");
         let after = lp.solve();
         assert!((baseline - after).abs() < 1e-9, "pruning changed the bound");
+    }
+}
+
+/// Formulation validity: every Steiner tree must satisfy every row of the model.
+///
+/// A separator that emits an invalid row is caught by the harnesses in
+/// `separation`; nothing was checking the structural rows themselves, and a bad
+/// one there is worse -- it is in the model from the first solve, at every node,
+/// and it silently raises the dual bound above the optimum.
+#[cfg(test)]
+mod formulation_validity {
+    use super::*;
+    use crate::graph::{NodeType, UndirectedGraph};
+    use std::collections::{HashSet, VecDeque};
+
+    /// Check the incidence vector of every Steiner tree against every row.
+    fn check(g: &UndirectedGraph, terminals: &[NodeId], root: NodeId) -> Vec<String> {
+        let dg = DirectedGraph::from_undirected(g);
+        let tset: HashSet<NodeId> = terminals.iter().copied().collect();
+        let steiner: Vec<NodeId> =
+            dg.nodes.iter().map(|n| n.id).filter(|v| !tset.contains(v) && *v != root).collect();
+        let lp = LpRelaxation::from_formulation(&dg, root, terminals, &steiner);
+
+        let n = dg.nodes.iter().map(|x| x.id).max().unwrap_or(0) as usize + 1;
+        let m = dg.arcs.len() / 2;
+        let mut bad = Vec::new();
+
+        for mask in 0u32..(1u32 << m) {
+            let mut adj: Vec<Vec<(NodeId, ArcId)>> = vec![Vec::new(); n];
+            let mut count = 0usize;
+            for p in 0..m {
+                if mask >> p & 1 == 1 {
+                    let (f, r) = (&dg.arcs[2 * p], &dg.arcs[2 * p + 1]);
+                    adj[f.tail as usize].push((f.head, f.id));
+                    adj[f.head as usize].push((f.tail, r.id));
+                    count += 1;
+                }
+            }
+            let mut seen = vec![false; n];
+            let mut point = vec![0.0f64; lp.col_cost.len()];
+            let mut used = 0usize;
+            let mut queue = VecDeque::new();
+            seen[root as usize] = true;
+            queue.push_back(root);
+            while let Some(x) = queue.pop_front() {
+                for &(y, arc) in &adj[x as usize] {
+                    if seen[y as usize] {
+                        continue;
+                    }
+                    seen[y as usize] = true;
+                    point[arc as usize] = 1.0;
+                    used += 1;
+                    queue.push_back(y);
+                }
+            }
+            if used != count || !terminals.iter().all(|&t| seen[t as usize]) {
+                continue;
+            }
+            // The no-leaf and flow-balance rows are stated for inclusion-minimal
+            // trees, which is legitimate under non-negative costs but means the
+            // model does not have to accept a tree with a Steiner leaf. Only
+            // pruned trees are in scope here.
+            let mut deg = vec![0usize; n];
+            for p in 0..m {
+                if mask >> p & 1 == 1 {
+                    deg[dg.arcs[2 * p].tail as usize] += 1;
+                    deg[dg.arcs[2 * p].head as usize] += 1;
+                }
+            }
+            let pruned = (1..n).all(|v| {
+                !seen[v] || tset.contains(&(v as NodeId)) || v as NodeId == root || deg[v] >= 2
+            });
+            if !pruned {
+                continue;
+            }
+            for v in 1..n {
+                if seen[v] {
+                    if let Some(Some(c)) = lp.node_col.get(v) {
+                        point[*c as usize] = 1.0;
+                    }
+                }
+            }
+
+            let rows = lp.structural.iter().chain(lp.lazy.iter());
+            for (i, row) in rows.enumerate() {
+                let act: f64 = row.entries.iter().map(|&(c, k)| k * point[c as usize]).sum();
+                if act < row.lo - 1e-6 || act > row.hi + 1e-6 {
+                    bad.push(format!(
+                        "row {i} [{}, {}] has activity {act} at a valid tree with {count} edges",
+                        row.lo, row.hi
+                    ));
+                    if bad.len() > 3 {
+                        return bad;
+                    }
+                }
+            }
+            // Column bounds too: `s` on an unused Steiner vertex must be allowed
+            // to be zero, and every fixed column must accept its value.
+            for c in 0..lp.col_cost.len() {
+                let (lo, hi) = (lp.col_lb_base[c], lp.col_ub_base[c]);
+                if point[c] < lo - 1e-6 || point[c] > hi + 1e-6 {
+                    bad.push(format!("column {c} value {} outside [{lo}, {hi}]", point[c]));
+                    if bad.len() > 3 {
+                        return bad;
+                    }
+                }
+            }
+        }
+        bad
+    }
+
+    #[test]
+    fn every_steiner_tree_satisfies_every_structural_row() {
+        let mut seed = 0x0DDB_A11C_0FFE_E123u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        for _ in 0..400 {
+            let n = 4 + (rng() % 6) as u32;
+            let mut g = UndirectedGraph::new(n);
+            let k = 2 + (rng() % 3) as u32;
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = v <= k;
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 4 != 0 {
+                        g.add_edge(u, v, 1.0 + (rng() % 5) as f64);
+                    }
+                }
+            }
+            if g.edges.is_empty() || g.edges.len() > 17 {
+                continue;
+            }
+            let bad = check(&g, &terminals, terminals[0]);
+            assert!(bad.is_empty(), "formulation cuts off a valid tree: {:#?}", bad);
+        }
     }
 }

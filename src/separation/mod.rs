@@ -1,8 +1,10 @@
+pub mod activation_rank;
 mod flow_cuts;
 mod cycle_cuts;
 mod partition;
 mod tf_cuts;
 
+pub use activation_rank::{ActivationRankSeparator, ArCut};
 pub use flow_cuts::{FlowCutSeparator, SteinerCut};
 pub use cycle_cuts::{CycleCutSeparator, CycleCut};
 pub use partition::{PartitionSeparator, PartitionCut};

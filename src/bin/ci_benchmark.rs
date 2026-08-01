@@ -101,6 +101,7 @@ fn solve_case(
         preprocess: true,
         cycle_cuts: true,
         partition_cuts: true,
+        activation_rank_cuts: false,
         tf_cuts: true,
     };
 

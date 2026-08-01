@@ -107,6 +107,7 @@ fn solve_with(path: &str, time_limit: f64, preprocess_on: bool) -> BenchResult {
         preprocess: preprocess_on,
         cycle_cuts: true,
         partition_cuts: true,
+        activation_rank_cuts: false,
         tf_cuts: true,
     };
 
