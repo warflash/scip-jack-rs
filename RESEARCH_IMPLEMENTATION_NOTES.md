@@ -646,40 +646,96 @@ two entries long.
 goes from unproved at 4.4 s to **proved in 1.6 s**, closed by the search itself;
 instance024's search throughput rises 40 % at equal wall clock.
 
+Measured alone, this was 136/140 in 56.6 s against 135/140 in 55.0 s: one more
+instance, slightly slower. §19 is what turned it into a clean win.
+
+### 18. The large instances were not losing to the integrality gap
+
+Before spending anything on a stronger relaxation, the unproved [155..200]
+instances were profiled for *what* the bound was made of. The answer changed the
+plan:
+
+| instance | ascent LB | reported dual | optimum | LP solves in budget | ms/solve | rows |
+|---|---|---|---|---|---|---|
+| 161 | 5138 | 5138 | 5199 | **1** | 357 | 35,527 |
+| 189 | 19742 | 19864 | 20678 | **3** | 330 | 24,035 |
+| 199 | 4836 | 4984 | 5099 | **2** | 648 | 25,955 |
+| 200 | 6203 | 6249 | 6393 | **3** | 407 | 27,064 |
+
+The dual bound on these instances *is* the dual-ascent bound plus a whisker.
+The branch-and-cut is not being beaten by the relaxation's integrality gap; it is
+solving the relaxation once or twice and running out of clock. A stronger
+relaxation would have been strictly worse. What was needed was a cheaper one.
+
+### 19. Two structural row families had collapsed into others, and were still being carried
+
+The previous round's handoff flagged this as measurable, and it is: both rows it
+named are redundant, exactly, and both were in every LP solve at every node.
+
+Everything follows from `y(δ⁻(v)) = s_v` (§6) being an *equality* rather than the
+bound it replaced.
+
+- **No-leaf.** `x(δ(v)) >= 2 s_v` with `x(δ(v)) = y(δ⁻(v)) + y(δ⁺(v))` becomes
+  `s_v + y(δ⁺(v)) >= 2 s_v`, i.e. `y(δ⁺(v)) >= s_v = y(δ⁻(v))` — the flow-balance
+  row verbatim. The two cut off the same points. It is stated only where an
+  activation column exists, which is exactly where the equality holds, so the
+  whole family goes; flow balance is the one kept, because it also covers
+  vertices with no activation column, where the argument does not run.
+  **`|V|` dense rows** — 4,136 of instance189's 19,776 structural rows.
+- **Continuation.** `y(δ⁻(v)) >= y_a` reads `s_v >= y_a`, and the edge-vertex
+  coupling `y_uv + y_vu <= s_v` is strictly stronger. The part that needed
+  proving is that the implication survives *laziness*: if a continuation row is
+  violated then `s_v = y(δ⁻(v)) < y_a <= y_uv + y_vu`, so the coupling row for
+  the same edge is violated too, and `separate_structural` scans the entire pool
+  every round. **`|A|` lazy rows** of width `indeg + 1`, scanned per round for
+  nothing.
+
+Neither removal can change any LP value, so this is not a bound trade. It is
+purely the cost of carrying them.
+
+**Measured.** Instance161's LP goes from 357 ms to 72 ms a solve, and from one
+solve in its budget to six. Instance189's structural block drops from 24,035 rows
+to 19,863.
+
 ### Round summary
 
 | slice | round 3 | now |
 |---|---|---|
-| PACE Track 1 [1..140] @3 s | 135/140, 55.0 s | **136/140, 56.6 s** |
-| PACE Track 1 [155..200] @5 s | 21/46, 153.4 s | 20/46, 158.2 s |
-| SteinLib B @5 s | 18/18, 1.2 s | 18/18, 1.7 s |
-| SteinLib C @5 s | 20/20, 4.4 s | 20/20, 4.7 s |
+| PACE Track 1 [1..140] @3 s | 135/140, 55.0 s | **137/140, 51.9 s** |
+| PACE Track 1 [155..200] @5 s | 21/46, 153.4 s | 21/46, 153.7 s |
+| SteinLib B @5 s | 18/18, 1.2 s | 18/18, 1.6 s |
+| SteinLib C @5 s | 20/20, 4.4 s | 20/20, 4.9 s |
 | SteinLib D @5 s | 20/20, 15.3 s | 20/20, 15.7 s |
+| SteinLib E @20 s | 18/20, 104.0 s | **19/20, 92.2 s** |
 
-The remaining gaps on [1..140] narrowed as well — 024 from 0.285 % to 0.228 %,
-086 from 3.77 % to 2.37 % — and no instance reports a proved value that
-disagrees with its reference optimum. The [155..200] move is one instance on
-forty-six, which this file's own measurement discipline calls noise; nothing in
-this round touches those instances, whose terminal counts are far outside the
-search's 32-bit state.
+Two more on Track 1 [1..140] *and* faster, one more on SteinLib E and 11 % faster.
+The [1..140] survivors are 24, 86, 87; 25 and 26 now close. No instance reports a
+proved value that disagrees with its reference optimum.
 
 ### What this round says about the next step
 
-Sections 15 and 17 point the same way. The goal-directed search on the
-instances it cannot close is limited by the strength of its potential, the
-potential is a dual-ascent packing, and the ascent is *provably maximal* — no
-combinatorial step can improve it. Meanwhile the LP on the same relaxation
-reaches materially further (087: ~35 against the ascent's 31, optimum 36).
+Sections 15 and 17 point the same way for the *search*: it is limited by the
+strength of its potential, the potential is a dual-ascent packing, and the ascent
+is *provably maximal* — no combinatorial step can improve it. Meanwhile the LP on
+the same relaxation reaches materially further (087: ~35 against the ascent's 31,
+optimum 36).
 
-That makes one thing well-posed and worth doing: **certify a cut packing out of
-the LP's own dual.** The connectivity rows `y(δ⁻(W)) >= 1` carry explicit sets
-`W` and duals `λ_W >= 0`. Compute `load(a) = sum { λ_W : a ∈ δ⁻(W) }` and
+That makes one thing well-posed: **certify a cut packing out of the LP's own
+dual.** The connectivity rows `y(δ⁻(W)) >= 1` carry explicit sets `W` and duals
+`λ_W >= 0`. Compute `load(a) = sum { λ_W : a ∈ δ⁻(W) }` and
 `μ = max_a load(a)/c(a)`; then `λ / max(μ, 1)` satisfies the packing condition by
 construction and is a valid `PackingPotential` for the same root, of value
 `(sum λ_W) / max(μ, 1)`. Nothing about it needs to be trusted — the scaling makes
 it feasible whatever the other row families' duals are doing. The cost is a
 pipeline reordering: the root LP would have to run before the search rather than
 after it.
+
+For the *large* instances, §18 says the target is throughput of the existing
+relaxation, not a stronger one, until the LP can be solved enough times for its
+own bound to be the binding constraint. Only then does §6 of the scratchpad —
+hypergraphic component pricing — become the right next object. Instance189 now
+spends 1.5 s of 2.5 s outside the LP, in separation, which is where the next
+measurement should go.
 
 ---
 

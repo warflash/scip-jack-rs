@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::branch_and_bound::{BranchAndCutSolver, SolveStatus, SolverConfig};
 use crate::graph::algorithms::{
-    dijkstra_steiner, dijkstra_steiner_guided, dreyfus_wagner, dual_ascent_packing, ArcIndex,
+    dijkstra_steiner_guided, dreyfus_wagner, dual_ascent_packing, ArcIndex,
 };
 use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, SteinerInstance, UndirectedGraph};
 use crate::io;

@@ -162,12 +162,16 @@ impl LpRelaxation {
     /// Build the rooted directed-cut model.
     ///
     /// Structural rows:
-    /// - `y(delta^-(r)) = 0`, `y(delta^-(t)) = 1` for terminals, `y(delta^-(v)) <= 1` else;
+    /// - `y(delta^-(r)) = 0`, `y(delta^-(t)) = 1` for terminals,
+    ///   `y(delta^-(v)) = s_v` for the rest;
     /// - flow balance `y(delta^-(v)) <= y(delta^+(v))` for Steiner nodes;
-    /// - continuation `y(delta^-(v)) >= y_a` for every `a` leaving a Steiner node;
     /// - anti-symmetry `y_uv + y_vu <= 1`;
-    /// - the FC-BCR block (activation variables, vertex counting, no-leaf,
-    ///   edge-vertex coupling) from section 11.1 of the research memo.
+    /// - the FC-BCR block (activation variables, vertex counting, edge-vertex
+    ///   coupling) from section 11.1 of the research memo.
+    ///
+    /// The continuation and no-leaf rows are *not* here. Both became redundant
+    /// when `y(delta^-(v)) = s_v` was strengthened from an inequality to an
+    /// equality; the proofs are inline below, at the places they used to sit.
     pub fn from_formulation(
         graph: &DirectedGraph,
         root: NodeId,
@@ -257,16 +261,19 @@ impl LpRelaxation {
             b.add_row(f64::NEG_INFINITY, 0.0, row);
         }
 
-        // (5) continuation: an arc may leave a Steiner node only if one enters.
-        // One row per arc, each of width `indeg + 1`; separated on demand.
-        for &v in steiner_nodes {
-            let ins = in_arcs(v);
-            for out in out_arcs(v) {
-                let mut row: Vec<(u32, f64)> = ins.iter().map(|&a| (a, 1.0)).collect();
-                row.push((out, -1.0));
-                b.add_lazy(0.0, f64::INFINITY, row);
-            }
-        }
+        // The continuation rows `y(delta^-(v)) >= y_a`, one per arc leaving a
+        // Steiner node, used to live here. Given (3c) they read `s_v >= y_a`,
+        // and the edge-vertex coupling below says `y_uv + y_vu <= s_v` for the
+        // underlying edge, which is strictly stronger. So continuation is
+        // implied by two rows the model already carries.
+        //
+        // That the implication survives *lazily* is the part worth stating: if a
+        // continuation row is violated at some point then
+        // `s_v = y(delta^-(v)) < y_a <= y_uv + y_vu`, so the coupling row for
+        // that edge is violated too, and `separate_structural` scans the whole
+        // pool every round and admits it. The lazy pool loses `|A|` rows of
+        // width `indeg + 1` — on PACE instance189, 14,880 rows scanned per
+        // separation round for nothing.
 
         // Anti-symmetry: at most one orientation of each edge is used.
         //
@@ -298,17 +305,23 @@ impl LpRelaxation {
             b.add_row(-1.0, -1.0, row);
         }
 
-        // No-leaf: a used Steiner node has undirected degree at least two. Valid
-        // for inclusion-minimal trees, and with non-negative costs some optimum is
-        // inclusion-minimal.
-        for &v in steiner_nodes {
-            if let Some(sv) = s_col[v as usize] {
-                let mut row: Vec<(u32, f64)> = in_arcs(v).into_iter().map(|a| (a, 1.0)).collect();
-                row.extend(out_arcs(v).into_iter().map(|a| (a, 1.0)));
-                row.push((sv, -2.0));
-                b.add_row(0.0, f64::INFINITY, row);
-            }
-        }
+        // The no-leaf row `x(delta(v)) >= 2 s_v` used to live here — a used
+        // Steiner node has undirected degree at least two, valid for
+        // inclusion-minimal trees. It has collapsed into the flow-balance row.
+        //
+        // `x(delta(v)) = y(delta^-(v)) + y(delta^+(v))`, and (3c) is the
+        // *equality* `y(delta^-(v)) = s_v` wherever an activation column exists
+        // — which is wherever the no-leaf row was stated at all. So
+        //
+        //     x(delta(v)) - 2 s_v >= 0
+        //       <=>  s_v + y(delta^+(v)) - 2 s_v >= 0
+        //       <=>  y(delta^+(v)) >= s_v = y(delta^-(v)),
+        //
+        // which is row (4) verbatim. The two cut off exactly the same points, so
+        // one of them was pure carrying cost: `|V|` dense rows, 4,136 of the
+        // 19,776 structural rows on PACE instance189, in every solve at every
+        // node. Row (4) is the one kept, because it also covers Steiner nodes
+        // that have no activation column, where the argument above does not run.
 
         // Edge-vertex coupling: using an edge activates both endpoints.
         // Two rows per edge; separated on demand.
