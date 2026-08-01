@@ -7,7 +7,7 @@ pub mod sph;
 
 pub use constructive::ConstructiveHeuristic;
 pub use sph::{best_of_starts, shortest_path_heuristic, SphResult, SphWorkspace};
-pub use ils::{iterated_local_search, IlsWorkspace};
+pub use ils::{iterated_local_search, IlsStats, IlsWorkspace};
 pub use local_search::LocalSearchHeuristic;
 pub use recombination::RecombinationHeuristic;
 

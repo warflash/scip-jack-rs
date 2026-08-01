@@ -131,16 +131,19 @@ pub fn iterated_local_search(
     ws: &mut IlsWorkspace,
     sws: &mut SphWorkspace,
     kws: &mut KeyPathWorkspace,
-) -> SphResult {
+) -> (SphResult, IlsStats) {
     let num_arcs = idx.num_arcs();
     if ws.weights.len() < num_arcs {
         ws.weights.resize(num_arcs, 0.0);
         ws.in_best.resize(num_arcs, false);
     }
 
+    let mut stats = IlsStats::default();
     let mut best = polish(idx, active, root, seed, is_terminal, sws, kws);
+    stats.seed_cost = best.cost;
     if terminals.len() < 2 {
-        return best;
+        stats.final_cost = best.cost;
+        return (best, stats);
     }
 
     let expired = || deadline.is_some_and(|d| Instant::now() >= d);
@@ -189,16 +192,28 @@ pub fn iterated_local_search(
         let merged = mst_prune(idx, active, root, &ws.nodes, is_terminal, sws)
             .map(|m| polish(idx, active, root, m, is_terminal, sws, kws));
 
+        stats.iterations += 1;
         stalled += 1;
         for r in [Some(candidate), merged].into_iter().flatten() {
             if r.cost < best.cost - 1e-9 {
                 best = r;
                 stalled = 0;
+                stats.improvements += 1;
             }
         }
     }
 
-    best
+    stats.final_cost = best.cost;
+    (best, stats)
+}
+
+/// What the loop did, for the solver's own reporting.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IlsStats {
+    pub iterations: u32,
+    pub improvements: u32,
+    pub seed_cost: Cost,
+    pub final_cost: Cost,
 }
 
 fn polish(
@@ -287,7 +302,7 @@ mod tests {
         )
         .expect("feasible");
 
-        let best = iterated_local_search(
+        let (best, _) = iterated_local_search(
             &idx, &active, 1, &terminals, &is_t, seed, 0.0, 400, None, &mut ws, &mut sws, &mut kws,
         );
         assert!((best.cost - 3.0).abs() < 1e-9, "expected 3, got {}", best.cost);
@@ -338,7 +353,7 @@ mod tests {
                 continue;
             };
             let before = seed.cost;
-            let best = iterated_local_search(
+            let (best, _) = iterated_local_search(
                 &idx, &active, terminals[0], &terminals, &is_t, seed, 0.0, 200, None, &mut ws,
                 &mut sws, &mut kws,
             );

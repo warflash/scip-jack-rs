@@ -41,7 +41,7 @@ use crate::graph::algorithms::{
 use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, NodeId, NodeType, UndirectedGraph};
 use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
 use crate::heuristics::sph::{shortest_path_heuristic, SphResult, SphWorkspace};
-use crate::heuristics::{iterated_local_search, IlsWorkspace};
+use crate::heuristics::{iterated_local_search, IlsStats, IlsWorkspace};
 use crate::preprocessing::preprocess_until;
 use crate::graph::SteinerInstance;
 
@@ -165,13 +165,17 @@ pub fn tighten(
 
         if config.verbose {
             eprintln!(
-                "[reduce] round {rounds}: |V|={} |E|={} LB={:.1} UB={:.1} kill {}n/{}e",
+                "[reduce] round {rounds}: |V|={} |E|={} LB={:.1} UB={:.1} kill {}n/{}e                  | ils {} iters, {} gains, {:.1} -> {:.1}",
                 graph.num_nodes,
                 graph.edges.len(),
                 lower_bound,
                 upper_bound,
                 outcome.dead_nodes.len(),
                 outcome.dead_edges.len(),
+                outcome.ils.iterations,
+                outcome.ils.improvements,
+                outcome.ils.seed_cost,
+                outcome.ils.final_cost,
             );
         }
 
@@ -239,6 +243,7 @@ struct RoundOutcome {
     root: NodeId,
     dead_nodes: Vec<NodeId>,
     dead_edges: Vec<u32>,
+    ils: IlsStats,
 }
 
 /// One ascent/heuristic/elimination pass over a fixed graph.
@@ -267,12 +272,9 @@ fn round(
     let roots = root_candidates(terminals, config.roots_per_round);
     let primary = *roots.first().unwrap_or(&terminals[0]);
 
-    // Every constructed tree goes through key-path exchange before it is scored.
-    // The construction heuristic alone lands several percent above the optimum on
-    // the larger instances, and on those the reduced-cost eliminations are driven
-    // entirely by how tight the incumbent is.
-    let mut upper_bound = incoming_ub;
-    let mut incumbent_arcs: Option<Vec<u32>> = None;
+    // Every constructed tree goes through key-path exchange before it is scored:
+    // the construction alone lands several percent above the optimum on the
+    // larger instances.
     let mut pool: Vec<(Cost, Vec<NodeId>)> = Vec::new();
 
     let polish = |r: SphResult,
@@ -297,69 +299,55 @@ fn round(
     });
     let primal_expired = || primal_deadline.is_some_and(|d| Instant::now() >= d);
 
-    // Two primal phases sharing the budget.
+    // Order matters here, and it is the whole point of the round.
     //
-    // First a spread of greedy starts. They are diverse in a way perturbation is
-    // not — a different terminal goes first, so the tree grows from a different
-    // corner of the graph — and they populate the pool the recombination at the
-    // end of this function draws on.
+    // Elimination power is exactly `UB - LB`, so nothing may be eliminated until
+    // the best available upper bound exists. And the best upper bound is not the
+    // one greedy construction produces against the true costs: on PACE
+    // instance161 the best of twenty-five such starts, key-path-polished, costs
+    // 7,090 against an optimum of 5,199, while the *same* construction run
+    // against the dual ascent's reduced costs reaches 5,354. Arcs the dual leaves
+    // tight are the arcs a good tree wants; that is what the reduced costs are.
     //
-    // Then iterated local search from the best of them, which is what closes the
-    // last one or two percent. The split is even: the greedy starts saturate
-    // quickly, and past that point every remaining second is worth more to the
-    // perturb-and-merge loop.
-    let mut seed: Option<SphResult> = None;
+    // So the round runs: a cheap greedy seed, then the ascents and the guided
+    // construction they enable, then iterated local search from the best of
+    // everything, and only then the eliminations — against a bound that has had
+    // every chance to come down first.
+    let mut lower_bound = 0.0;
+    let mut certificate: Option<DualAscentResult> = None;
+    let mut best_root = primary;
+    let mut best_solution: Option<(SphResult, NodeId)> = None;
+
+    let offer = |r: SphResult,
+                     root: NodeId,
+                     pool: &mut Vec<(Cost, Vec<NodeId>)>,
+                     best: &mut Option<(SphResult, NodeId)>| {
+        pool.push((r.cost, nodes_of(&idx, &r.arcs, root)));
+        if best.as_ref().is_none_or(|(b, _)| r.cost < b.cost - 1e-9) {
+            *best = Some((r, root));
+        }
+    };
+
+    // A few greedy starts, mostly to populate the pool and to guarantee some
+    // feasible tree exists before the ascents run.
     for s in heuristic_starts(terminals, config.heuristic_starts) {
         if primal_expired() {
             break;
         }
-        if let Some(r) =
-            shortest_path_heuristic(&idx, &active, &true_costs, primary, s, terminals, &is_terminal, &mut ws)
-        {
+        if let Some(r) = shortest_path_heuristic(
+            &idx, &active, &true_costs, primary, s, terminals, &is_terminal, &mut ws,
+        ) {
             let r = polish(r, primary, &mut kws, &mut ws);
-            pool.push((r.cost, nodes_of(&idx, &r.arcs, primary)));
-            if seed.as_ref().is_none_or(|b| r.cost < b.cost) {
-                seed = Some(r);
-            }
+            offer(r, primary, &mut pool, &mut best_solution);
         }
     }
 
-    let mut ils_ws = IlsWorkspace::new(num_arcs);
-    if let Some(s) = seed {
-        let best = iterated_local_search(
-            &idx,
-            &active,
-            primary,
-            terminals,
-            &is_terminal,
-            s,
-            incoming_lb,
-            config.ils_iterations,
-            primal_deadline,
-            &mut ils_ws,
-            &mut ws,
-            &mut kws,
-        );
-        pool.push((best.cost, nodes_of(&idx, &best.arcs, primary)));
-        if best.cost < upper_bound - 1e-9 {
-            upper_bound = best.cost;
-            incumbent_arcs = Some(best.arcs);
-        }
-    }
-
-    let mut lower_bound = 0.0;
-    let mut certificate: Option<DualAscentResult> = None;
-    let mut best_root = primary;
-    let mut dead_nodes: Vec<NodeId> = Vec::new();
-    let mut dead_edges: Vec<u32> = Vec::new();
-    let mut edge_dead = vec![false; num_edges];
-    let mut node_dead = vec![false; idx.num_nodes()];
-
+    // The ascents. Certificates are kept so the eliminations can run afterwards,
+    // once the upper bound has finished improving.
+    let mut ascents: Vec<(NodeId, DualAscentResult)> = Vec::new();
     for &r in &roots {
-        if let Some(d) = config.deadline {
-            if Instant::now() >= d {
-                break;
-            }
+        if expired() {
+            break;
         }
         let da = dual_ascent_masked(&idx, r, terminals, &active);
         if da.lower_bound > lower_bound {
@@ -368,58 +356,45 @@ fn round(
             best_root = r;
         }
 
-        // Reduced costs make an excellent search metric: arcs the dual leaves
-        // tight are exactly the ones a good solution wants.
         for s in heuristic_starts(terminals, config.heuristic_starts.min(4)) {
             if expired() {
                 break;
             }
             if let Some(sol) = shortest_path_heuristic(
-                &idx,
-                &active,
-                &da.reduced_costs,
-                r,
-                s,
-                terminals,
-                &is_terminal,
-                &mut ws,
+                &idx, &active, &da.reduced_costs, r, s, terminals, &is_terminal, &mut ws,
             ) {
                 let sol = polish(sol, r, &mut kws, &mut ws);
-                pool.push((sol.cost, nodes_of(&idx, &sol.arcs, r)));
-                if sol.cost < upper_bound - 1e-9 {
-                    upper_bound = sol.cost;
-                    incumbent_arcs = Some(sol.arcs);
-                }
+                offer(sol, r, &mut pool, &mut best_solution);
             }
         }
+        ascents.push((r, da));
+    }
 
-        if !upper_bound.is_finite() {
-            continue;
-        }
-
-        let dists = reduced_cost_distances(&idx, r, terminals, &da.reduced_costs, &active);
-        let fix = reduced_cost_fixings(&idx, r, terminals, &da, &dists, &active, upper_bound);
-
-        // Undirected conclusions only — see the module comment on why arc-level
-        // fixings from different roots must not be combined.
-        let mut arc_dead = vec![false; num_arcs];
-        for &a in &fix.arcs {
-            arc_dead[a as usize] = true;
-        }
-        for e in 0..num_edges {
-            if edge_dead[e] {
-                continue;
-            }
-            if arc_dead[2 * e] && arc_dead[2 * e + 1] {
-                edge_dead[e] = true;
-                dead_edges.push(e as u32);
-            }
-        }
-        for &v in &fix.nodes {
-            if !node_dead[v as usize] {
-                node_dead[v as usize] = true;
-                dead_nodes.push(v);
-            }
+    // Iterated local search from the best tree anyone found, guided or not.
+    let mut ils_ws = IlsWorkspace::new(num_arcs);
+    let mut ils_stats = IlsStats::default();
+    let mut upper_bound = incoming_ub;
+    let mut incumbent_arcs: Option<Vec<u32>> = None;
+    if let Some((s, r)) = best_solution.take() {
+        let (best, st) = iterated_local_search(
+            &idx,
+            &active,
+            r,
+            terminals,
+            &is_terminal,
+            s,
+            incoming_lb.max(lower_bound),
+            config.ils_iterations,
+            config.deadline,
+            &mut ils_ws,
+            &mut ws,
+            &mut kws,
+        );
+        ils_stats = st;
+        pool.push((best.cost, nodes_of(&idx, &best.arcs, r)));
+        if best.cost < upper_bound - 1e-9 {
+            upper_bound = best.cost;
+            incumbent_arcs = Some(best.arcs);
         }
     }
 
@@ -455,6 +430,45 @@ fn round(
         }
     }
 
+    // Eliminate last, against the bound every phase above has been improving.
+    //
+    // Each ascent proves, for its own root `r`, that no `r`-arborescence cheaper
+    // than `upper_bound` uses a given arc. Only the purely undirected conclusion
+    // — both orientations excluded by the *same* root — may be unioned across
+    // roots; see the module comment for the counterexample.
+    let mut dead_nodes: Vec<NodeId> = Vec::new();
+    let mut dead_edges: Vec<u32> = Vec::new();
+    let mut edge_dead = vec![false; num_edges];
+    let mut node_dead = vec![false; idx.num_nodes()];
+    let mut arc_dead = vec![false; num_arcs];
+
+    if upper_bound.is_finite() {
+        for (r, da) in &ascents {
+            if expired() {
+                break;
+            }
+            let dists = reduced_cost_distances(&idx, *r, terminals, &da.reduced_costs, &active);
+            let fix = reduced_cost_fixings(&idx, *r, terminals, da, &dists, &active, upper_bound);
+
+            arc_dead.iter_mut().for_each(|f| *f = false);
+            for &a in &fix.arcs {
+                arc_dead[a as usize] = true;
+            }
+            for e in 0..num_edges {
+                if !edge_dead[e] && arc_dead[2 * e] && arc_dead[2 * e + 1] {
+                    edge_dead[e] = true;
+                    dead_edges.push(e as u32);
+                }
+            }
+            for &v in &fix.nodes {
+                if !node_dead[v as usize] {
+                    node_dead[v as usize] = true;
+                    dead_nodes.push(v);
+                }
+            }
+        }
+    }
+
     RoundOutcome {
         lower_bound,
         upper_bound,
@@ -463,6 +477,7 @@ fn round(
         root: best_root,
         dead_nodes,
         dead_edges,
+        ils: ils_stats,
     }
 }
 
