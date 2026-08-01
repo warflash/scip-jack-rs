@@ -3,9 +3,14 @@ use std::time::Instant;
 
 use crate::graph::{costs_are_integral, tighten_dual, DirectedGraph, NodeId, ArcId, Cost};
 use crate::graph::algorithms::{
-    dual_ascent, dual_ascent_masked, reduced_cost_distances, reduced_cost_fixable_arcs,
+    dual_ascent_cuts, dual_ascent_masked, reduced_cost_distances, reduced_cost_fixable_arcs,
     reduced_cost_fixings, ArcIndex,
 };
+
+/// Arc entries the root ascent may contribute to the initial cut pool. Sized so
+/// the seeded rows stay comparable to the structural model rather than dwarfing
+/// it; beyond that the LP costs more per solve than the bound is worth.
+const ASCENT_CUT_NNZ: usize = 400_000;
 use crate::model::{LpRelaxation, LpStatus, SteinerSolution};
 use crate::separation::{FlowCutSeparator, CycleCutSeparator, PartitionSeparator, TfCutSeparator};
 use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
@@ -220,7 +225,11 @@ impl BranchAndCutSolver {
         // exchange and recombination — and handed the result over through
         // `seed_bounds`/`seed_incumbent`. Repeating a weaker search would only
         // burn the time budget before the first LP is ever solved.
-        let da_result = dual_ascent(&self.graph, self.root, &self.terminals);
+        let da_result = {
+            let idx = self.arc_index.as_ref().unwrap();
+            let active = vec![true; idx.num_arcs()];
+            dual_ascent_cuts(idx, self.root, &self.terminals, &active, ASCENT_CUT_NNZ)
+        };
         let da_bound = self.lift(da_result.lower_bound);
         if da_bound > self.tree.global_dual_bound {
             self.tree.global_dual_bound = da_bound;
@@ -245,13 +254,50 @@ impl BranchAndCutSolver {
         for &arc_id in &sorted_fixed {
             lp.fix_variable(arc_id, 0.0);
         }
+
+        // Install the ascent's own cut packing. These rows make the ascent's dual
+        // solution feasible for the LP, so the very first LP solve returns a bound
+        // at least as strong as the ascent's — instead of starting from a
+        // relaxation with no connectivity requirement at all and separating its
+        // way back up one max-flow at a time.
+        let mut seeded = 0usize;
+        for cut in &da_result.cuts {
+            if cut.iter().any(|a| self.fixed_zero_arcs.contains(a)) {
+                // A cut whose arcs this solver has already deleted is still valid,
+                // but its row would be over variables pinned to zero.
+                let live: Vec<ArcId> = cut
+                    .iter()
+                    .copied()
+                    .filter(|a| !self.fixed_zero_arcs.contains(a))
+                    .collect();
+                if live.is_empty() {
+                    continue;
+                }
+                let mut sig = live.clone();
+                sig.sort_unstable();
+                if self.cut_signatures.insert(sig) {
+                    lp.add_steiner_cut(&live);
+                    seeded += 1;
+                }
+                continue;
+            }
+            let mut sig = cut.clone();
+            sig.sort_unstable();
+            if self.cut_signatures.insert(sig) {
+                lp.add_steiner_cut(cut);
+                seeded += 1;
+            }
+        }
+        self.total_cuts_added += seeded as u64;
+
         lp.snapshot_base();
         self.base_lp = Some(lp);
 
         if self.config.verbose {
             eprintln!(
-                "[B&C] Initial primal: {:.1} | DA lower bound: {:.1} | Fixed arcs: {}",
+                "[B&C] Initial primal: {:.1} | DA lower bound: {:.1} | Fixed arcs: {} | Seeded cuts: {}",
                 self.tree.global_primal_bound, da_result.lower_bound, self.fixed_zero_arcs.len(),
+                seeded,
             );
         }
 
@@ -454,6 +500,7 @@ impl BranchAndCutSolver {
         self.deadline.is_some_and(|d| Instant::now() >= d)
     }
 
+
     fn process_node(&mut self, node_id: u64) -> NodeResult {
         let node = &self.tree.nodes[node_id as usize];
         let fixings = node.fixings.clone();
@@ -512,6 +559,20 @@ impl BranchAndCutSolver {
         let no_partition = !self.config.partition_cuts;
         let no_tf = !self.config.tf_cuts;
 
+        // The cut phase gets a share of what is left, not all of it. A
+        // branch-and-cut that never branches cannot close an integrality gap, and
+        // that is exactly what an unbounded root loop produces: on PACE
+        // instance167 — 384 vertices, 765 edges, a dual bound 25 short of the
+        // optimum — the root separated for the whole budget and the search
+        // processed one node. Separation has diminishing returns; branching does
+        // not.
+        let node_deadline = self.deadline;
+        let cut_deadline = self.deadline.map(|d| {
+            let left = d.saturating_duration_since(Instant::now());
+            Instant::now() + left.mul_f64(if is_root_node { 0.4 } else { 0.05 })
+        });
+        let cut_phase_over =
+            move || cut_deadline.is_some_and(|d| Instant::now() >= d);
         let mut prev_bound = f64::NEG_INFINITY;
         let mut stall_rounds = 0u32;
 
@@ -528,6 +589,7 @@ impl BranchAndCutSolver {
                 }
                 break;
             }
+            arm(self.base_lp.as_mut().unwrap(), node_deadline);
             let mut obj = self.base_lp.as_mut().unwrap().solve();
             self.total_lp_solves += 1;
 
@@ -559,6 +621,7 @@ impl BranchAndCutSolver {
                     break;
                 }
                 self.total_cuts_added += added as u64;
+                arm(self.base_lp.as_mut().unwrap(), node_deadline);
                 obj = self.base_lp.as_mut().unwrap().solve();
                 self.total_lp_solves += 1;
                 if !self.base_lp.as_ref().unwrap().is_optimal() {
@@ -576,6 +639,13 @@ impl BranchAndCutSolver {
             self.base_lp.as_mut().unwrap().prune_cuts();
 
             node_dual_bound = self.lift(obj);
+            if self.config.verbose && is_root_node && std::env::var_os("SJ_TRACE").is_some() {
+                eprintln!(
+                    "[root] round {_round}: lp={obj:.4} lifted={node_dual_bound:.4} rows={} cuts={}",
+                    self.base_lp.as_ref().unwrap().num_constraints(),
+                    self.base_lp.as_ref().unwrap().num_cuts(),
+                );
+            }
 
             if node_dual_bound >= self.tree.global_primal_bound - self.config.gap_tolerance {
                 return NodeResult::Pruned;
@@ -749,11 +819,20 @@ impl BranchAndCutSolver {
             for (arcs, coeffs) in &new_tf_cuts {
                 lp.add_cut(arcs, coeffs, 0.0);
             }
+
+            if cut_phase_over() {
+                break;
+            }
         }
 
+        // Both bounds are valid for this node, so the node's bound is the better
+        // of them. The ascent frequently wins on instances where separation has
+        // not caught up — dropping it here left nodes carrying a bound far below
+        // one already in hand, which is what the open queue is minimised over.
+        node_dual_bound = node_dual_bound.max(da_bound);
         self.tree.nodes[node_id as usize].dual_bound = node_dual_bound;
 
-        if self.is_integer_solution(&lp_solution) {
+        if !lp_solution.is_empty() && self.is_integer_solution(&lp_solution) {
             let solution = self.extract_solution(&lp_solution);
             if let Some(sol) = solution {
                 return NodeResult::IntegerFeasible(sol);
@@ -799,7 +878,10 @@ impl BranchAndCutSolver {
         //   - var at lb=0: rc >= 0, meaning any solution using this arc costs at least LP_bound + rc
         //   - Therefore: if LP_bound + rc > UB, this arc can never be in an optimal integer solution
         // All cuts added are globally valid, so root fixings are global.
-        if is_root_node && self.tree.global_primal_bound < f64::INFINITY {
+        if is_root_node
+            && self.tree.global_primal_bound < f64::INFINITY
+            && lp_solution.len() >= self.graph.num_arcs() as usize
+        {
             let gap = self.tree.global_primal_bound - node_dual_bound;
             if gap > 1e-6 {
                 let num_arcs = self.graph.num_arcs() as usize;
@@ -1175,6 +1257,14 @@ impl BranchAndCutSolver {
         let raised = from_queue.max(self.tree.global_dual_bound);
         self.tree.global_dual_bound = raised.min(self.tree.global_primal_bound);
     }
+}
+
+/// Hand the LP the time it actually has left, so one hard solve cannot overrun
+/// the whole budget while the cut loop waits to check the clock between solves.
+fn arm(lp: &mut LpRelaxation, deadline: Option<Instant>) {
+    lp.time_limit_secs = deadline
+        .map(|d| d.saturating_duration_since(Instant::now()).as_secs_f64())
+        .unwrap_or(f64::INFINITY);
 }
 
 enum NodeResult {

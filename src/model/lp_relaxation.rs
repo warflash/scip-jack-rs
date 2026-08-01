@@ -51,6 +51,7 @@ pub struct LpRelaxation {
     pub solve_time_secs: f64,
     /// Number of model rebuilds triggered by cut-pool pruning.
     pub rebuilds: u64,
+    pub max_solve_secs: f64,
 
     /// Column description: (objective coefficient, lower bound, upper bound).
     col_cost: Vec<f64>,
@@ -69,6 +70,20 @@ pub struct LpRelaxation {
     cuts: Vec<CutRow>,
     /// Row budget before pruning is attempted.
     row_budget: usize,
+
+    /// Set by [`LpRelaxation::rebuild`] and cleared by the next solve. A model
+    /// with no basis is a cold start, and cold starts want presolve; warm ones do
+    /// not, because presolve runs afresh on every `run()` and throws the basis
+    /// away.
+    cold: bool,
+    /// Seconds a single LP solve may take, or infinity. A root model seeded with
+    /// a few thousand connectivity rows is a genuinely hard LP — on PACE
+    /// instance151 one solve ran for 33 seconds inside a 10-second budget, and
+    /// the search only checks the clock between solves.
+    pub time_limit_secs: f64,
+    /// Last values actually pushed to HiGHS.
+    presolve_on: bool,
+    armed_limit: f64,
 
     model: Option<HModel>,
     cols: Vec<Col>,
@@ -201,19 +216,22 @@ impl LpRelaxation {
         }
 
         // FC-BCR block.
+        let fc_bcr = std::env::var_os("SJ_NO_FCBCR").is_none();
         let terminal_set: std::collections::HashSet<NodeId> = terminals.iter().copied().collect();
         let max_node_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) as usize;
         let mut s_col: Vec<Option<u32>> = vec![None; max_node_id + 1];
-        for node in &graph.nodes {
-            let fixed = terminal_set.contains(&node.id) || node.id == root;
-            let (lb, ub) = if fixed { (1.0, 1.0) } else { (0.0, 1.0) };
-            s_col[node.id as usize] = Some(b.add_col(0.0, lb, ub));
+        if fc_bcr {
+            for node in &graph.nodes {
+                let fixed = terminal_set.contains(&node.id) || node.id == root;
+                let (lb, ub) = if fixed { (1.0, 1.0) } else { (0.0, 1.0) };
+                s_col[node.id as usize] = Some(b.add_col(0.0, lb, ub));
+            }
         }
 
         // A tree on k used vertices has exactly k-1 edges. This single dense row
         // carries a large share of the FC-BCR strength: without it the root gaps
         // on c09/c13/c18 widen from 0% to 1.2%/4.8%/3.5%.
-        {
+        if fc_bcr {
             let mut row: Vec<(u32, f64)> = Vec::with_capacity(num_arcs as usize + graph.nodes.len());
             for a in 0..num_arcs {
                 row.push((a, 1.0));
@@ -279,6 +297,7 @@ impl LpRelaxation {
             base_constraint_count: structural_count,
             solve_time_secs: 0.0,
             rebuilds: 0,
+            max_solve_secs: 0.0,
             col_cost: b.col_cost,
             col_lb_base: b.col_lb,
             col_ub_base: b.col_ub,
@@ -287,6 +306,10 @@ impl LpRelaxation {
             lazy_resident: vec![false; lazy_count],
             cuts: Vec::new(),
             row_budget,
+            cold: true,
+            time_limit_secs: f64::INFINITY,
+            presolve_on: false,
+            armed_limit: f64::INFINITY,
             model: None,
             cols: Vec::new(),
             base_var_lb: var_lb.clone(),
@@ -315,16 +338,11 @@ impl LpRelaxation {
         }
 
         let mut model = pb.optimise(Sense::Minimise);
-        model.set_option("output_flag", false);
-        // Presolve runs on every `run()` call, so with a persistent model it is
-        // paid once per cut round rather than once per problem. The rows added
-        // between solves are a handful against a basis that is already optimal
-        // for everything else, which is precisely the case dual simplex handles
-        // in a few pivots and presolve cannot improve on.
-        model.set_option("presolve", "off");
+        model.set_option("output_flag", std::env::var_os("SJ_LP_LOG").is_some());
         self.cols = cols;
         self.model = Some(model);
         self.rebuilds += 1;
+        self.cold = true;
     }
 
     /// Bounds currently in force for a column, honouring branching fixings.
@@ -517,7 +535,14 @@ impl LpRelaxation {
     pub fn solve(&mut self) -> f64 {
         let timer = std::time::Instant::now();
         let value = self.solve_inner();
-        self.solve_time_secs += timer.elapsed().as_secs_f64();
+        let dt = timer.elapsed().as_secs_f64();
+        self.solve_time_secs += dt;
+        if dt > self.max_solve_secs {
+            self.max_solve_secs = dt;
+        }
+        if std::env::var_os("SJ_LPT").is_some() {
+            eprintln!("[lp] {:.1}ms rows={} cuts={}", dt * 1000.0, self.num_constraints(), self.cuts.len());
+        }
         value
     }
 
@@ -527,7 +552,26 @@ impl LpRelaxation {
         // on the same model, and supplying a primal-only start discards that
         // basis in favour of a crash start — the opposite of a warm start. Doing
         // so cost a factor of six on SteinLib `c13`.
-        let model = self.model.take().unwrap();
+        let mut model = self.model.take().unwrap();
+        // Presolve is worth its cost exactly once per model: on the cold solve
+        // after a rebuild, where there is no basis to preserve. Afterwards it
+        // runs on every `run()` call and discards the basis it should have been
+        // reusing, which on `c13` cost a factor of six.
+        //
+        // Options are pushed only when they actually change. HiGHS treats an
+        // option assignment as a model event, and re-asserting the same clock
+        // before every solve is not free.
+        if self.cold != self.presolve_on {
+            model.set_option("presolve", if self.cold { "on" } else { "off" });
+            self.presolve_on = self.cold;
+        }
+        if self.time_limit_secs.is_finite()
+            && (self.time_limit_secs - self.armed_limit).abs() > 0.5
+        {
+            model.set_option("time_limit", self.time_limit_secs.max(0.01));
+            self.armed_limit = self.time_limit_secs;
+        }
+        self.cold = false;
 
         let solve_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| model.solve()));
 

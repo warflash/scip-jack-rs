@@ -78,6 +78,12 @@ pub struct DualAscentResult {
     pub root: NodeId,
     /// Replayable certificate: the ascent steps in the order they were applied.
     pub steps: Vec<AscentStep>,
+    /// The raised cuts themselves, `cuts[i] = delta^-(W)` for `steps[i]`.
+    ///
+    /// Empty unless [`dual_ascent_cuts`] asked for them. Each is a valid Steiner
+    /// cut, so `y(cut) >= 1` is a valid inequality; see [`dual_ascent_cuts`] for
+    /// what handing them to an LP buys.
+    pub cuts: Vec<Vec<ArcId>>,
 }
 
 /// Static CSR view of a digraph, built once and reused across ascent runs.
@@ -278,6 +284,44 @@ pub fn dual_ascent_masked(
     terminals: &[NodeId],
     active: &[bool],
 ) -> DualAscentResult {
+    ascend(idx, root, terminals, active, 0)
+}
+
+/// [`dual_ascent_masked`], additionally returning the cuts it raised.
+///
+/// # Why the cuts are worth more than the scalar bound
+///
+/// The ascent is a feasible solution `u` of the dual of the cut relaxation. Its
+/// value `sum_W u_W` is the bound. Handing an LP solver the *rows* `y(delta^-(W))
+/// >= 1` for exactly those `W` makes `u` a feasible dual solution of that LP, so
+/// by weak duality the LP's own optimum is at least the ascent's bound — before a
+/// single max-flow separation has run.
+///
+/// Without this the branch-and-cut starts from a relaxation with no connectivity
+/// rows at all and has to rediscover them one violated cut at a time. On PACE
+/// instance151 the ascent reached 17,193 in milliseconds while forty-eight LP
+/// solves of separation had only reached 3,293.
+///
+/// `max_nnz` caps the total number of arc entries retained. Dropping a cut costs
+/// at most its own multiplier from the guaranteed bound, so the cuts are kept in
+/// the order they were raised and collection simply stops at the cap.
+pub fn dual_ascent_cuts(
+    idx: &ArcIndex,
+    root: NodeId,
+    terminals: &[NodeId],
+    active: &[bool],
+    max_nnz: usize,
+) -> DualAscentResult {
+    ascend(idx, root, terminals, active, max_nnz.max(1))
+}
+
+fn ascend(
+    idx: &ArcIndex,
+    root: NodeId,
+    terminals: &[NodeId],
+    active: &[bool],
+    mut cut_nnz_budget: usize,
+) -> DualAscentResult {
     let num_arcs = idx.num_arcs();
     let mut reduced: Vec<Cost> = (0..num_arcs).map(|a| idx.cost(a as ArcId)).collect();
 
@@ -291,9 +335,10 @@ pub fn dual_ascent_masked(
 
     let mut lower_bound = 0.0;
     let mut steps = Vec::new();
+    let mut cuts: Vec<Vec<ArcId>> = Vec::new();
 
     if comps.is_empty() {
-        return DualAscentResult { lower_bound, reduced_costs: reduced, root, steps };
+        return DualAscentResult { lower_bound, reduced_costs: reduced, root, steps, cuts };
     }
 
     // Initial expansion; terminals already reachable from the root over zero-cost
@@ -339,6 +384,17 @@ pub fn dual_ascent_masked(
             continue;
         }
 
+        // After `grow` the frontier holds exactly the arcs entering `W(t)` from
+        // outside with positive reduced cost — and an arc entering `W(t)` with
+        // zero reduced cost would have pulled its tail in — so it *is*
+        // `delta^-(W(t))`, and `y(frontier) >= 1` is a valid Steiner cut.
+        if cut_nnz_budget >= comps[ci].frontier.len() {
+            cut_nnz_budget -= comps[ci].frontier.len();
+            cuts.push(comps[ci].frontier.clone());
+        } else {
+            cut_nnz_budget = 0;
+        }
+
         for &a in &comps[ci].frontier {
             reduced[a as usize] -= delta;
             if reduced[a as usize] < 0.0 {
@@ -351,7 +407,7 @@ pub fn dual_ascent_masked(
         comps[ci].grow(idx, &reduced, active, root);
     }
 
-    DualAscentResult { lower_bound, reduced_costs: reduced, root, steps }
+    DualAscentResult { lower_bound, reduced_costs: reduced, root, steps, cuts }
 }
 
 /// Convenience wrapper that builds a fresh [`ArcIndex`] and uses every arc.
