@@ -63,5 +63,27 @@ fn main() {
             None => row.push_str(&format!(",>{max_width},{:.2}", t.elapsed().as_secs_f64())),
         }
     }
+    // And what the exact width-parameterised DP costs on it, which is the
+    // question the width was measured to answer.
+    let t = Instant::now();
+    let td = decompose_with(&ru, Ordering::MinFill, max_width, None)
+        .or_else(|| decompose_with(&ru, Ordering::MinDegree, max_width, None));
+    match td {
+        Some(td) => {
+            let work = scip_jack::graph::algorithms::steiner_td::work_estimate(&td, ru.edges.len(), 1);
+            let t2 = Instant::now();
+            match scip_jack::graph::algorithms::steiner_tree_over_decomposition(
+                &ru, &ri.terminals, &td, 40_000_000, None,
+            ) {
+                Some((cost, edges)) => row.push_str(&format!(
+                    ",{:.0},{},{:.2},{:.1e}",
+                    cost, edges.len(), t2.elapsed().as_secs_f64(), work
+                )),
+                None => row.push_str(&format!(",capped,,{:.2},{:.1e}", t2.elapsed().as_secs_f64(), work)),
+            }
+        }
+        None => row.push_str(",toowide,,,"),
+    }
+    let _ = t;
     println!("{row}");
 }

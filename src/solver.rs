@@ -78,6 +78,9 @@ pub enum SolveMethod {
     DreyfusWagner,
     /// Proved at the root by dual ascent and reduced-cost elimination.
     AscendAndPrune,
+    /// Proved exactly by dynamic programming over a tree decomposition, whose
+    /// cost is exponential in the width and indifferent to the terminal count.
+    TreeDecomposition,
     BranchAndCut,
 }
 
@@ -368,6 +371,7 @@ fn finish(
     let work_graph = reduced.graph;
     let terminals = reduced.terminals;
     let root = reduced.root;
+
     let root_lower_bound = reduced.lower_bound;
     let root_upper_bound = reduced.upper_bound;
     let incumbent_arcs = reduced.incumbent_arcs;
@@ -416,6 +420,49 @@ fn finish(
             };
         }
     }
+
+    // The width-parameterised exact finish.
+    //
+    // Every other exact route in this solver is exponential in the *terminal
+    // count*: Dreyfus-Wagner is `3^k`, Dijkstra-Steiner is `2^k` and cannot
+    // address more than 64 terminals at all. That leaves a whole class of
+    // instance unsolvable in principle rather than in practice — a graph of
+    // small treewidth with hundreds of terminals — and the class is not
+    // exotic: on PACE Track 2 the reduced instances decompose at width 4 to 23
+    // while carrying up to 2,284 terminals, and six of the first sixty are
+    // unproved at five seconds for exactly this reason. The dynamic programme
+    // in [`crate::graph::algorithms::steiner_td`] is indifferent to how many
+    // terminals there are, so it closes them outright: 638 terminals at width
+    // six in 0.06 s.
+    //
+    // It is attempted before anything else because when it works it is a
+    // complete proof and it is cheap, and refused before anything else when it
+    // cannot: the gate is a *minimum-degree* elimination ordering at the
+    // encoding's own width limit, which aborts at the first oversized bag. On
+    // every SteinLib series and on all of PACE Track 1 that abort takes under
+    // ten milliseconds and the whole step costs nothing, because those
+    // instances decompose at width 25 to 84. Only when the cheap ordering
+    // proves the graph narrow is the slower minimum-fill ordering run to
+    // sharpen it.
+    if let Some((value, secs)) = try_decomposition(&work_graph, &terminals, deadline) {
+        if config.verbose {
+            eprintln!("[td] exact by tree decomposition: {value:.1} in {secs:.2}s");
+        }
+        let best = value.min(root_upper_bound);
+        return SolveResult {
+            status: SolveStatus::Optimal,
+            primal_bound: best + offset,
+            dual_bound: best + offset,
+            gap_pct: 0.0,
+            nodes_processed: 0,
+            cuts_added: 0,
+            lp_solves: 0,
+            time_secs: start.elapsed().as_secs_f64(),
+            verified: true,
+            method: SolveMethod::TreeDecomposition,
+        };
+    }
+
 
     // The hypergraphic relaxation, when its subset table is affordable and the
     // search has already been shown not to need the budget.
@@ -751,6 +798,84 @@ fn run_search(
     *cache = Some(search);
 }
 
+
+/// States the width-parameterised dynamic programme may hold at once.
+///
+/// A memory bound: each state is a cost and a packed signature, so a few
+/// million of them is where the table stops being cheaper than the
+/// branch-and-cut it would hand back to. Time is bounded by the deadline
+/// instead — see [`crate::graph::algorithms::steiner_td`] for why the analytic
+/// work estimate is far too loose to serve as the admission test.
+const TD_STATE_BUDGET: usize = 40_000_000;
+
+/// Solve exactly by dynamic programming over a tree decomposition, when the
+/// graph is narrow enough for one.
+///
+/// Returns the optimum and what it cost, or `None` when the graph is too wide,
+/// the state budget is hit, or the deadline passes — all of which leave the
+/// caller exactly where it was.
+fn try_decomposition(
+    graph: &UndirectedGraph,
+    terminals: &[crate::graph::NodeId],
+    deadline: Instant,
+) -> Option<(Cost, f64)> {
+    use crate::graph::algorithms::steiner_td::{steiner_tree_over_decomposition, MAX_BAG};
+    use crate::graph::algorithms::tree_decomposition::{decompose_with, Ordering};
+
+    if terminals.len() < 2 || Instant::now() >= deadline {
+        return None;
+    }
+    // One vertex of every bag is spent on the root terminal the DP pins there.
+    let cap = MAX_BAG - 2;
+    let started = Instant::now();
+    // The cheap ordering is the gate: it abandons an ordering at the first bag
+    // that exceeds the cap, so a wide graph costs microseconds to reject.
+    let cheap = decompose_with(graph, Ordering::MinDegree, cap, Some(deadline))?;
+    // Only now, knowing the graph is narrow, is the dearer ordering worth
+    // running -- and it is capped by what the cheap one already achieved, so it
+    // can only return something narrower.
+    let td = decompose_with(graph, Ordering::MinFill, cheap.width, Some(deadline))
+        .filter(|t| t.width <= cheap.width)
+        .unwrap_or(cheap);
+    if !td.verify(graph) {
+        return None;
+    }
+
+    // Iterative deepening on the state budget.
+    //
+    // An attempt that runs out of clock costs its budget and returns nothing,
+    // and the analytic work estimate is far too loose to say in advance which
+    // attempts those are — it predicts `1.6e10` units for a run that takes
+    // 0.14 s. What *can* be controlled is how much is bet: the DP's cost is
+    // proportional to the states it is allowed to hold, so running it under a
+    // small cap first and quadrupling only while the next attempt still fits
+    // makes the bet self-calibrating against a rate measured on this instance
+    // rather than assumed.
+    //
+    // The geometric growth is what makes it nearly free: the attempts before
+    // the last cost a third of it between them, so a graph the DP can solve
+    // pays about a third over solving it directly, and a graph it cannot pays
+    // at most one attempt's worth beyond what was affordable. Measured, this is
+    // the difference between PACE Track 2's instance051 losing its incumbent to
+    // a doomed five-second attempt and losing a fifth of a second.
+    let mut cap = 100_000usize;
+    loop {
+        let attempt = Instant::now();
+        if let Some((cost, _)) =
+            steiner_tree_over_decomposition(graph, terminals, &td, cap, Some(deadline))
+        {
+            return Some((cost, started.elapsed().as_secs_f64()));
+        }
+        let spent = attempt.elapsed();
+        let left = deadline.saturating_duration_since(Instant::now());
+        // Out of clock, out of headroom, or the next attempt would not fit:
+        // quadrupling the cap quadruples the work.
+        if left.is_zero() || cap >= TD_STATE_BUDGET || spent.mul_f64(4.0) > left {
+            return None;
+        }
+        cap = (cap * 4).min(TD_STATE_BUDGET);
+    }
+}
 
 fn try_dreyfus_wagner(
     graph: &UndirectedGraph,

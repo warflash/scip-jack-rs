@@ -23,6 +23,7 @@ fn main() {
     let method_name = match result.method {
         SolveMethod::DreyfusWagner => "Dreyfus-Wagner DP",
         SolveMethod::AscendAndPrune => "Ascend-and-Prune (root)",
+        SolveMethod::TreeDecomposition => "Tree-Decomposition DP",
         SolveMethod::BranchAndCut => "Branch-and-Cut",
     };
 

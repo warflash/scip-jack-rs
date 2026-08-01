@@ -207,6 +207,7 @@ pub fn steiner_tree_over_decomposition(
     terminals: &[NodeId],
     td: &TreeDecomposition,
     state_cap: usize,
+    deadline: Option<std::time::Instant>,
 ) -> Option<(Cost, Vec<EdgeId>)> {
     if terminals.is_empty() {
         return Some((0.0, Vec::new()));
@@ -365,6 +366,11 @@ pub fn steiner_tree_over_decomposition(
         }
         total_states += table.len();
         if total_states > state_cap {
+            return None;
+        }
+        // Checked every node rather than every sixty-fourth: a single join at a
+        // wide bag can take longer than the whole rest of the run.
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             return None;
         }
         tables[i] = table;
@@ -679,7 +685,7 @@ mod tests {
     fn solve(g: &UndirectedGraph, terminals: &[NodeId]) -> Option<(Cost, Vec<EdgeId>)> {
         let td = decompose(g, MAX_BAG - 1, None)?;
         assert!(td.verify(g), "decomposition failed its axioms");
-        steiner_tree_over_decomposition(g, terminals, &td, 4_000_000)
+        steiner_tree_over_decomposition(g, terminals, &td, 4_000_000, None)
     }
 
     /// The returned edge set really is a tree spanning the terminals, and its
