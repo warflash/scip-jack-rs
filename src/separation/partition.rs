@@ -4,20 +4,55 @@ use crate::graph::algorithms::MaxFlowWorkspace;
 
 /// Partition inequality separator.
 ///
-/// For any partition P = {V_1, ..., V_k} of the vertex set where each part
-/// contains at least one terminal, the Steiner tree must use at least k-1
-/// crossing edges. In the directed formulation:
+/// # The inequality
 ///
-///   sum_{arcs crossing partition} y_a >= k - 1
+/// Let `P = {V_0, V_1, ..., V_{k-1}}` be a partition of the *whole* vertex set
+/// with the root in `V_0` and every other part containing at least one terminal.
+/// Then every rooted Steiner arborescence satisfies
 ///
-/// Separation proceeds via a Gomory-Hu-style iterative approach:
-/// 1. Build an auxiliary graph on terminals with edge weights = max-flow values
-/// 2. Find the minimum cut in the auxiliary graph that partitions terminals
-///    into multiple components
-/// 3. If the min-cut value < k-1, the partition inequality is violated
+/// ```text
+/// sum { y_a : part(tail(a)) != part(head(a)), part(head(a)) != V_0 } >= k - 1.  (P)
+/// ```
 ///
-/// The practical implementation uses iterative min-cut computations between
-/// pairs of terminal sets to find violated multi-way partitions.
+/// ## Proof
+///
+/// Each part `V_i` with `i >= 1` contains a terminal, which the arborescence
+/// reaches by a directed path from the root. That path starts in `V_0` and ends
+/// in `V_i`, so it crosses into `V_i` on some arc: the arborescence has at least
+/// one selected arc whose head lies in `V_i`. An arc has one head, so the arcs
+/// witnessing different parts are distinct, and there are `k - 1` parts to
+/// witness. Every such arc is counted by the left-hand side. ∎
+///
+/// Summing over *all* crossing arcs is also valid — contract the parts and note
+/// that the image of the tree is a connected spanning subgraph of the quotient —
+/// but weaker, because it also charges arcs running back into `V_0`. The rooted
+/// form above is what this separator emits.
+///
+/// # Why the whole partition, and not the root boundary
+///
+/// Charging only `delta^+(V_0)` while asking for `k - 1` is **not valid**. Take
+/// the triangle on terminals `r, a, b` and the partition `{{r},{a},{b}}`. The
+/// tree `r -> a -> b` crosses `delta^+({r})` exactly once, and the row would cut
+/// it off. That is not hypothetical: the previous version of this separator
+/// emitted precisely that row, and the exhaustive harness in the `validity`
+/// module below found it cutting valid trees on 6% of the rows it emitted.
+///
+/// Two things follow, and both are enforced here rather than assumed:
+///
+/// - the parts are materialised explicitly and cover every vertex, so the
+///   crossing support can be recomputed from them;
+/// - the right-hand side is derived from the number of parts, never supplied by
+///   the caller.
+///
+/// # Proposing a partition
+///
+/// Validity does not care how the parts were chosen — any partition meeting the
+/// two conditions gives a valid row. Violation does. The proposal here
+/// intersects the root-side sets of the min cuts from the root to each of a few
+/// target terminals, then splits the complement into its positive-flow connected
+/// components. Components holding a terminal become parts of their own;
+/// everything else joins `V_0`, which is always allowed because `V_0` only has
+/// to contain the root.
 pub struct PartitionSeparator<'a> {
     graph: &'a DirectedGraph,
     root: NodeId,
@@ -27,17 +62,20 @@ pub struct PartitionSeparator<'a> {
     workspace: Option<MaxFlowWorkspace>,
 }
 
-/// A violated partition inequality.
+/// A violated partition inequality, together with the partition that proves it.
 #[derive(Debug, Clone)]
 pub struct PartitionCut {
-    /// Arcs crossing the partition (coefficients = 1)
+    /// Arcs on the left-hand side, each with coefficient 1.
     pub crossing_arcs: Vec<ArcId>,
-    /// RHS of the inequality (k-1 where k = number of parts)
+    /// `num_parts - 1`. Derived from the witness, never supplied by a caller.
     pub rhs: f64,
-    /// Violation amount: rhs - sum of LP values on crossing arcs
+    /// `rhs` minus the left-hand side at the LP point.
     pub violation: f64,
-    /// Number of parts in the partition
     pub num_parts: usize,
+    /// Part index per vertex id, or `u32::MAX` for ids that are not vertices.
+    /// Part 0 holds the root. This is the witness the row is derived from and it
+    /// is what makes the row independently checkable.
+    pub part_of: Vec<u32>,
 }
 
 impl<'a> PartitionSeparator<'a> {
@@ -145,266 +183,184 @@ impl<'a> PartitionSeparator<'a> {
             return;
         }
 
-        // Strategy: find a set W containing root such that the number of terminal
-        // groups in V\W is k-1, and y(delta+(W)) < k-1.
-        //
-        // We use min-cuts from root to subsets of terminals to find such W.
-        // Start with individual terminal min-cuts and look for "nested" structure.
-
-        // Try all pairs (and triples for small terminal counts) of terminals.
-        // For each subset S of terminals, compute min-cut from root to the
-        // "merged sink" (contraction of all terminals in S to a super-sink).
-        // In practice: compute max-flow from root to the group, using a
-        // super-sink connected to each terminal with infinite capacity.
-        // We approximate this by summing the individual min-cut contributions.
-
-        // Better approach: for each terminal t_i, we know the min-cut value
-        // f_i = max-flow(root, t_i). For a k-partition to be violated, we need
-        // the total flow leaving the root's side to be < k-1. This happens when
-        // multiple terminals share the SAME bottleneck arcs (the same set of
-        // arcs carries flow to multiple terminals).
-
-        // Detect shared bottlenecks: find arcs that appear in multiple min-cut
-        // source sides (arcs that are the only way to reach multiple terminals).
-
-        // Simple greedy approach: sort terminals by min-cut value, then
-        // iteratively merge the weakest-connected terminal into a partition.
-
-        // For a valid k-partition inequality in the directed formulation:
-        // Define W = root's component. Then delta+(W) must carry at least k-1
-        // units of flow where k-1 = number of groups of terminals in V\W.
-        // Each group must be a connected subset in the graph that contains ≥ 1 terminal.
-
-        // Most practical: for each subset of terminals that share a "joint
-        // min-cut" from the root, the value of that joint cut should be >= |subset|.
-
-        // Single-terminal violations (standard Steiner cuts, for completeness)
+        // The two-part case is the ordinary directed Steiner cut. It is the
+        // special case `k = 2` of (P) with `V_1` the sink side, and there the
+        // rooted left-hand side is exactly the arcs leaving the source side.
         for &(_t, flow_val, _, ref cut_arcs) in terminal_cuts {
-            if flow_val < 1.0 - self.violation_tolerance {
-                let cut_value: f64 = cut_arcs.iter()
-                    .map(|&aid| lp_solution.get(aid as usize).copied().unwrap_or(0.0))
-                    .sum();
-                if cut_value < 1.0 - self.violation_tolerance {
-                    violated.push(PartitionCut {
-                        crossing_arcs: cut_arcs.clone(),
-                        rhs: 1.0,
-                        violation: 1.0 - cut_value,
-                        num_parts: 2,
-                    });
-                }
+            if flow_val >= 1.0 - self.violation_tolerance {
+                continue;
+            }
+            let cut_value: f64 = cut_arcs
+                .iter()
+                .map(|&aid| lp_solution.get(aid as usize).copied().unwrap_or(0.0))
+                .sum();
+            if cut_value < 1.0 - self.violation_tolerance {
+                violated.push(PartitionCut {
+                    crossing_arcs: cut_arcs.clone(),
+                    rhs: 1.0,
+                    violation: 1.0 - cut_value,
+                    num_parts: 2,
+                    part_of: Vec::new(),
+                });
             }
         }
 
-        // Multi-terminal partition: check if a single cut separates multiple
-        // terminals from root into DIFFERENT connected components.
-        // For pairs of terminals t_i, t_j: compute the joint cut and verify
-        // they end up in disconnected components on the sink side.
-        if n_terms >= 2 && n_terms <= 50 {
+        // Multi-way partitions proposed from pairs of terminals, then from
+        // triples if no pair produced anything.
+        if (2..=50).contains(&n_terms) {
             let limit = n_terms.min(15);
             for i in 0..limit {
                 for j in (i + 1)..limit {
-                    let t_i = terminals[i];
-                    let t_j = terminals[j];
-
-                    let (flow_val, crossing) = self.compute_joint_cut(
-                        lp_solution, &[t_i, t_j],
-                    );
-
-                    // compute_joint_cut returns INFINITY when no valid multi-partition exists
-                    if flow_val < f64::INFINITY {
-                        // A violated multi-partition was found with rhs = num_components
-                        // flow_val is the actual crossing flow, which is < rhs
-                        let rhs = 2.0; // Will be refined by compute_joint_cut
-                        violated.push(PartitionCut {
-                            crossing_arcs: crossing,
-                            rhs,
-                            violation: rhs - flow_val,
-                            num_parts: 3,
-                        });
+                    if violated.len() >= 10 {
+                        return;
                     }
-                }
-                if violated.len() >= 10 {
-                    break;
+                    let targets = [terminals[i], terminals[j]];
+                    if let Some(cut) = self.propose_partition(lp_solution, &targets) {
+                        violated.push(cut);
+                    }
                 }
             }
         }
 
-        // Triple-terminal partitions for small instances
-        if n_terms >= 3 && n_terms <= 20 && violated.is_empty() {
+        if (3..=20).contains(&n_terms) && violated.is_empty() {
             let limit = n_terms.min(10);
             for i in 0..limit {
                 for j in (i + 1)..limit {
                     for k in (j + 1)..limit {
-                        let t_i = terminals[i];
-                        let t_j = terminals[j];
-                        let t_k = terminals[k];
-
-                        let (flow_val, crossing) = self.compute_joint_cut(
-                            lp_solution, &[t_i, t_j, t_k],
-                        );
-
-                        if flow_val < f64::INFINITY {
-                            let rhs = 3.0;
-                            violated.push(PartitionCut {
-                                crossing_arcs: crossing,
-                                rhs,
-                                violation: rhs - flow_val,
-                                num_parts: 4,
-                            });
+                        if violated.len() >= 10 {
+                            return;
+                        }
+                        let targets = [terminals[i], terminals[j], terminals[k]];
+                        if let Some(cut) = self.propose_partition(lp_solution, &targets) {
+                            violated.push(cut);
                         }
                     }
-                    if violated.len() >= 10 {
-                        break;
-                    }
-                }
-                if violated.len() >= 10 {
-                    break;
                 }
             }
         }
     }
 
-    /// Compute the minimum cut separating root from a SET of terminals,
-    /// and determine how many DISCONNECTED terminal groups exist on the sink side.
+    /// Propose a partition around `target_terminals` and return the row it
+    /// implies, if that row is violated at `lp_solution`.
     ///
-    /// For the cut to be a valid k-partition inequality, the terminals on the
-    /// sink side must be in k-1 separate connected components (each needing
-    /// its own unit of flow from the root side).
-    ///
-    /// Returns (actual_rhs, total flow crossing, arcs crossing the cut) where
-    /// actual_rhs = number of disconnected terminal-containing components in V\W.
-    fn compute_joint_cut(
+    /// The partition is materialised first and the row is read off it second.
+    /// Nothing downstream may choose the right-hand side.
+    fn propose_partition(
         &mut self,
         lp_solution: &[f64],
         target_terminals: &[NodeId],
-    ) -> (f64, Vec<ArcId>) {
-        let ws = self.workspace.as_mut().unwrap();
+    ) -> Option<PartitionCut> {
+        let max_id = self.graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) as usize;
 
-        // Find the tightest cut: compute min-cut from root to each terminal
-        // in the set, and find their intersection (the set that separates root
-        // from ALL terminals simultaneously).
+        // Root side: the vertices every one of these min cuts keeps with the
+        // root. This is only a proposal; validity does not depend on it.
         let mut root_side: Option<HashSet<NodeId>> = None;
-
-        for &t in target_terminals {
-            let result = ws.compute(self.root, t, lp_solution, &self.graph.arcs);
-            let source: HashSet<NodeId> = result.source_side.into_iter().collect();
-
-            root_side = Some(match root_side {
-                None => source,
-                Some(existing) => existing.intersection(&source).copied().collect(),
-            });
+        {
+            let ws = self.workspace.as_mut().unwrap();
+            for &t in target_terminals {
+                let result = ws.compute(self.root, t, lp_solution, &self.graph.arcs);
+                let source: HashSet<NodeId> = result.source_side.into_iter().collect();
+                root_side = Some(match root_side {
+                    None => source,
+                    Some(existing) => existing.intersection(&source).copied().collect(),
+                });
+            }
+        }
+        let mut root_component = root_side.unwrap_or_default();
+        if !root_component.contains(&self.root) {
+            root_component.clear();
+            root_component.insert(self.root);
+        }
+        if target_terminals.iter().any(|t| root_component.contains(t)) {
+            return None;
         }
 
-        let root_component = match root_side {
-            Some(s) if !s.is_empty() => s,
-            _ => {
-                let mut s = HashSet::new();
-                s.insert(self.root);
-                s
+        // Part 0 is the root part and absorbs everything not placed elsewhere,
+        // which is what keeps `part_of` a partition of the whole vertex set.
+        // Only the parts from 1 up have to contain a terminal.
+        let mut part_of = vec![u32::MAX; max_id + 1];
+        for node in &self.graph.nodes {
+            part_of[node.id as usize] = 0;
+        }
+
+        let is_terminal = {
+            let mut flag = vec![false; max_id + 1];
+            for &t in self.terminals {
+                flag[t as usize] = true;
             }
+            flag
         };
 
-        // Verify root is in the component and no target terminal is
-        if !root_component.contains(&self.root) || target_terminals.iter().any(|t| root_component.contains(t)) {
-            return (f64::INFINITY, Vec::new());
-        }
-
-        // Determine how many DISCONNECTED terminal groups exist on the sink side.
-        // We do BFS/DFS on the sink side using arcs with positive LP flow to
-        // determine connectivity. Only count components that contain a target terminal.
-        let sink_side: HashSet<NodeId> = self.graph.nodes.iter()
-            .map(|n| n.id)
-            .filter(|id| !root_component.contains(id))
-            .collect();
-
-        let num_terminal_components = self.count_terminal_components(
-            lp_solution, &sink_side, target_terminals,
-        );
-
-        if num_terminal_components < 2 {
-            // All target terminals are in the same connected component on sink side.
-            // This is just a standard Steiner cut (rhs = 1), not a multi-partition.
-            return (f64::INFINITY, Vec::new());
-        }
-
-        // Collect ALL arcs crossing from root_component to its complement.
-        // The partition inequality requires ALL crossing arcs in the LHS,
-        // not just those with positive flow (otherwise the cut would be invalid).
-        let mut crossing_arcs = Vec::new();
-        let mut total_flow = 0.0;
-
-        for arc in &self.graph.arcs {
-            if root_component.contains(&arc.tail) && !root_component.contains(&arc.head) {
-                crossing_arcs.push(arc.id);
-                total_flow += lp_solution.get(arc.id as usize).copied().unwrap_or(0.0);
-            }
-        }
-
-        // The RHS is the number of disconnected terminal components on the sink side
-        let rhs = num_terminal_components as f64;
-
-        // Check violation: total flow must be >= rhs
-        if total_flow < rhs - self.violation_tolerance {
-            // Return the effective flow comparison against the actual RHS
-            // The caller will check violation against the REQUESTED rhs, but we
-            // report against the actual component count.
-            return (total_flow, crossing_arcs);
-        }
-
-        (f64::INFINITY, Vec::new())
-    }
-
-    /// Count the number of connected components in the sink-side subgraph
-    /// that contain at least one target terminal. Connectivity is determined
-    /// by arcs with positive LP flow (in either direction).
-    fn count_terminal_components(
-        &self,
-        lp_solution: &[f64],
-        sink_side: &HashSet<NodeId>,
-        target_terminals: &[NodeId],
-    ) -> usize {
-        let mut visited: HashSet<NodeId> = HashSet::new();
-        let mut terminal_components = 0;
-
-        for &start in target_terminals {
-            if visited.contains(&start) || !sink_side.contains(&start) {
+        // Split the complement into positive-flow components. A component
+        // holding a terminal becomes a part of its own; the rest stay in part 0.
+        let mut visited = vec![false; max_id + 1];
+        let mut next_part = 1u32;
+        let mut queue = std::collections::VecDeque::new();
+        for node in &self.graph.nodes {
+            let start = node.id;
+            if root_component.contains(&start) || visited[start as usize] {
                 continue;
             }
-
-            // BFS from this terminal within the sink side
-            let mut queue = std::collections::VecDeque::new();
+            let mut component = Vec::new();
+            let mut holds_terminal = false;
+            visited[start as usize] = true;
+            queue.clear();
             queue.push_back(start);
-            visited.insert(start);
-
-            while let Some(node) = queue.pop_front() {
-                // Follow outgoing arcs with positive flow
-                for &(head, arc_id) in self.graph.delta_plus(node) {
-                    if !sink_side.contains(&head) || visited.contains(&head) {
-                        continue;
-                    }
-                    let flow = lp_solution.get(arc_id as usize).copied().unwrap_or(0.0);
-                    if flow > 1e-8 {
-                        visited.insert(head);
+            while let Some(x) = queue.pop_front() {
+                component.push(x);
+                holds_terminal |= is_terminal[x as usize];
+                for &(head, arc) in self.graph.delta_plus(x) {
+                    if !root_component.contains(&head)
+                        && !visited[head as usize]
+                        && lp_solution.get(arc as usize).copied().unwrap_or(0.0) > 1e-8
+                    {
+                        visited[head as usize] = true;
                         queue.push_back(head);
                     }
                 }
-                // Follow incoming arcs with positive flow
-                for &(tail, arc_id) in self.graph.delta_minus(node) {
-                    if !sink_side.contains(&tail) || visited.contains(&tail) {
-                        continue;
-                    }
-                    let flow = lp_solution.get(arc_id as usize).copied().unwrap_or(0.0);
-                    if flow > 1e-8 {
-                        visited.insert(tail);
+                for &(tail, arc) in self.graph.delta_minus(x) {
+                    if !root_component.contains(&tail)
+                        && !visited[tail as usize]
+                        && lp_solution.get(arc as usize).copied().unwrap_or(0.0) > 1e-8
+                    {
+                        visited[tail as usize] = true;
                         queue.push_back(tail);
                     }
                 }
             }
-
-            terminal_components += 1;
+            if holds_terminal {
+                for v in component {
+                    part_of[v as usize] = next_part;
+                }
+                next_part += 1;
+            }
         }
 
-        terminal_components
+        let num_parts = next_part as usize;
+        if num_parts < 3 {
+            // Two parts is the ordinary Steiner cut, separated above.
+            return None;
+        }
+
+        // Read the row off the partition: crossing arcs whose head lies outside
+        // part 0, with a right-hand side of k - 1.
+        let rhs = (num_parts - 1) as f64;
+        let mut crossing_arcs = Vec::new();
+        let mut lhs = 0.0;
+        for arc in &self.graph.arcs {
+            let (pt, ph) = (part_of[arc.tail as usize], part_of[arc.head as usize]);
+            if pt == ph || ph == 0 {
+                continue;
+            }
+            crossing_arcs.push(arc.id);
+            lhs += lp_solution.get(arc.id as usize).copied().unwrap_or(0.0);
+        }
+
+        if lhs >= rhs - self.violation_tolerance {
+            return None;
+        }
+
+        Some(PartitionCut { crossing_arcs, rhs, violation: rhs - lhs, num_parts, part_of })
     }
 }
 
@@ -513,5 +469,209 @@ mod tests {
         let cuts = sep.find_violated_cuts(&lp);
         // Should find violations since flow to each terminal < 1
         assert!(!cuts.is_empty());
+    }
+}
+
+/// Exhaustive validity harness (experiment E0 of the research scratchpad).
+///
+/// A separator is only allowed to emit rows that every feasible integral point
+/// satisfies. For the rooted directed formulation those points are the
+/// arborescences obtained by orienting a Steiner tree away from the root. This
+/// module enumerates all of them on small graphs and tests every emitted row
+/// against every one of them.
+#[cfg(test)]
+mod validity {
+    use super::*;
+    use crate::graph::{NodeType, UndirectedGraph};
+    use std::collections::VecDeque;
+
+    /// All arc-incidence vectors of Steiner trees of `g`, oriented from `root`.
+    pub(super) fn all_trees(g: &DirectedGraph, root: NodeId, terminals: &[NodeId]) -> Vec<Vec<f64>> {
+        let mut edges: Vec<(NodeId, NodeId, ArcId, ArcId)> = Vec::new();
+        for a in &g.arcs {
+            if a.tail < a.head {
+                if let Some(back) =
+                    g.arcs.iter().find(|b| b.tail == a.head && b.head == a.tail).map(|b| b.id)
+                {
+                    edges.push((a.tail, a.head, a.id, back));
+                }
+            }
+        }
+        let m = edges.len();
+        assert!(m <= 18, "enumeration is exponential in the edge count");
+
+        let n = g.nodes.iter().map(|x| x.id).max().unwrap_or(0) as usize + 1;
+        let mut out = Vec::new();
+        for mask in 0u32..(1u32 << m) {
+            let chosen: Vec<&(NodeId, NodeId, ArcId, ArcId)> =
+                (0..m).filter(|i| mask >> i & 1 == 1).map(|i| &edges[i]).collect();
+            let mut adj: Vec<Vec<(NodeId, ArcId)>> = vec![Vec::new(); n];
+            for &&(u, v, f, b) in &chosen {
+                adj[u as usize].push((v, f));
+                adj[v as usize].push((u, b));
+            }
+            // Orient away from the root. Every chosen edge must be reached
+            // exactly once, which is connectivity and acyclicity together.
+            let mut seen = vec![false; n];
+            let mut vector = vec![0.0; g.arcs.len()];
+            let mut used = 0usize;
+            let mut queue = VecDeque::new();
+            seen[root as usize] = true;
+            queue.push_back(root);
+            while let Some(x) = queue.pop_front() {
+                for &(y, forward) in &adj[x as usize] {
+                    if seen[y as usize] {
+                        continue;
+                    }
+                    seen[y as usize] = true;
+                    vector[forward as usize] = 1.0;
+                    used += 1;
+                    queue.push_back(y);
+                }
+            }
+            if used != chosen.len() || !terminals.iter().all(|&t| seen[t as usize]) {
+                continue;
+            }
+            out.push(vector);
+        }
+        out
+    }
+
+    pub(super) fn directed(g: &UndirectedGraph) -> DirectedGraph {
+        DirectedGraph::from_undirected(g)
+    }
+
+    /// The counterexample of the research scratchpad, made concrete.
+    ///
+    /// Triangle on terminals 1 (root), 2, 3. At the LP point
+    /// `y(1->2) = y(1->3) = 0.5` with every other arc at zero, the min cuts from
+    /// the root to 2 and to 3 intersect in `{1}`, and the sink side `{2,3}`
+    /// carries no positive flow between its two halves, so the separator sees a
+    /// three-part partition and asks for two crossing units. But it charges only
+    /// the arcs leaving `{1}`, and the perfectly valid tree `1 -> 2 -> 3` leaves
+    /// `{1}` exactly once.
+    #[test]
+    fn root_boundary_support_is_not_the_partition_support() {
+        let mut g = UndirectedGraph::new(3);
+        g.add_node(1, NodeType::Terminal, 0.0);
+        g.add_node(2, NodeType::Terminal, 0.0);
+        g.add_node(3, NodeType::Terminal, 0.0);
+        g.add_edge(1, 2, 1.0);
+        g.add_edge(1, 3, 1.0);
+        g.add_edge(2, 3, 1.0);
+
+        let dg = directed(&g);
+        let terminals = vec![1u32, 2, 3];
+        let trees = all_trees(&dg, 1, &terminals);
+        assert!(!trees.is_empty());
+
+        let mut point = vec![0.0; dg.arcs.len()];
+        for a in &dg.arcs {
+            if a.tail == 1 {
+                point[a.id as usize] = 0.5;
+            }
+        }
+
+        let mut sep = PartitionSeparator::new(&dg, 1, &terminals);
+        for cut in sep.find_violated_cuts(&point) {
+            for tree in &trees {
+                let lhs: f64 = cut.crossing_arcs.iter().map(|&a| tree[a as usize]).sum();
+                assert!(
+                    lhs >= cut.rhs - 1e-6,
+                    "row with rhs {} over {:?} is cut by a valid tree at lhs {lhs}",
+                    cut.rhs,
+                    cut.crossing_arcs
+                );
+            }
+        }
+    }
+
+    /// Random small graphs, sparse fractional points, every emitted row checked.
+    #[test]
+    fn every_emitted_partition_row_holds_for_every_steiner_tree() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let mut violations = Vec::new();
+        let mut rows_checked = 0usize;
+
+        for trial in 0..800 {
+            let n = 5 + (rng() % 3) as u32;
+            let mut g = UndirectedGraph::new(n);
+            let k = 3 + (rng() % 3) as u32;
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = v <= k;
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 5 != 0 {
+                        g.add_edge(u, v, 1.0 + (rng() % 9) as f64);
+                    }
+                }
+            }
+            if g.edges.len() > 16 {
+                continue;
+            }
+            let dg = directed(&g);
+            let root = terminals[0];
+            let trees = all_trees(&dg, root, &terminals);
+            if trees.is_empty() {
+                continue;
+            }
+
+            let mut point = vec![0.0; dg.arcs.len()];
+            if trial % 2 == 0 {
+                let take = 2 + (rng() % 3) as usize;
+                for _ in 0..take {
+                    let t = &trees[(rng() % trees.len() as u64) as usize];
+                    for (i, &v) in t.iter().enumerate() {
+                        point[i] += v;
+                    }
+                }
+                point.iter_mut().for_each(|v| *v /= take as f64);
+            } else {
+                // Real LP solutions are sparse. A dense random point keeps the
+                // whole sink side connected in the positive-flow sense, which
+                // hides every multi-part branch of the separator.
+                for v in point.iter_mut() {
+                    *v = if rng() % 3 == 0 { 0.0 } else { (rng() % 101) as f64 / 100.0 };
+                }
+            }
+
+            let mut sep = PartitionSeparator::new(&dg, root, &terminals);
+            for cut in sep.find_violated_cuts(&point) {
+                rows_checked += 1;
+                for tree in &trees {
+                    let lhs: f64 = cut.crossing_arcs.iter().map(|&a| tree[a as usize]).sum();
+                    if lhs < cut.rhs - 1e-6 {
+                        violations.push(format!(
+                            "trial {trial}: rhs {} over {} arcs, cut by a tree at lhs {lhs}",
+                            cut.rhs,
+                            cut.crossing_arcs.len()
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert!(rows_checked > 0, "the separator emitted nothing; the test proves nothing");
+        eprintln!("checked {rows_checked} emitted partition rows");
+        assert!(
+            violations.is_empty(),
+            "{} emitted rows cut a valid Steiner tree; first few: {:#?}",
+            violations.len(),
+            &violations[..violations.len().min(3)]
+        );
     }
 }
