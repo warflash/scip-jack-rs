@@ -791,6 +791,34 @@ impl LpRelaxation {
             .map(|(row, dual)| (row.entries.as_slice(), dual))
             .collect()
     }
+
+    /// Unit-coefficient `>= rhs` rows with `rhs > 1`, and their duals.
+    ///
+    /// [`LpRelaxation::unit_arc_rows`] deliberately keeps only `rhs == 1`, which
+    /// is the shape a single Steiner cut has. A partition inequality has the
+    /// same coefficients and a larger right-hand side, and it carries a witness
+    /// that lets it be *decomposed* into that many Steiner cuts — see
+    /// [`crate::model::lp_packing`]. This is how the caller gets hold of the
+    /// multiplier it needs to do that; the caller supplies the witness, since
+    /// the model has no idea what a row means.
+    pub fn unit_rows_above_one(&self) -> Vec<(&[(u32, f64)], f64, f64)> {
+        if !self.is_optimal() {
+            return Vec::new();
+        }
+        let num_vars = self.num_vars;
+        self.structural
+            .iter()
+            .chain(self.cuts.iter().map(|c| &c.row))
+            .zip(self.row_duals.iter().copied())
+            .filter(|&(row, dual)| {
+                dual > 1e-9
+                    && row.lo > 1.0
+                    && row.lo.is_finite()
+                    && row.entries.iter().all(|&(c, v)| c < num_vars && v == 1.0)
+            })
+            .map(|(row, dual)| (row.entries.as_slice(), row.lo, dual))
+            .collect()
+    }
 }
 
 #[cfg(test)]

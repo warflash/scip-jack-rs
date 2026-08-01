@@ -112,18 +112,21 @@ fn main() {
             // A loop that needs hundreds of solves is either separating too
             // little per round or re-solving a model that barely changed, and
             // these three columns say which.
-            println!("  round      bound  struct   cuts    rows    secs");
+            println!("  round      bound  struct   cuts    rows    secs |  cyc(s)   part(s)     tf(s)");
             let last = cert.rounds.len().saturating_sub(1);
             for (i, r) in cert.rounds.iter().enumerate() {
                 if i < 8 || i % 16 == 0 || i == last {
                     println!(
-                        "  {:5}  {:9.2}  {:6}  {:5}  {:6}  {:6.3}",
+                        "  {:5}  {:9.2}  {:6}  {:5}  {:6}  {:6.3} | {:3}({:.3}) {:3}({:.3}) {:3}({:.3})",
                         i,
                         r.bound + offset,
                         r.structural,
                         r.cuts,
                         r.rows,
-                        r.secs
+                        r.secs,
+                        r.family[0].0, r.family[0].1,
+                        r.family[1].0, r.family[1].1,
+                        r.family[2].0, r.family[2].1,
                     );
                 }
             }

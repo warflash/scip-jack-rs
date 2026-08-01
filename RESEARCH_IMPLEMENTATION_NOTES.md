@@ -1612,6 +1612,104 @@ the exact recombination selects parents from. Collecting them *and* recombining
 fixed prefixes of them was 23/46 at 236 s. The pool is kept; the fixed prefixes
 are replaced by a selection made against the measured width.
 
+### 39. Three more row families at the root, and the dual that decomposes
+
+`root_certificate` separated flow cuts and nothing else, while the
+branch-and-cut already carried three further valid families — partition, cycle
+and terminal-free — that never contributed to the root bound. The per-round
+trace calls the loop **facet-starved** rather than degenerate: ten cuts a round
+against a cap of four hundred means the rows are too shallow, not too few to
+install. More families is the direct reading, and separating them is nearly
+free — under ten milliseconds a round against LP solves that reach three
+seconds.
+
+Carrying their rows is not free, and three ways of doing it were measured.
+
+**Appending them every round.** The solve time is a function of the row count.
+instance193's rounds became four times dearer, the loop lost four of its sixteen
+solves, and the converged bound came out **2.8 units below** what the flow cuts
+reached alone. instance172, where the flow cuts are genuinely starved, gained
+31.7.
+
+**Ranking all four families by depth and installing the deepest `k`.** Depth is
+`violation / ||a||_2`, the Euclidean distance from the LP point to the row's
+hyperplane — the only comparison between these families that means anything,
+since their violations live on different scales. This raised instance172 by 23
+and instance193 by 0.6, and it **cost instance188 the proof it had**. The reason
+is worth stating precisely: only rows shaped like a Steiner cut — unit
+coefficients, right-hand side one — survive
+[`LpRelaxation::unit_arc_rows`] into the packing, and *the packing, not the LP
+bound, is what the goal-directed search consumes as its potential*. Displacing
+flow cuts by partition rows dropped instance188's extracted packing below the
+dual ascent's own value, the continuation gate `packing > ascent` closed, and
+the search never ran its second phase — the phase that used to settle the
+instance.
+
+**Bringing the families in only once the flow separator has nothing new.** The
+obvious repair, and it does nothing: the flow separator never exhausts inside
+twenty seconds on any instance tried, so the extras never fire and every bound
+returns exactly to the control's.
+
+**What works is to make the partition rows feed the packing.** They can, and it
+is a small theorem:
+
+> **Lemma (partition decomposition).** Let `V = P_0 + P_1 + ... + P_k` with the
+> root in `P_0`, let `C` be the arcs whose endpoints lie in different parts, and
+> let the row `x(C) >= k` carry dual `lambda`. Then giving each of `P_1, ..., P_k`
+> the weight `lambda` contributes exactly `lambda * k` to the packing's value —
+> the same as the row contributes to the LP objective — and loads every arc by
+> no more than the row already did.
+
+*Proof.* Each `delta^-(P_i)` is contained in `C`: an arc entering `P_i` from
+outside has its endpoints in different parts. The sets `delta^-(P_i)` are
+pairwise disjoint, because an arc `(u,v)` lies in `delta^-(P_i)` only for the
+unique `i` with `v in P_i`. So the `k` members load an arc by `lambda` if it
+enters some `P_i` and by zero otherwise, while the row loaded `lambda` on every
+arc of the superset `C`. And `k` members of weight `lambda` sum to `lambda * k`,
+which is `rhs * lambda`. No `P_i` with `i >= 1` holds the root. QED
+
+This is what the `part_of` witness on `PartitionCut` was for. The row is
+installed *and* its dual is decomposed, so a partition row now strengthens the
+search's potential instead of starving it. The correspondence between a row and
+the witness recorded for it is re-checked (`|parts| == rhs`) before any of it is
+used, and a mismatch drops the row rather than guessing.
+
+So the final shape is: every flow cut installed as before, never displaced; an
+extra row admitted only when it is **deeper than every flow cut on offer that
+round** — the best row available, with no count to choose; and every partition
+dual decomposed into the Steiner cuts that imply it.
+
+**Measured at the root, twenty seconds, against the frozen control:**
+
+| instance | LP control | LP now | packing control | packing now |
+|---|---|---|---|---|
+| 172 | 7,086.17 | **7,121.37** | 7,073.26 | **7,105.13** |
+| 167 | 2,600,439.91 | 2,600,440.32 | 2,600,436.54 | 2,600,435.55 |
+| 193 | 3,800,649.99 | 3,800,650.90 | 3,800,645.20 | **3,800,647.14** |
+| 189 | 19,762.00 | 19,762.00 | 19,693.23 | **19,712.17** |
+| 188 | 3,600,609.50 | 3,600,609.38 | 3,600,603.46 | 3,600,604.00 |
+
+instance172's root bound rises 35 units and its certified packing 32, in *half*
+the solves. And the loop converges faster: 65 solves against 127.
+
+**Measured through the pipeline:**
+
+| slice | control | now |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 139/140, 49.9 s | 139/140, 56.0 s |
+| PACE Track 1 [155..200] @5 s | 26/46, 141.2 s | 26/46, 145.8 s |
+| SteinLib B @5 s | 18/18, 1.5 s | 18/18, 1.7 s |
+| SteinLib C @5 s | 20/20, 5.8 s | 20/20, 6.1 s |
+| SteinLib D @5 s | 20/20, 11.6 s | 20/20, 11.3 s |
+| SteinLib E @20 s | 19/20, 68.5 s | 19/20, 69.1 s |
+
+Pass counts unchanged again. instance189's dual gains 16 units, instance165's 5,
+instance162's 5. No instance reports a value differing from its reference under
+an `Optimal` status on any slice. 140 library tests, the new one checking the
+decomposition lemma's three claims — boundaries inside the crossing set,
+boundaries pairwise disjoint, member count equal to the right-hand side — on
+random partitions of random graphs.
+
 ---
 
 ## Where the remaining loss is

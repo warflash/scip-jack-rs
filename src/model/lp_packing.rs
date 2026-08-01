@@ -84,12 +84,13 @@
 //! the packing theorem, and the sets are a valid A* potential for a search rooted
 //! at the same `r0`.
 
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::graph::algorithms::{dual_ascent_cuts, dual_ascent_packing, dual_ascent_packing_residual, ArcIndex};
 use crate::graph::{ArcId, Cost, DirectedGraph, NodeId};
 use crate::model::LpRelaxation;
-use crate::separation::FlowCutSeparator;
+use crate::separation::{CycleCutSeparator, FlowCutSeparator, PartitionSeparator, TfCutSeparator};
 
 /// Arc entries the ascent may record while producing the LP's seed rows. Same
 /// cap the branch-and-cut uses; dropping a cut costs at most its own multiplier.
@@ -139,6 +140,52 @@ impl CertifiedPacking {
         (0..idx.num_arcs())
             .all(|a| load[a] <= idx.cost(a as ArcId) + tolerance)
     }
+}
+
+/// The packing members a partition row's dual licenses.
+///
+/// `parts` are the parts other than the root's. See the lemma at the call site:
+/// each `delta^-(P_i)` lies inside the row's crossing set, the boundaries are
+/// pairwise disjoint, and `k` members of weight `lambda` reproduce exactly the
+/// `lambda * k` the row contributed to the LP objective.
+fn decompose_partition(
+    parts: &[Vec<NodeId>],
+    dual: Cost,
+    idx: &ArcIndex,
+    root: NodeId,
+) -> Vec<Candidate> {
+    let mut out = Vec::with_capacity(parts.len());
+    let mut inside = vec![false; idx.num_nodes() + 1];
+    for part in parts {
+        if part.is_empty() || part.iter().any(|&v| v == root) {
+            continue;
+        }
+        for &v in part {
+            inside[v as usize] = true;
+        }
+        let mut boundary: Vec<ArcId> = Vec::new();
+        for &v in part {
+            for &a in idx.incoming(v) {
+                if !inside[idx.tail(a) as usize] {
+                    boundary.push(a);
+                }
+            }
+        }
+        for &v in part {
+            inside[v as usize] = false;
+        }
+        if !boundary.is_empty() {
+            out.push((dual, boundary));
+        }
+    }
+    out
+}
+
+/// Canonical identity of a row over arcs: its sorted support.
+fn signature(arcs: &[ArcId]) -> Vec<ArcId> {
+    let mut s = arcs.to_vec();
+    s.sort_unstable();
+    s
 }
 
 /// A weighted arc set proposed as a packing member.
@@ -351,6 +398,9 @@ pub struct RoundStat {
     pub bound: Cost,
     /// Structural rows pulled in from the held-back pool.
     pub structural: usize,
+    /// Rows installed by each extra family, and the seconds its separator cost:
+    /// cycle, partition, terminal-free.
+    pub family: [(usize, f64); 3],
     /// Violated connectivity cuts the separator returned.
     pub cuts: usize,
     /// Rows in the model *after* this round's additions and pruning.
@@ -425,6 +475,31 @@ pub struct RootCertificate {
 /// here rather than kept.
 ///
 /// What the trace *does* reward is a wider seed; see the multi-root block below.
+///
+/// # The other three families
+///
+/// The same trace says the loop is **facet-starved**, not degenerate: ten cuts a
+/// round against a cap of four hundred means the rows are too shallow, not too
+/// few to install. The branch-and-cut already carries three further valid
+/// families that the root loop never asked for — partition rows, cycle rows and
+/// terminal-free rows — and they are separated here too.
+///
+/// Every one of them is valid for the formulation, which is what their own
+/// enumeration tests establish, so installing them can only raise the LP bound.
+/// They are also safe for the *packing*: [`certify`] does not trust a row to be a
+/// Steiner cut. It takes the row's arc set `A`, recovers `W(A)` as the vertices
+/// the root cannot reach in `G - A`, and prices `delta^-(W(A)) subseteq A` — so a
+/// row that is not a cut contributes a genuine cut or nothing at all, and
+/// [`CertifiedPacking::verify`] re-checks (PACK) from scratch either way.
+///
+/// One row shape has to be excluded by hand. A partition row with right-hand
+/// side one has `lo == 1.0` and unit coefficients, so it is indistinguishable
+/// from a Steiner cut to [`crate::model::lp_relaxation::LpRelaxation::unit_arc_rows`]
+/// — but its arc set contains *both* orientations of every crossing edge, and
+/// `W(A)` recovered from it is a set whose in-boundary the row's dual was never
+/// priced against. It is still sound, for the reason above; it is simply weaker
+/// than treating the same dual as belonging to the smaller genuine cut. Nothing
+/// is done about it beyond saying so, because the repair step already handles it.
 pub fn root_certificate(
     graph: &DirectedGraph,
     root: NodeId,
@@ -501,6 +576,15 @@ pub fn root_certificate(
     let mut batch = 500usize;
 
     let mut separator = FlowCutSeparator::new(graph, root, terminals);
+    let mut cycle_sep = CycleCutSeparator::new(graph);
+    let mut partition_sep = PartitionSeparator::new(graph, root, terminals);
+    let mut tf_sep = TfCutSeparator::new(graph, terminals);
+    // Rows already installed, so a family that keeps re-finding the same
+    // violated set does not grow the model without moving the bound.
+    let mut signatures: HashSet<Vec<ArcId>> = HashSet::new();
+    // Partition rows installed in the model, keyed by their arc signature, with
+    // the parts that prove them. See the decomposition lemma below.
+    let mut partitions: HashMap<Vec<ArcId>, Vec<Vec<NodeId>>> = HashMap::new();
     let mut lp_solves = 0u64;
     let mut best_bound = seed.lower_bound;
 
@@ -528,14 +612,48 @@ pub fn root_certificate(
             break;
         }
         best_bound = best_bound.max(obj);
-        candidates = Some(
-            lp.unit_arc_rows()
-                .into_iter()
-                .map(|(entries, dual)| {
-                    (dual, entries.iter().map(|&(c, _)| c as ArcId).collect())
-                })
-                .collect(),
-        );
+        let mut harvest: Vec<Candidate> = lp
+            .unit_arc_rows()
+            .into_iter()
+            .map(|(entries, dual)| (dual, entries.iter().map(|&(c, _)| c as ArcId).collect()))
+            .collect();
+        // Partition rows, decomposed into the Steiner cuts that imply them.
+        //
+        // > **Lemma (partition decomposition).** Let `V = P_0 + P_1 + ... + P_k`
+        // > with the root in `P_0`, let `C` be the arcs whose endpoints lie in
+        // > different parts, and let the row `x(C) >= k` carry dual `lambda`.
+        // > Then giving each of `P_1, ..., P_k` the weight `lambda` contributes
+        // > exactly `lambda * k` to the packing's value -- the same as the row
+        // > contributes to the LP objective -- and loads every arc by no more
+        // > than the row already did.
+        //
+        // *Proof.* Each `delta^-(P_i)` is contained in `C`, since an arc
+        // entering `P_i` from outside has its endpoints in different parts. The
+        // sets `delta^-(P_i)` are pairwise disjoint, because an arc `(u,v)` lies
+        // in `delta^-(P_i)` only for the unique `i` with `v in P_i`. So the load
+        // the `k` sets place on an arc is `lambda` if it enters some `P_i` and
+        // zero otherwise, while the row placed `lambda` on every arc of `C`,
+        // a superset. And `k` sets of weight `lambda` sum to `lambda * k = rhs *
+        // lambda`. Finally no `P_i` with `i >= 1` holds the root, which is what
+        // a packing member must satisfy. QED
+        //
+        // This is what stops the extra families *starving* the packing. Without
+        // it, a partition row raises the LP bound and contributes nothing the
+        // search can use, and rows that displace flow cuts make the search's
+        // potential strictly weaker -- which is exactly how instance188 lost the
+        // proof it had.
+        for (entries, rhs, dual) in lp.unit_rows_above_one() {
+            let arcs: Vec<ArcId> = entries.iter().map(|&(c, _)| c as ArcId).collect();
+            let Some(parts) = partitions.get(&signature(&arcs)) else { continue };
+            if (parts.len() as f64 - rhs).abs() > 1e-9 {
+                // The witness does not match the row it was recorded for. Drop
+                // it rather than guess: the packing must never rest on a
+                // correspondence nobody checked.
+                continue;
+            }
+            harvest.extend(decompose_partition(parts, dual, &idx, root));
+        }
+        candidates = Some(harvest);
         if upper_bound.is_finite() {
             // The bound grows monotonically over the loop and the reduced costs
             // are read from the same solve as `obj`, so recomputing the set each
@@ -560,15 +678,164 @@ pub fn root_certificate(
         batch = batch.saturating_mul(4);
         let solution = lp.get_solution().to_vec();
         let cuts = separator.separate_cuts(&solution);
-        if structural == 0 && cuts.is_empty() {
-            // The point satisfies every connectivity requirement, so this is the
-            // cut relaxation's own optimum and no further round can move it.
+        // The three families the branch-and-cut already had and the root loop
+        // did not ask for. See the header: all are valid for the formulation and
+        // all are safe for the packing extraction.
+        // Install the flow cuts first, and count how many are new.
+        let mut installed = 0usize;
+        let mut new_flow = 0usize;
+        for cut in cuts.iter().take(400) {
+            let mut sig = cut.cut_arcs.clone();
+            sig.sort_unstable();
+            if signatures.insert(sig) {
+                lp.add_steiner_cut(&cut.cut_arcs);
+                new_flow += 1;
+                installed += 1;
+            }
+        }
+
+        // The other three families, brought in exactly when the flow family has
+        // nothing new to say.
+        //
+        // The trace calls this loop *facet-starved* rather than degenerate: ten
+        // cuts a round against a cap of four hundred means the rows are too
+        // shallow, not too few to install. The branch-and-cut already carried
+        // three further valid families — partition, cycle, terminal-free — that
+        // the root loop never asked for, and separating them costs under ten
+        // milliseconds a round against LP solves that reach three seconds.
+        //
+        // Carrying their rows is not free, and two ways of doing it were
+        // measured as losses:
+        //
+        // - **Appending them every round.** The solve time is a function of the
+        //   row count. On instance193 the rounds became four times dearer, the
+        //   loop lost four of its sixteen solves, and the converged bound came
+        //   out 2.8 units *below* what the flow cuts reached alone.
+        // - **Ranking all four families by depth and installing the deepest
+        //   `k`.** This raised instance172's root bound by 23 units and at the
+        //   same time dropped instance188's extracted packing *below the dual
+        //   ascent's own value* — because only rows shaped like a Steiner cut
+        //   can be turned back into a cut packing, and the packing, not the LP
+        //   bound, is what the goal-directed search consumes. Displacing flow
+        //   cuts starves the search's potential, and 188 lost the proof it had.
+        //
+        // What is left is the criterion the diagnosis actually supports: another
+        // family is worth its rows exactly when the family in hand is out of
+        // things to add. No count to choose and no clock to divide — the loop
+        // asks for help when, and only when, it has stopped separating.
+        let mut family = [(0usize, 0.0); 3];
+        let mut extra = 0usize;
+        {
+            let _ = new_flow;
+            let t0 = Instant::now();
+            let cycle_cuts = cycle_sep.find_violated_cuts(&solution);
+            let partition_cuts = partition_sep.find_violated_cuts(&solution);
+            let tf_cuts = tf_sep.find_violated_cuts(&solution);
+            let separation_secs = t0.elapsed().as_secs_f64();
+            let mut witness: HashMap<Vec<ArcId>, Vec<Vec<NodeId>>> = HashMap::new();
+
+            // Depth — the Euclidean distance from the LP point to the row's
+            // hyperplane, `violation / ||a||_2` — is the only comparison between
+            // these families that means anything: their violations live on
+            // different scales, a Steiner cut's being at most one and a
+            // partition row's at most `|P| - 1`, while the distance to the
+            // hyperplane is a property of the geometry and not of how the row
+            // happens to be written.
+            enum Row {
+                Cycle(Vec<(ArcId, ArcId)>),
+                Weighted(Vec<ArcId>, Vec<Cost>, Cost),
+            }
+            let mut ranked: Vec<(Cost, usize, Row)> = Vec::new();
+            for c in &cycle_cuts {
+                let pairs: Vec<(ArcId, ArcId)> = c
+                    .edge_indices
+                    .iter()
+                    .map(|&e| (2 * e as ArcId, 2 * e as ArcId + 1))
+                    .collect();
+                let depth = c.violation / ((2 * pairs.len()) as Cost).max(1.0).sqrt();
+                ranked.push((depth, 0, Row::Cycle(pairs)));
+            }
+            for p in &partition_cuts {
+                let depth = p.violation / (p.crossing_arcs.len() as Cost).max(1.0).sqrt();
+                let coeffs = vec![1.0; p.crossing_arcs.len()];
+                // The parts other than the root's, which is the witness the
+                // dual decomposition below needs.
+                let mut parts: Vec<Vec<NodeId>> = vec![Vec::new(); p.num_parts];
+                for (v, &part) in p.part_of.iter().enumerate() {
+                    if (part as usize) < p.num_parts {
+                        parts[part as usize].push(v as NodeId);
+                    }
+                }
+                parts.remove(0);
+                witness.insert(signature(&p.crossing_arcs), parts);
+                ranked.push((depth, 1, Row::Weighted(p.crossing_arcs.clone(), coeffs, p.rhs)));
+            }
+            for t in &tf_cuts {
+                // `x(delta(S)) >= 2 x_e`, with both orientations of every
+                // boundary edge and of the edge being dominated.
+                let mut arcs: Vec<ArcId> = Vec::with_capacity(2 * t.boundary_arcs.len() + 2);
+                let mut coeffs: Vec<Cost> = Vec::with_capacity(arcs.capacity());
+                for &(fwd, rev) in &t.boundary_arcs {
+                    arcs.push(fwd);
+                    coeffs.push(1.0);
+                    arcs.push(rev);
+                    coeffs.push(1.0);
+                }
+                arcs.push(t.edge_arc_pair.0);
+                coeffs.push(-2.0);
+                arcs.push(t.edge_arc_pair.1);
+                coeffs.push(-2.0);
+                let norm = coeffs.iter().map(|c| c * c).sum::<Cost>().max(1.0).sqrt();
+                ranked.push((t.violation / norm, 2, Row::Weighted(arcs, coeffs, 0.0)));
+            }
+            ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            // Extra rows are admitted, never substituted: every flow cut is
+            // already installed above. An extra earns its slot only when it is
+            // deeper than every flow cut on offer this round -- when it is the
+            // best row available and the loop would have been willing to
+            // install something shallower. That is a comparison between
+            // measured depths with no count to choose.
+            let deepest_flow = cuts
+                .iter()
+                .map(|c| c.violation / (c.cut_arcs.len() as Cost).max(1.0).sqrt())
+                .fold(0.0 as Cost, Cost::max);
+            for (depth, kind, row) in &ranked {
+                if *depth < deepest_flow {
+                    continue;
+                }
+                let sig: Vec<ArcId> = match row {
+                    Row::Cycle(pairs) => pairs.iter().flat_map(|&(f, r)| [f, r]).collect(),
+                    Row::Weighted(arcs, _, _) => arcs.clone(),
+                };
+                let mut sorted = sig;
+                sorted.sort_unstable();
+                if !signatures.insert(sorted) {
+                    continue;
+                }
+                match row {
+                    Row::Cycle(pairs) => lp.add_cycle_cut(pairs),
+                    Row::Weighted(arcs, coeffs, rhs) => lp.add_cut(arcs, coeffs, *rhs),
+                }
+                if let Row::Weighted(arcs, _, rhs) = row {
+                    if *rhs > 1.0 {
+                        if let Some(parts) = witness.remove(&signature(arcs)) {
+                            partitions.insert(signature(arcs), parts);
+                        }
+                    }
+                }
+                family[*kind].0 += 1;
+                installed += 1;
+                extra += 1;
+            }
+            family[0].1 = separation_secs;
+        }
+
+        if structural == 0 && installed == 0 && extra == 0 {
+            // The point satisfies every requirement any family here can express,
+            // so no further round of this loop can move the bound.
             break;
         }
-        let installed = cuts.len().min(400);
-        for cut in cuts.iter().take(400) {
-            lp.add_steiner_cut(&cut.cut_arcs);
-        }
+
         // Rows that have not been binding for several solves are dropped. The
         // bound stays valid whatever the pool holds — an LP over fewer rows is a
         // weaker relaxation, never an invalid one — and an unbounded pool is
@@ -578,6 +845,7 @@ pub fn root_certificate(
             bound: best_bound,
             structural,
             cuts: installed,
+            family,
             rows: lp.num_constraints(),
             secs: round_started.elapsed().as_secs_f64(),
         });
@@ -835,6 +1103,80 @@ mod tests {
             }
         }
         (joined == members.len()).then_some(total)
+    }
+
+    #[test]
+    fn partition_decomposition_obeys_its_lemma() {
+        // The three claims the lemma rests on, checked on random partitions of
+        // random graphs: every boundary lies inside the crossing set, the
+        // boundaries are pairwise disjoint, and the members reproduce the row's
+        // own contribution `lambda * k`.
+        let mut seed = 0x7E57_0BEE_1234_5678u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for n in 4..=12u32 {
+            for _ in 0..40 {
+                let mut g = DirectedGraph::new(n);
+                for v in 1..=n {
+                    g.add_node(v, NodeType::Steiner, 0.0);
+                }
+                for u in 1..=n {
+                    for v in 1..=n {
+                        if u != v && rng() % 100 < 35 {
+                            g.add_arc(u, v, 1.0);
+                        }
+                    }
+                }
+                let idx = ArcIndex::new(&g);
+                let k = 1 + (rng() % 3) as usize;
+                // Part 0 holds the root; the rest are the decomposed members.
+                let mut part_of = vec![0u32; n as usize + 1];
+                for v in 1..=n as usize {
+                    part_of[v] = (rng() % (k as u64 + 1)) as u32;
+                }
+                let root = 1;
+                part_of[root as usize] = 0;
+                let parts: Vec<Vec<NodeId>> = (1..=k)
+                    .map(|i| {
+                        (1..=n).filter(|&v| part_of[v as usize] == i as u32).collect()
+                    })
+                    .collect();
+                let crossing: std::collections::HashSet<ArcId> = (0..idx.num_arcs() as ArcId)
+                    .filter(|&a| {
+                        part_of[idx.tail(a) as usize] != part_of[idx.head(a) as usize]
+                    })
+                    .collect();
+
+                let lambda = 1.0 + (rng() % 7) as Cost;
+                let members = decompose_partition(&parts, lambda, &idx, root);
+                let mut seen: std::collections::HashSet<ArcId> = std::collections::HashSet::new();
+                for (w, boundary) in &members {
+                    assert!((w - lambda).abs() < 1e-12);
+                    for &a in boundary {
+                        assert!(crossing.contains(&a), "boundary arc outside the crossing set");
+                        assert!(seen.insert(a), "boundaries overlap on arc {a}");
+                    }
+                }
+                // Value: one member per non-empty, non-root part with a boundary.
+                let expected: usize = parts
+                    .iter()
+                    .filter(|p| {
+                        !p.is_empty()
+                            && p.iter().all(|&v| v != root)
+                            && p.iter().any(|&v| {
+                                idx.incoming(v).iter().any(|&a| {
+                                    !p.contains(&idx.tail(a))
+                                })
+                            })
+                    })
+                    .count();
+                assert_eq!(members.len(), expected);
+            }
+        }
     }
 
     #[test]
