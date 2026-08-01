@@ -208,6 +208,183 @@ much more than that on the instances where preprocessing was being truncated by
 its budget share. The hard slice is unmoved because those instances are limited
 by the dual bound, not by reduction.
 
+
+## 2026-08-01 (second round): the dual bound
+
+The first round was a crash fix, a complexity fix, and a negative result. None
+of it proved anything new. This round works the scratchpad's priority list,
+which starts with a correctness risk and then the polyhedral question.
+
+### 4. The partition separator was emitting invalid rows
+
+**Experiment E0 of the scratchpad, made mandatory.** A separator may only emit
+rows that every feasible integral point satisfies. The harness enumerates every
+Steiner tree of a small graph, oriented from the root, and checks every row the
+separator produces against every one of them.
+
+The scratchpad's counterexample is real. Triangle on terminals `r, a, b`, LP
+point `y(r->a) = y(r->b) = 1/2`: the min cuts to `a` and to `b` intersect in
+`{r}`, the sink side carries no positive flow between `a` and `b`, so the
+separator sees three parts and asks for two crossing units — while charging only
+the arcs leaving `{r}`. The tree `r -> a -> b` leaves `{r}` once and is cut off.
+
+**Measured: 44 of 699 emitted rows cut a valid Steiner tree.** These are global
+LP rows, so they can prune the true optimum.
+
+The repair is structural: materialise the partition first and read the row off
+it. Part 0 holds the root and absorbs every vertex not placed elsewhere, which
+is what makes the assignment a partition of the whole vertex set; each further
+part is a positive-flow component of the complement containing a terminal. The
+right-hand side is the part count minus one and cannot be supplied by a caller.
+
+The left-hand side takes crossing arcs **whose head lies outside part 0**, which
+is valid and *stronger* than charging all crossing arcs: each part above zero
+holds a terminal the arborescence reaches by a directed path from the root, so
+it has a selected arc with its head in that part; an arc has one head, so the
+`k-1` witnesses are distinct. Arcs running back into part 0 need not be charged.
+
+708 rows on the same harness afterwards, all valid. Track 1 [1..140] unchanged
+at 127/140, so the invalid rows were not buying anything either.
+
+### 5. Activation-rank inequalities: exact, correct, and implied
+
+For a vertex set `U` and an anchor `a` in `U`,
+
+```text
+x(E(U)) + s_a <= s(U).                                            (AR)
+```
+
+Valid because the tree edges inside `U` form a forest on the active part of `U`:
+if it has `p` components it has `s(U) - p` edges, and `s_a = 1` forces `p >= 1`.
+
+**Exact separation.** With `w_v = d_x(v)/2 - s_v` and `c_e = x_e/2`,
+
+```text
+x(E(U)) - s(U) = sum_{v in U} w_v - sum_{e in delta(U)} c_e,
+```
+
+a modular function minus a cut, so the most violated set for a fixed anchor is
+one min cut on `V + {S, T}` with `S -> a` at infinite capacity. Verified against
+brute-force enumeration over all `U` on random instances: the reported violation
+matches the true maximum exactly.
+
+**Measured: it fires and does nothing.** On PACE instance171 the separator found
+31, 52 and 53 violated rows in successive rounds. The dual bound moved by zero
+on 161, 171, 189, 195, 199 and 200.
+
+That is the useful part, because the reason is a proof:
+
+```text
+x(E(U)) = sum_{v in U} y(delta^-(v)) - y(delta^-(U)).
+```
+
+If the model had `y(delta^-(v)) = s_v`, then for `U` holding a terminal but not
+the root this reads `x(E(U)) = s(U) - y(delta^-(U)) <= s(U) - 1` by the Steiner
+cut on `U`, which the max-flow separator already produces exactly. **Every rank
+inequality anchored at a terminal is implied by one equality plus a connectivity
+row.** The rank rows the separator kept finding were the shadow of a row the
+model was missing.
+
+### 6. The missing row: `y(delta^-(v)) = s_v`
+
+The activation columns were nearly free. The only things pinning them were the
+tree-cardinality equality, which constrains their *sum* and not their
+distribution, and the edge-vertex coupling `x_e <= s_v`, which is lazy and so
+usually absent. The in-degree of a Steiner vertex was bounded by the constant
+one. So the LP could route a full unit of flow through a vertex it declared half
+active, and nothing objected.
+
+The row is an equality, not a bound: an arborescence gives every vertex it
+contains exactly one parent and every vertex it omits none, which is exactly
+what `s_v` records. Same width plus one entry, replacing `y(delta^-(v)) <= 1`,
+zero separation cost. It also makes the tree-cardinality row a consequence
+rather than an assumption:
+`sum_a y_a = sum_{v != root} y(delta^-(v)) = sum_v s_v - 1`.
+
+**Measured, against a control differing only in this row:**
+
+| slice | without | with |
+|---|---|---|
+| PACE Track 1 [155..200] @5 s | 15/46, 176.7 s | **17/46**, 170.0 s |
+| PACE Track 1 [1..140] @3 s | 127/140, 73.4 s | **128/140**, 98.7 s |
+| SteinLib C @5 s | 20/20, 5.16 s | 20/20, 4.55 s |
+
+Three more instances proved. The [1..140] slowdown is a tighter LP on instances
+that were already easy; with the now-redundant rank separator switched off it
+returns to 71.1 s at 128/140.
+
+**The confirmation.** With the equality installed, the activation-rank separator
+finds **zero** violated rows on 161, 171, 195 and 199 — the same instances where
+it previously found dozens per round. The implication proved above is real, so
+the separator is kept as a diagnostic and defaults to off; switching it on is how
+the implication gets re-checked if the formulation changes.
+
+### 7. Two soundness bugs in root reduced-cost fixing
+
+Both older than this round, both able to report a wrong optimum as proved. They
+surfaced because the tighter LP pushed the same code harder.
+
+**The gap was measured against the lifted bound.** Reduced-cost fixing rests on
+`cost of any solution using a >= LP_opt + rc_a`, so the sound test is
+`LP_opt + rc_a > UB`. The code used `ceil(LP_opt)`, which shrinks the gap and
+drops arcs the inequality does not license: `ceil(LP_opt) + rc_a > UB` says
+nothing about `LP_opt + rc_a` unless the LP optimum is integral, and a cut-loop
+optimum never is. On PACE instance164 this fixed **78,442 of 81,716 arcs**,
+emptied the graph, and announced a proved 5265 against a true optimum of 5205.
+Instance165 likewise: proved 5281 against 5218. Using the raw objective restores
+both to correctly unproved.
+
+**Stale reduced costs.** The same block read `reduced_costs` without checking
+that the solve reached optimality. When HiGHS stops on its own clock the status
+is not `Optimal`, and `LpRelaxation` leaves `solution`, `reduced_costs` and
+`dual_bound` holding the values from the *previous, smaller* model. Pairing that
+vector with the current gap is not a weak bound. Now guarded on `is_optimal()`.
+
+### 8. A validity harness for the formulation itself
+
+The separators now have exhaustive harnesses; the structural rows had none, and
+a bad row there is worse — it is in the model from the first solve, at every
+node. The new harness enumerates every *pruned* Steiner tree of a small graph
+and checks it against every structural and lazy row plus every column bound.
+
+Pruned, not arbitrary: the no-leaf and flow-balance rows are stated for
+inclusion-minimal trees, which is legitimate under non-negative costs. The first
+version of the harness did not know that and reported the model as broken. That
+distinction now lives in the test rather than in someone's memory.
+
+### Round summary
+
+| slice | session start | now |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | crashed on instance129 | 128/140, 71.1 s |
+| PACE Track 1 [155..200] @5 s | 15/46, 180.5 s | 16/46, 171.6 s |
+| SteinLib C @5 s | 20/20, 6.03 s | 20/20, 4.36 s |
+| SteinLib D @5 s | 20/20, 19.8 s | 20/20, 15.5 s |
+| SteinLib E @20 s | 18/20, 115.9 s | 18/20, 104.0 s |
+| preprocessing over all 196 Track 1 instances | 102.9 s | 20.9 s |
+
+No instance reports a proved value that disagrees with its reference optimum.
+
+### What this says about the next step
+
+The activation-rank result is the shape worth repeating: an exactly separable
+family that fires constantly and moves nothing is *evidence about the
+formulation*, and the row it points at is worth more than the family itself. Two
+more candidates may fall to the same argument:
+
+- the continuation rows `y(delta^-(v)) >= y_a` for `a` leaving `v` are lazy;
+  given the in-degree equality they read `s_v >= y_a`, which is the edge-vertex
+  coupling under another name. Whether the pair is now redundant is measurable.
+- the no-leaf row `x(delta(v)) >= 2 s_v` becomes `out(v) >= s_v` given the
+  equality, which is the flow-balance row. If those have collapsed into each
+  other, one of them is dead weight in every LP solve.
+
+Neither of those raises the bound. For that the scratchpad's remaining
+priorities stand: the repaired partition separator now carries a real witness, so
+an exact multi-way separator is a well-posed target (§3.3), and the hypergraphic
+component pricing of §6 is the only listed direction that attacks the residual
+2–3% head on.
+
 ---
 
 ## Where the remaining loss is
