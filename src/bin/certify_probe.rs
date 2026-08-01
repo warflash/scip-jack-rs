@@ -85,6 +85,34 @@ fn main() {
         println!("hypergraphic      out of range ({} terminals, {} nodes)", terminals.len(), ru.num_nodes);
     }
 
+    // The grouped hypergraphic dual, at every clustering size the oracle can
+    // afford. Unlike the enumerating certificate this has no terminal ceiling:
+    // the exponent is the number of classes, which is chosen, not given.
+    for h in [4usize, 6, 8, 10, 12] {
+        let work = scip_jack::model::group_steiner_work(h, ru.num_nodes, ru.edges.len());
+        if work > 3e9 {
+            println!("grouped h={h:<3}      out of range ({work:.1e} units)");
+            continue;
+        }
+        let t = Instant::now();
+        match scip_jack::model::grouped_hyp_dual(
+            &ru,
+            &terminals,
+            h,
+            Some(Instant::now() + Duration::from_secs_f64(budget)),
+        ) {
+            Some(d) => println!(
+                "grouped h={h:<3} {:10.2}   ({} classes, {} partitions, repair {:.4}, {:.2}s)",
+                d.lower_bound + offset,
+                d.groups.len(),
+                d.partitions.len(),
+                d.repair_ratio,
+                t.elapsed().as_secs_f64()
+            ),
+            None => println!("grouped h={h:<3}  unavailable"),
+        }
+    }
+
     let ub: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(f64::INFINITY);
 
     let t = Instant::now();

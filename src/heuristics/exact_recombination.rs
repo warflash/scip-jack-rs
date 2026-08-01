@@ -390,7 +390,7 @@ pub fn grow_and_solve(
     // then bisect the bracket. Same logarithmic probe count, and every probe
     // before the last is cheaper than the one after it.
     let base = edges.len();
-    let mut probe = |k: usize, edges: &mut Vec<ArcId>| {
+    let probe = |k: usize, edges: &mut Vec<ArcId>| {
         edges.truncate(base);
         edges.extend_from_slice(&cands[..k]);
         solve_ground_set(

@@ -1710,6 +1710,97 @@ decomposition lemma's three claims — boundaries inside the crossing set,
 boundaries pairwise disjoint, member count equal to the right-hand side — on
 random partitions of random graphs.
 
+### 40. Certified pricing for the hypergraphic dual, and the ceiling it hits
+
+`model/hypergraphic.rs` is valid because it omits no constraint: it enumerates
+every terminal subset and charges it with `smt(S)` out of one Dreyfus-Wagner
+table, which is exactly what caps it near a dozen terminals. Going past that
+means a restricted master, and a restricted dual can violate an omitted
+constraint — its objective is not a bound on anything until something proves
+otherwise. `model/hyp_pricing.rs` is that proof, and it comes out of the
+scratchpad's §10 signature argument, made precise.
+
+Let the **active** partitions be those with `lambda_P > 0` and give each
+terminal the tuple of its parts under them; let `h` be the number of distinct
+tuples.
+
+> **Lemma 1.** `sum_P r_S(P) lambda_P` depends on `S` only through
+> `sig(S) = { sig(u) : u in S }`.
+
+> **Lemma 2.** For nonempty `Q`, `min { smt(S) : sig(S) = Q }` is attained with
+> one terminal per class of `Q`, and equals the **group Steiner** value `m(Q)`.
+
+> **Theorem (exact pricing in `3^h`).**
+> `min_{|S|>=2} f(S) = min_{|Q|>=2} ( m(Q) - G(Q) )`, computed by one
+> Dreyfus-Wagner recursion over the `h` groups in
+> `O(3^h n + 2^h (m + n log n))`.
+
+Proofs are inline. Lemma 2 is the one that does the work: if two terminals of a
+minimising `S` share a class, drop one — the signature set is unchanged and
+`smt` only falls. `group_steiner_costs` is the oracle: the ordinary
+Dreyfus-Wagner recursion with each singleton base case replaced by a
+multi-source distance from a whole group. `price_and_repair` then takes
+*arbitrary* multipliers, prices them exactly, and scales them into global
+feasibility by the same homogeneity argument the enumerating module uses. Its
+gate checks the repaired dual against **every** terminal subset with an
+independent Dreyfus-Wagner call, on random graphs, starting from multipliers
+chosen to be wildly infeasible.
+
+**Turn the theorem around and the pricing loop disappears.** Fix the classes
+first, insist every partition be a union of classes, and charge each
+`Q subset [h]` with `m(Q)`:
+
+> **Theorem (complete by construction).** Every `lambda` feasible for those
+> `2^h` constraints is feasible for the full hypergraphic dual.
+
+*Proof.* For any `S`, `r_S(P) = r_{sig(S)}(P)` because parts are determined by
+classes, and `m(sig(S)) <= smt(S)` by Lemma 2. QED
+
+So the table is `2^h` instead of `2^{|R|}`, `h` is *chosen* rather than given,
+and nothing is omitted. `grouped_hyp_dual` does exactly this, clustering the
+terminals by farthest-first traversal in the terminal metric.
+
+**And it is worthless, for a reason that is a theorem rather than a
+measurement.**
+
+> **Proposition (the coarsening ceiling).** The grouped dual's objective is at
+> most `m([h])`, the cost of connecting one representative from each class.
+
+*Proof.* `Q = [h]` meets every part of every partition of the classes, so
+`r_{[h]}(P) = |P| - 1` identically and the constraint at `Q = [h]` reads
+`sum_P (|P| - 1) lambda_P <= m([h])` — whose left-hand side *is* the objective.
+QED
+
+With singleton classes `h = |R|` and the ceiling is `smt(R)`, the optimum
+itself, which is why the enumerating module is not handicapped. Coarsening
+moves the ceiling down to the cost of a tree on `h` terminals. Measured on the
+reduced instances, against a dual ascent that is free:
+
+| instance | \|R\| | ascent | grouped `h=8` | `h=10` | optimum |
+|---|---|---|---|---|---|
+| 197 | 101 | 4,219 | 1,190 | 1,219 | 4,292 |
+| 200 | 134 | 6,249 | 456 | 512 | 6,393 |
+| 161 | 25 | 5,123 | 1,570 | 2,046 | 5,199 |
+| 172 | 27 | 6,602 | 2,147 | 3,305 | 7,299 |
+
+— exactly the ratio the proposition predicts. And the obstruction is not about
+*this* clustering: `h < |R|` forces two terminals to share every part of every
+priced partition, which is a clustering by definition. So the ceiling applies to
+**any** way of making the exponent smaller than the terminal count.
+
+**Closed direction — do not revisit.** Coarsened / bounded-signature pricing for
+the hypergraphic dual. The `3^h` pricing theorem is correct and the group
+Steiner oracle is correct; what is false is the hope that a small `h` buys
+reach. Any future column generation on this relaxation must keep `h = |R|` and
+therefore inherits the `3^{|R|}` oracle, at which point it is the enumerating
+module again. The value left in the file is the machinery: an exact group
+Steiner oracle, and a certification that discharges in `3^h` the obligation a
+restricted master cannot discharge for itself.
+
+The solver is not wired to any of it — a bound a twelfth of the ascent's is not
+worth the clock — so the pipeline measurements are unchanged: [155..200] holds
+at 26/46 in 146 s. 145 library tests.
+
 ---
 
 ## Where the remaining loss is
