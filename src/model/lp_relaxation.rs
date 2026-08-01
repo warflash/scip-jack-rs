@@ -51,7 +51,6 @@ pub struct LpRelaxation {
     pub solve_time_secs: f64,
     /// Number of model rebuilds triggered by cut-pool pruning.
     pub rebuilds: u64,
-    pub max_solve_secs: f64,
 
     /// Column description: (objective coefficient, lower bound, upper bound).
     col_cost: Vec<f64>,
@@ -210,28 +209,28 @@ impl LpRelaxation {
             }
         }
 
-        // Anti-symmetry: at most one orientation of each edge is used.
+        // Anti-symmetry: at most one orientation of each edge is used. One row per
+        // edge, and binding only where the relaxation actually wants to pay for
+        // both directions, which is rare — so they are separated on demand. On
+        // PACE instance199 that is 8,616 of the model's 23,000 structural rows.
         for p in 0..num_pairs {
-            b.add_row(f64::NEG_INFINITY, 1.0, vec![(2 * p as u32, 1.0), (2 * p as u32 + 1, 1.0)]);
+            b.add_lazy(f64::NEG_INFINITY, 1.0, vec![(2 * p as u32, 1.0), (2 * p as u32 + 1, 1.0)]);
         }
 
         // FC-BCR block.
-        let fc_bcr = std::env::var_os("SJ_NO_FCBCR").is_none();
         let terminal_set: std::collections::HashSet<NodeId> = terminals.iter().copied().collect();
         let max_node_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) as usize;
         let mut s_col: Vec<Option<u32>> = vec![None; max_node_id + 1];
-        if fc_bcr {
-            for node in &graph.nodes {
-                let fixed = terminal_set.contains(&node.id) || node.id == root;
-                let (lb, ub) = if fixed { (1.0, 1.0) } else { (0.0, 1.0) };
-                s_col[node.id as usize] = Some(b.add_col(0.0, lb, ub));
-            }
+        for node in &graph.nodes {
+            let fixed = terminal_set.contains(&node.id) || node.id == root;
+            let (lb, ub) = if fixed { (1.0, 1.0) } else { (0.0, 1.0) };
+            s_col[node.id as usize] = Some(b.add_col(0.0, lb, ub));
         }
 
         // A tree on k used vertices has exactly k-1 edges. This single dense row
         // carries a large share of the FC-BCR strength: without it the root gaps
         // on c09/c13/c18 widen from 0% to 1.2%/4.8%/3.5%.
-        if fc_bcr {
+        {
             let mut row: Vec<(u32, f64)> = Vec::with_capacity(num_arcs as usize + graph.nodes.len());
             for a in 0..num_arcs {
                 row.push((a, 1.0));
@@ -297,7 +296,6 @@ impl LpRelaxation {
             base_constraint_count: structural_count,
             solve_time_secs: 0.0,
             rebuilds: 0,
-            max_solve_secs: 0.0,
             col_cost: b.col_cost,
             col_lb_base: b.col_lb,
             col_ub_base: b.col_ub,
@@ -338,7 +336,7 @@ impl LpRelaxation {
         }
 
         let mut model = pb.optimise(Sense::Minimise);
-        model.set_option("output_flag", std::env::var_os("SJ_LP_LOG").is_some());
+        model.set_option("output_flag", false);
         self.cols = cols;
         self.model = Some(model);
         self.rebuilds += 1;
@@ -435,6 +433,26 @@ impl LpRelaxation {
             self.push_cut_tagged(row, Some(i));
         }
         violated.len()
+    }
+
+    /// Register a Steiner cut in the held-back pool instead of the model.
+    ///
+    /// Used for the dual-ascent seed, which is thousands of rows wide. Putting
+    /// them straight into the model makes the first solve a cold simplex on a
+    /// problem several times larger than the structural one — 19 seconds on PACE
+    /// instance199, which is the entire budget. Held back, they are pulled in by
+    /// [`LpRelaxation::separate_structural`] in geometric batches against a warm
+    /// basis, and only the ones the current point actually violates.
+    pub fn add_lazy_steiner_cut(&mut self, cut_arcs: &[ArcId]) {
+        if cut_arcs.is_empty() {
+            return;
+        }
+        self.lazy.push(RowData {
+            entries: cut_arcs.iter().map(|&a| (a, 1.0)).collect(),
+            lo: 1.0,
+            hi: f64::INFINITY,
+        });
+        self.lazy_resident.push(false);
     }
 
     /// Add a Steiner cut `sum_{a in cut} y_a >= 1`.
@@ -535,14 +553,7 @@ impl LpRelaxation {
     pub fn solve(&mut self) -> f64 {
         let timer = std::time::Instant::now();
         let value = self.solve_inner();
-        let dt = timer.elapsed().as_secs_f64();
-        self.solve_time_secs += dt;
-        if dt > self.max_solve_secs {
-            self.max_solve_secs = dt;
-        }
-        if std::env::var_os("SJ_LPT").is_some() {
-            eprintln!("[lp] {:.1}ms rows={} cuts={}", dt * 1000.0, self.num_constraints(), self.cuts.len());
-        }
+        self.solve_time_secs += timer.elapsed().as_secs_f64();
         value
     }
 

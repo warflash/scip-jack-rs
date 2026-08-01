@@ -276,7 +276,7 @@ impl BranchAndCutSolver {
                 let mut sig = live.clone();
                 sig.sort_unstable();
                 if self.cut_signatures.insert(sig) {
-                    lp.add_steiner_cut(&live);
+                    lp.add_lazy_steiner_cut(&live);
                     seeded += 1;
                 }
                 continue;
@@ -284,7 +284,7 @@ impl BranchAndCutSolver {
             let mut sig = cut.clone();
             sig.sort_unstable();
             if self.cut_signatures.insert(sig) {
-                lp.add_steiner_cut(cut);
+                lp.add_lazy_steiner_cut(cut);
                 seeded += 1;
             }
         }
@@ -559,20 +559,7 @@ impl BranchAndCutSolver {
         let no_partition = !self.config.partition_cuts;
         let no_tf = !self.config.tf_cuts;
 
-        // The cut phase gets a share of what is left, not all of it. A
-        // branch-and-cut that never branches cannot close an integrality gap, and
-        // that is exactly what an unbounded root loop produces: on PACE
-        // instance167 — 384 vertices, 765 edges, a dual bound 25 short of the
-        // optimum — the root separated for the whole budget and the search
-        // processed one node. Separation has diminishing returns; branching does
-        // not.
         let node_deadline = self.deadline;
-        let cut_deadline = self.deadline.map(|d| {
-            let left = d.saturating_duration_since(Instant::now());
-            Instant::now() + left.mul_f64(if is_root_node { 0.4 } else { 0.05 })
-        });
-        let cut_phase_over =
-            move || cut_deadline.is_some_and(|d| Instant::now() >= d);
         let mut prev_bound = f64::NEG_INFINITY;
         let mut stall_rounds = 0u32;
 
@@ -639,13 +626,6 @@ impl BranchAndCutSolver {
             self.base_lp.as_mut().unwrap().prune_cuts();
 
             node_dual_bound = self.lift(obj);
-            if self.config.verbose && is_root_node && std::env::var_os("SJ_TRACE").is_some() {
-                eprintln!(
-                    "[root] round {_round}: lp={obj:.4} lifted={node_dual_bound:.4} rows={} cuts={}",
-                    self.base_lp.as_ref().unwrap().num_constraints(),
-                    self.base_lp.as_ref().unwrap().num_cuts(),
-                );
-            }
 
             if node_dual_bound >= self.tree.global_primal_bound - self.config.gap_tolerance {
                 return NodeResult::Pruned;
@@ -819,10 +799,58 @@ impl BranchAndCutSolver {
             for (arcs, coeffs) in &new_tf_cuts {
                 lp.add_cut(arcs, coeffs, 0.0);
             }
+        }
 
-            if cut_phase_over() {
+        // An integral point with no verified tree behind it has no fractional
+        // variable to branch on, so the node would be abandoned and — at the root
+        // — the whole search would end there. That is not a corner case: the cut
+        // loop leaves as soon as the bound tails off, and the point it leaves
+        // behind is routinely an integral arc set that a connectivity cut still
+        // forbids.
+        // On SteinLib e18 exactly this ended the search at the root with a 5% gap
+        // and 30 seconds of unused budget.
+        //
+        // The remedy is the one the formulation already provides: a disconnected
+        // integral point violates a terminal cut by a full unit, so the max-flow
+        // separator is guaranteed to find one. Keep separating against it until
+        // the point becomes a tree or turns fractional.
+        while !lp_solution.is_empty()
+            && self.is_integer_solution(&lp_solution)
+            && !self.out_of_time()
+        {
+            if let Some(sol) = self.extract_solution(&lp_solution) {
+                self.tree.nodes[node_id as usize].dual_bound = node_dual_bound.max(da_bound);
+                return NodeResult::IntegerFeasible(sol);
+            }
+            let forced = separator.find_violated_cuts(&lp_solution);
+            let mut added = 0usize;
+            for cut in &forced {
+                let mut sig = cut.cut_arcs.clone();
+                sig.sort();
+                if self.cut_signatures.insert(sig) {
+                    self.base_lp.as_mut().unwrap().add_steiner_cut(&cut.cut_arcs);
+                    added += 1;
+                }
+            }
+            if added == 0 {
                 break;
             }
+            self.total_cuts_added += added as u64;
+            arm(self.base_lp.as_mut().unwrap(), node_deadline);
+            let obj = self.base_lp.as_mut().unwrap().solve();
+            self.total_lp_solves += 1;
+            if !self.base_lp.as_ref().unwrap().is_optimal() {
+                return if self.base_lp.as_ref().unwrap().status == LpStatus::Infeasible {
+                    NodeResult::Pruned
+                } else {
+                    NodeResult::Abandoned
+                };
+            }
+            node_dual_bound = self.lift(obj);
+            if node_dual_bound >= self.tree.global_primal_bound - self.config.gap_tolerance {
+                return NodeResult::Pruned;
+            }
+            lp_solution = self.base_lp.as_ref().unwrap().get_solution().to_vec();
         }
 
         // Both bounds are valid for this node, so the node's bound is the better

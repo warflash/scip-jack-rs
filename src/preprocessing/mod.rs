@@ -1,5 +1,6 @@
 pub mod degree;
 pub mod distance;
+pub mod blocks;
 pub mod bottleneck;
 pub mod csr;
 pub mod nearest_vertex;
@@ -342,6 +343,12 @@ pub struct PreprocessingResult {
 /// The order within a round is deliberate:
 ///
 /// 1. **Degree rules** — the cheapest, and they expose work for everything else.
+/// 1b. **Cut-vertex structure** ([`blocks`]) — deletes terminal-free sides,
+///    promotes separating cut vertices to terminals, and contracts
+///    terminal-separating bridges. It runs early because promoting a vertex to a
+///    terminal strengthens every rule below it: the special distance gains a
+///    legal chain interior, the ascent gains a component, the LP gains an
+///    equality row.
 /// 2. **Terminal contraction** ([`nearest_vertex`]) — the only rule that shrinks
 ///    the terminal set, which is what the dual ascent and the LP both scale with.
 /// 3. **Bottleneck Steiner distance** ([`bottleneck`]) — edge deletion. This
@@ -384,6 +391,11 @@ pub fn preprocess_until(
             break;
         }
 
+        let block_changed = blocks::block_reductions(&mut rg).total();
+        if expired() {
+            break;
+        }
+
         let nv_removed = nearest_vertex::nearest_vertex_reductions(&mut rg);
         if expired() {
             break;
@@ -394,7 +406,7 @@ pub fn preprocess_until(
         }
         let vt_removed = vertex_test::vertex_reductions(&mut rg, deadline);
 
-        if deg_removed + nv_removed + bn_removed + vt_removed == 0 || expired() {
+        if deg_removed + block_changed + nv_removed + bn_removed + vt_removed == 0 || expired() {
             break;
         }
     }

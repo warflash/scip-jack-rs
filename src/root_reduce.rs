@@ -41,6 +41,7 @@ use crate::graph::algorithms::{
 use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, NodeId, NodeType, UndirectedGraph};
 use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
 use crate::heuristics::sph::{shortest_path_heuristic, SphResult, SphWorkspace};
+use crate::heuristics::{iterated_local_search, IlsWorkspace};
 use crate::preprocessing::preprocess_until;
 use crate::graph::SteinerInstance;
 
@@ -78,6 +79,8 @@ pub struct ReduceConfig {
     pub heuristic_starts: usize,
     /// Maximum tightening rounds.
     pub max_rounds: u32,
+    /// Perturb-and-merge iterations per round. Bounded by `deadline` as well.
+    pub ils_iterations: u32,
     /// Cost of a solution already known, used as the elimination cutoff from the
     /// first round. Feeding back an incumbent found later by branch-and-cut lets
     /// the reduced costs eliminate far more than the heuristic's own bound would.
@@ -92,6 +95,7 @@ impl Default for ReduceConfig {
             roots_per_round: 4,
             heuristic_starts: 64,
             max_rounds: 8,
+            ils_iterations: 400,
             initial_upper_bound: Cost::INFINITY,
             deadline: None,
             verbose: false,
@@ -144,7 +148,7 @@ pub fn tighten(
             break;
         }
 
-        let outcome = round(&graph, &terminals, config, upper_bound);
+        let outcome = round(&graph, &terminals, config, upper_bound, lower_bound);
 
         // With integral costs every tree costs an integer, so a fractional dual
         // bound can be lifted to the next one.
@@ -243,6 +247,7 @@ fn round(
     terminals: &[NodeId],
     config: &ReduceConfig,
     incoming_ub: Cost,
+    incoming_lb: Cost,
 ) -> RoundOutcome {
     let directed = DirectedGraph::from_undirected(graph);
     let idx = ArcIndex::new(&directed);
@@ -292,8 +297,18 @@ fn round(
     });
     let primal_expired = || primal_deadline.is_some_and(|d| Instant::now() >= d);
 
-    // Unguided primal pass from a spread of starts. Each run is k Dijkstras on a
-    // graph that earlier rounds have already shrunk, so this stays cheap.
+    // Two primal phases sharing the budget.
+    //
+    // First a spread of greedy starts. They are diverse in a way perturbation is
+    // not — a different terminal goes first, so the tree grows from a different
+    // corner of the graph — and they populate the pool the recombination at the
+    // end of this function draws on.
+    //
+    // Then iterated local search from the best of them, which is what closes the
+    // last one or two percent. The split is even: the greedy starts saturate
+    // quickly, and past that point every remaining second is worth more to the
+    // perturb-and-merge loop.
+    let mut seed: Option<SphResult> = None;
     for s in heuristic_starts(terminals, config.heuristic_starts) {
         if primal_expired() {
             break;
@@ -303,10 +318,32 @@ fn round(
         {
             let r = polish(r, primary, &mut kws, &mut ws);
             pool.push((r.cost, nodes_of(&idx, &r.arcs, primary)));
-            if r.cost < upper_bound - 1e-9 {
-                upper_bound = r.cost;
-                incumbent_arcs = Some(r.arcs);
+            if seed.as_ref().is_none_or(|b| r.cost < b.cost) {
+                seed = Some(r);
             }
+        }
+    }
+
+    let mut ils_ws = IlsWorkspace::new(num_arcs);
+    if let Some(s) = seed {
+        let best = iterated_local_search(
+            &idx,
+            &active,
+            primary,
+            terminals,
+            &is_terminal,
+            s,
+            incoming_lb,
+            config.ils_iterations,
+            primal_deadline,
+            &mut ils_ws,
+            &mut ws,
+            &mut kws,
+        );
+        pool.push((best.cost, nodes_of(&idx, &best.arcs, primary)));
+        if best.cost < upper_bound - 1e-9 {
+            upper_bound = best.cost;
+            incumbent_arcs = Some(best.arcs);
         }
     }
 
