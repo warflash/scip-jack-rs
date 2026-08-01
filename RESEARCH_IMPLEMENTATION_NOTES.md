@@ -515,9 +515,12 @@ where the object is built.
 2. ~~**Lemma 15 of the paper**~~ — implemented in full, including the
    compositional rule the cheap version misses; see §16.
 3. **The 2–3 % dual gap on the many-terminal instances** (199: 114 terminals,
-   200: 135) is untouched by any of this. That remains §6 of the scratchpad —
-   hypergraphic component pricing — and it is now the only frontier left where
-   neither reduction nor exact search applies.
+   200: 135). Round 4 measured what it is made of (§18, §21) and the answer is
+   not the relaxation: those instances solve their LP two to five times inside
+   any budget tried, at ~3.9 s a solve, and report a dual bound that is the
+   dual-ascent seed plus a whisker. Hypergraphic component pricing is still the
+   right *object*, but it is the wrong *next step* — it is a more expensive LP
+   for a solver that cannot afford the cheap one.
 
 
 ## 2026-08-01 (fourth round): the search's pruning and its inner loop
@@ -697,6 +700,58 @@ purely the cost of carrying them.
 solve in its budget to six. Instance189's structural block drops from 24,035 rows
 to 19,863.
 
+### 20. Skipping the terminals a cut already separates — correct, faster, and worse
+
+The obvious follow-up to §18 was to cut the `|R|` max-flows a separation round
+runs. It is sound and it does not pay.
+
+> **Covering.** If `W` is the source side of an emitted cut then `root ∈ W`, and
+> for any terminal `t' ∉ W` the arc set `δ⁺(W)` is a root-`t'` cut whose load
+> under the true LP values is below one — that is the test the row passed to be
+> emitted. So the row already separates `t'`, and `t'`'s own max-flow can only
+> discover a *different* row for a violation already covered.
+
+The round's termination criterion survives, because a terminal is skipped only
+once a row separating it exists, so an empty result still certifies that no
+terminal is violated.
+
+**Measured.** Separation on instance189 halved, ~470 ms a round to ~210 ms. And:
+
+| slice | with all flows | skipping covered |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | **137/140**, 51.9 s | 136/140, 53.3 s |
+| PACE Track 1 [155..200] @5 s | **21/46**, 153.7 s | 20/46, 156.0 s |
+| SteinLib E @20 s | 19/20, 92.2 s | 19/20, **87.1 s** |
+| SteinLib D @5 s | 20/20, 15.7 s | 20/20, **15.1 s** |
+| SteinLib C @5 s | 20/20, 4.9 s | 20/20, **4.6 s** |
+
+Two proofs lost across two slices, against a uniform speed-up on SteinLib. The
+redundant flows were buying rows that the *rest* of the cut loop needed: fewer
+cuts per round is slower bound convergence, and on the PACE instances the LP is
+cheap enough that the extra flows pay for themselves. **Reverted.** The lesson
+is that the yield per round, not the cost per round, is what binds here — which
+is the same thing §21 says from the other side.
+
+### 21. The LP itself, measured
+
+Given 60 s instead of 5 s, instance189's dual goes 19,864 → 20,243 against an
+optimum of 20,678, and instance199's does not move at all. In that time each
+instance manages **five LP solves at ~3.9 s apiece** on a 17,000-row,
+15,000-column model. Separation is by then negligible: 19.3 s of instance189's
+19.8 s is inside HiGHS.
+
+So the ordering of the frontier for large instances is now measured rather than
+assumed:
+
+1. the LP solve time, which is the binding constraint at every time limit tried;
+2. the yield per separation round, which §20 shows is what the round is really
+   for;
+3. only then the strength of the relaxation, and with it §6 of the scratchpad.
+
+These are Steiner-cut LPs, which are severely degenerate, and the model is
+re-solved from a basis that HiGHS's presolve discards. Nothing in this round
+addresses that.
+
 ### Round summary
 
 | slice | round 3 | now |
@@ -730,12 +785,14 @@ it feasible whatever the other row families' duals are doing. The cost is a
 pipeline reordering: the root LP would have to run before the search rather than
 after it.
 
-For the *large* instances, §18 says the target is throughput of the existing
-relaxation, not a stronger one, until the LP can be solved enough times for its
-own bound to be the binding constraint. Only then does §6 of the scratchpad —
-hypergraphic component pricing — become the right next object. Instance189 now
-spends 1.5 s of 2.5 s outside the LP, in separation, which is where the next
-measurement should go.
+For the *large* instances, §18 and §21 say the target is the throughput of the
+existing relaxation, not a stronger one, until the LP can be solved enough times
+for its own bound to be the binding constraint. §20 says the lever is not the
+cost of a separation round — cutting it in half lost proofs — but the LP solve,
+which is 19.3 s of instance189's 19.8 s. Only after that does §6 of the
+scratchpad, hypergraphic component pricing, become the right next object; until
+then a stronger relaxation is a strictly more expensive one that would be solved
+even less often.
 
 ---
 

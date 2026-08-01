@@ -62,11 +62,11 @@ pub struct LpRelaxation {
     col_ub_base: Vec<f64>,
     /// Structural rows; never removed.
     structural: Vec<RowData>,
-    /// Valid structural rows held back and added only when violated. These are
-    /// the two families whose count is proportional to the arc count — the
-    /// Steiner continuation rows and the edge-vertex coupling rows. Keeping all
-    /// of them resident makes the model an order of magnitude larger than the
-    /// number of variables while only a handful are ever binding.
+    /// Valid structural rows held back and added only when violated: the
+    /// edge-vertex coupling rows, whose count is proportional to the arc count,
+    /// and the dual-ascent cut seed. Keeping all of them resident makes the
+    /// model an order of magnitude larger than the number of variables while
+    /// only a handful are ever binding.
     lazy: Vec<RowData>,
     lazy_resident: Vec<bool>,
     /// Separated cuts, subject to ageing.
