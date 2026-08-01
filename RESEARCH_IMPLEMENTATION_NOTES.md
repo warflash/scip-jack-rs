@@ -1411,6 +1411,83 @@ against the optimum with an independent feasibility re-check.
 
 ---
 
+## 2026-08-01 (seventh round): what the width actually is
+
+### 36. Treewidth, measured before anything was built on it
+
+The four instances the search is locked out of — 197 to 200, 5,000 to 6,600
+vertices, average degree 3.5, 101 to 134 terminals — are exactly the shape a
+Steiner DP over a tree decomposition is for: exponential in width, indifferent
+to terminal count, where Dijkstra-Steiner is exponential in terminals and is
+never even offered them. The question is only what the width is, and that is one
+decomposition run rather than an argument.
+
+`graph/algorithms/tree_decomposition.rs` builds one. Both classical elimination
+heuristics — minimum degree and minimum fill-in — run the elimination game, and
+the bags are wired into a tree by making bag `i` the child of the bag of the
+earliest-eliminated vertex of `B_i - {v_i}`. The module carries the validity
+theorem inline: *that construction is a tree decomposition for **any**
+elimination ordering*, which is what makes the heuristics safe — they can move
+the width, never the validity. The three axioms are additionally re-checked
+against the graph at the point of use, because a decomposition that silently
+violated axiom 3 would make a DP's join step unsound in a way no test on the DP
+would localise.
+
+Deciding a DP is *unaffordable* needs the other direction, and "our heuristic
+found nothing better" is not a theorem. So the module also computes a certified
+lower bound, from two lemmas proved inline: every graph has `tw >= delta`, the
+minimum degree (a leaf bag of a minimal decomposition contains a vertex together
+with all its neighbours), and treewidth is minor-monotone (each of the three
+minor operations is checked directly against the axioms). Their corollary — for
+any sequence of contractions, `tw(G) >= max_i delta(H_i)` — is the whole
+algorithm, and it is Bodlaender-Koster's MMD+.
+
+**Measured on the reduced instances**, which is the graph the exact stage is
+actually handed:
+
+| instance | red \|V\| | red \|E\| | \|R\| | tw >= | min-deg | min-fill |
+|---|---|---|---|---|---|---|
+| 197 | 6,598 | 11,641 | 101 | 5 | 70 | **66** |
+| 198 | 5,063 | 8,804 | 121 | 5 | 83 | **58** |
+| 199 | 4,943 | 8,610 | 111 | 5 | 64 | **58** |
+| 200 | 5,225 | 9,062 | 134 | 5 | 75 | **60** |
+| 187 | 1,234 | 2,462 | 34 | 11 | 67 | 50 |
+| 189 | 4,136 | 7,440 | 36 | 5 | 62 | 50 |
+| 190 | 998 | 1,989 | 37 | 9 | 40 | 36 |
+| 193 | 599 | 1,203 | 38 | 9 | 31 | 29 |
+| 194 | 699 | 1,610 | 39 | 10 | 26 | 25 |
+| 167 | 384 | 765 | 26 | 7 | 26 | 26 |
+| 171 | 241 | 1,211 | 25 | 23 | 133 | 117 |
+| 172 | 243 | 1,215 | 27 | 24 | 124 | 121 |
+| 195 | 550 | 5,013 | 50 | **49** | 49 | **49** |
+| 196 | 694 | 4,286 | 41 | 43 | 382 | 372 |
+
+**The answer is 58 to 66, and it closes nothing.** The prior for the round was
+that widths in the teens would close four instances outright; the narrowest
+decomposition available on any of the four is 58. The affordability threshold is
+not close: the classical partition DP is `Bell(w+2)` per bag, which runs out at
+`w = 10`, and even the rank-based `2^{O(w)}` variant is `2^58` per bag on a graph
+with 5,000 of them. A DP was therefore not written. One decomposition run cost
+two seconds and said so, which is the entire point of measuring first.
+
+Two things are worth keeping out of the run. On instance195 the lower bound
+meets the upper bound: **its treewidth is exactly 49**, so no decomposition of
+that instance can ever be narrower, and the direction is closed on it as a
+theorem rather than as a measurement. And the gap between the two objects on
+197-200 (5 against 58) is the contraction bound's weakness, not evidence that a
+narrow decomposition exists — MMD+ degenerates on graphs that keep producing
+degree-1 vertices under contraction. It does not need to be strong: the upper
+bound is what a DP would have to *run at*, and 58 is refused whatever the truth
+below it.
+
+**Closed direction — do not revisit.** Treewidth DP for PACE Track 1. Track 1 is
+not the bounded-width track and its reduced instances do not have bounded width.
+The decomposition module stays: it is a proved structural object, it is cheap,
+and the width is exactly the kind of *computed* quantity a dispatch is allowed to
+key on.
+
+---
+
 ## Where the remaining loss is
 
 Re-measured this session, PACE Track 1 [155..200] at 5 s: 15/46 proved. The

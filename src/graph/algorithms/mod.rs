@@ -3,6 +3,7 @@ pub mod dijkstra;
 pub mod max_flow;
 pub mod dual_ascent;
 pub mod dreyfus_wagner;
+pub mod tree_decomposition;
 
 pub use dijkstra_steiner::{
     dijkstra_steiner, dijkstra_steiner_guided, DijkstraSteinerResult, SteinerSearch,
@@ -16,3 +17,4 @@ pub use dual_ascent::{
     ReducedCostDistances, ReducedCostFixings,
 };
 pub use dreyfus_wagner::{dreyfus_wagner, DreyfusWagnerResult};
+pub use tree_decomposition::{decompose, decompose_with, TreeDecomposition};
