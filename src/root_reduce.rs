@@ -42,7 +42,7 @@ use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, NodeId
 use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
 use crate::heuristics::sph::{shortest_path_heuristic, SphResult, SphWorkspace};
 use crate::heuristics::{iterated_local_search, IlsStats, IlsWorkspace};
-use crate::preprocessing::preprocess_until;
+use crate::preprocessing::preprocess_bounded;
 use crate::graph::SteinerInstance;
 
 /// Outcome of the tightening loop.
@@ -195,7 +195,11 @@ pub fn tighten(
             break;
         };
         let instance = as_instance(&g2, &t2);
-        let (rg, _) = preprocess_until(&instance, &g2, config.deadline);
+        // The incumbent is a tree of `g2` of cost `upper_bound` unless an earlier
+        // elimination already removed it, in which case the loop is already
+        // running under "every tree cheaper than the incumbent survives" and the
+        // region bounds preserve exactly that.
+        let (rg, _) = preprocess_bounded(&instance, &g2, config.deadline, upper_bound);
         let (ri, ru) = rg.to_instance();
         if ri.terminals.is_empty() {
             break;

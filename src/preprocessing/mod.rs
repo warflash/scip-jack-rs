@@ -1,3 +1,4 @@
+pub mod bound_reduce;
 pub mod degree;
 pub mod distance;
 pub mod blocks;
@@ -124,6 +125,21 @@ impl ReducibleGraph {
 
         let (n1, e1) = neighbors[0];
         let (n2, e2) = neighbors[1];
+
+        // Both edges lead to the same vertex. Contracting would create a loop at
+        // `n1`, and a loop is in no tree — which is also why `node` itself is in
+        // no inclusion-minimal tree: a tree containing it gives it degree 1, so it
+        // is a Steiner leaf and prunable, or degree 2, so both copies of the
+        // parallel edge are present and close a cycle. Delete it instead.
+        //
+        // Left unguarded this produced an actual self-loop, and the loop then
+        // appeared twice in the LP's flow-balance and no-leaf rows for `n1` —
+        // duplicate column indices, which HiGHS rejects outright. PACE
+        // instance129 crashed the solver on exactly this.
+        if n1 == n2 {
+            self.remove_node(node);
+            return None;
+        }
         let cost1 = self.edges[e1 as usize].cost;
         let cost2 = self.edges[e2 as usize].cost;
         let new_cost = cost1 + cost2;
@@ -269,6 +285,12 @@ impl ReducibleGraph {
 
         for &eid in &valid_edges {
             let edge = &self.edges[eid as usize];
+            // A loop is a cycle on its own, so it belongs to no tree. Dropping it
+            // here keeps the promise this function makes to its consumers: the
+            // LP builder indexes rows by vertex and cannot represent one.
+            if edge.src == edge.dst {
+                continue;
+            }
             if let (Some(&new_src), Some(&new_dst)) = (node_map.get(&edge.src), node_map.get(&edge.dst)) {
                 graph.add_edge(new_src, new_dst, edge.cost);
             }
@@ -356,6 +378,10 @@ pub struct PreprocessingResult {
 ///    `max(a, b) <= a + b` for nonnegative distances.
 /// 4. **Star domination** ([`vertex_test`]) — Steiner vertex deletion, the
 ///    strongest rule on dense graphs and the most expensive.
+/// 5. **Region bounds** ([`bound_reduce`]) — vertex and edge deletion driven by
+///    a combinatorial lower bound rather than by the dual. Runs only when an
+///    upper bound has been supplied, and last, because its bound strengthens
+///    every time one of the rules above shortens the graph.
 ///
 /// Each rule is judged against the graph as it stands when the rule runs, and
 /// each preserves the optimum of that graph, so the composition preserves the
@@ -377,12 +403,34 @@ pub fn preprocess_until(
     graph: &UndirectedGraph,
     deadline: Option<Instant>,
 ) -> (ReducibleGraph, PreprocessingResult) {
+    preprocess_bounded(instance, graph, deadline, Cost::INFINITY)
+}
+
+/// [`preprocess_until`] with a known upper bound, which unlocks [`bound_reduce`].
+///
+/// `upper_bound` must be a cost achieved by some tree of `instance`, or
+/// infinity. The bound-based rules preserve every tree of cost at most
+/// `upper_bound` rather than the optimum outright, so with a finite value the
+/// guarantee weakens from "the optimum is unchanged" to "the optimum is
+/// unchanged whenever it is at most `upper_bound`" — which is exactly the
+/// invariant the ascend-and-prune loop already runs under. Every other rule here
+/// preserves the optimum unconditionally, so with `upper_bound = infinity` this
+/// is [`preprocess_until`] verbatim.
+pub fn preprocess_bounded(
+    instance: &SteinerInstance,
+    graph: &UndirectedGraph,
+    deadline: Option<Instant>,
+    upper_bound: Cost,
+) -> (ReducibleGraph, PreprocessingResult) {
     let mut rg = ReducibleGraph::from_instance(instance, graph);
 
     let initial_nodes = rg.num_valid_nodes();
     let initial_edges = rg.num_valid_edges();
     let mut total_fixed: Vec<EdgeId> = Vec::new();
     let expired = || deadline.is_some_and(|d| Instant::now() >= d);
+    let max_id = rg.nodes.iter().map(|n| n.id as usize).max().unwrap_or(0);
+    let mut watch = vertex_test::StarWatch::new(max_id);
+    let mut edge_watch = bottleneck::EdgeWatch::new();
 
     loop {
         let (deg_removed, fixed, _) = degree::degree_reductions(&mut rg);
@@ -400,13 +448,39 @@ pub fn preprocess_until(
         if expired() {
             break;
         }
-        let bn_removed = bottleneck::bottleneck_reductions(&mut rg);
+        // Cut-vertex promotion adds terminals and terminal contraction merges
+        // vertices; both can lower a special distance anywhere in the graph, so
+        // neither is covered by the star test's monotonicity lemma and the memory
+        // of past failures has to go.
+        if block_changed + nv_removed > 0 {
+            watch.invalidate_all();
+            edge_watch.invalidate_all();
+        }
+        let bn_removed = bottleneck::bottleneck_reductions_watched(&mut rg, &mut edge_watch);
         if expired() {
             break;
         }
-        let vt_removed = vertex_test::vertex_reductions(&mut rg, deadline);
+        let vt_removed = vertex_test::vertex_reductions_watched(&mut rg, deadline, &mut watch);
+        if expired() {
+            break;
+        }
 
-        if deg_removed + block_changed + nv_removed + bn_removed + vt_removed == 0 || expired() {
+        if deg_removed + block_changed + nv_removed + bn_removed + vt_removed > 0 {
+            continue;
+        }
+
+        // The classical rules have reached their fixpoint. Only now is the region
+        // bound worth evaluating: it is monotone in the graph — deleting anything
+        // can only lengthen distances and so raise every radius — so running it
+        // while the rules above are still firing repeats work at a strictly
+        // weaker cutoff. On PACE instance189 that fixpoint takes 74 rounds, and
+        // scheduling the test per round cost a third of the preprocessing budget
+        // for nothing.
+        //
+        // Contractions have moved `rg.offset` out of the graph, so the cutoff for
+        // what remains is the incoming bound less what has been paid.
+        let cutoff = upper_bound - rg.offset;
+        if bound_reduce::bound_reductions(&mut rg, cutoff) == 0 || expired() {
             break;
         }
     }
@@ -518,6 +592,46 @@ mod tests {
             .map(|e| e.cost)
             .sum();
         assert!(rg.offset + live_cost >= 2.0 - 1e-9);
+    }
+
+    /// A degree-2 Steiner node whose two edges are parallel must not be
+    /// contracted into a self-loop. PACE instance129 reached the LP builder with
+    /// one and HiGHS rejected the model outright.
+    #[test]
+    fn parallel_degree2_neighbour_does_not_become_a_self_loop() {
+        // 1(T) -- 3 -- 4(T), plus Steiner node 2 joined to 3 twice.
+        let mut g = UndirectedGraph::new(4);
+        g.add_node(1, NodeType::Terminal, 0.0);
+        g.add_node(2, NodeType::Steiner, 0.0);
+        g.add_node(3, NodeType::Steiner, 0.0);
+        g.add_node(4, NodeType::Terminal, 0.0);
+        g.add_edge(1, 3, 1.0);
+        g.add_edge(3, 4, 1.0);
+        g.add_edge(2, 3, 5.0);
+        g.add_edge(2, 3, 7.0);
+
+        let instance = SteinerInstance {
+            name: "test".into(),
+            comment: String::new(),
+            num_nodes: 4,
+            num_edges: 4,
+            num_terminals: 2,
+            nodes: g.nodes.clone(),
+            edges: g.edges.clone(),
+            terminals: vec![1, 4],
+            root: Some(1),
+        };
+
+        let (rg, _) = preprocess(&instance, &g);
+        assert!(
+            rg.edges.iter().all(|e| !rg.is_edge_valid(e.id) || e.src != e.dst),
+            "reduction produced a self-loop"
+        );
+        let (ri, _) = rg.to_instance();
+        assert!(ri.edges.iter().all(|e| e.src != e.dst), "self-loop survived into the instance");
+        // The corridor 1-3-4 is the whole answer; it costs 2.
+        let live: Cost = rg.edges.iter().filter(|e| rg.is_edge_valid(e.id)).map(|e| e.cost).sum();
+        assert!((rg.offset + live - 2.0).abs() < 1e-9, "offset {} live {}", rg.offset, live);
     }
 
     #[test]

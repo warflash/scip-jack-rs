@@ -92,6 +92,45 @@
 //! pass therefore deletes candidates one at a time and evaluates each against the
 //! graph from which the earlier ones are already absent, which does compose: each
 //! step preserves the optimum of the graph it was applied to.
+//!
+//! # Not re-testing what cannot have changed
+//!
+//! The reduction loop runs this pass once per round, and a round removes a few
+//! dozen elements out of tens of thousands. Re-scanning every vertex each time is
+//! what the loop actually spends its life doing: on PACE instance189 the fixpoint
+//! takes 74 rounds and this test alone costs 2.1 of the 3.3 seconds, for about
+//! twenty deletions a round.
+//!
+//! Almost all of that work is provably wasted.
+//!
+//! > **Monotonicity.** Let `G'` be obtained from `G` by any sequence of the other
+//! > reductions in this module, and let `v` be a vertex whose star — its
+//! > neighbours and the costs to them — is identical in `G` and `G'`. Suppose the
+//! > terminal set did not change. If `v` failed the test in `G`, it fails in `G'`.
+//!
+//! *Proof.* The test quantifies over subsets `Q` of `N(v)`, and `N(v)` and the
+//! budgets `sum_{u in Q} c(v, u)` are unchanged by hypothesis, so the same
+//! witness `Q` with `mst_s(Q) > budget(Q)` is still available. It remains to show
+//! `s` does not decrease. Each of the other rules either deletes elements —
+//! degree-0/1 removal, parallel-edge removal, bottleneck edge deletion, and this
+//! test's own deletions — which cannot shorten any path, or is a degree-2
+//! contraction, which replaces `n_1 - w - n_2` by a single edge of cost
+//! `c(n_1,w) + c(w,n_2)` and so leaves `d(x, y)` unchanged for every surviving
+//! pair. In both cases `d` is non-decreasing on the surviving vertices, and since
+//! the terminal set is unchanged the bound
+//! `s(a,b) <= min(d(a,b), min_t max(d(a,t), d(b,t)))` is non-decreasing too.
+//! Hence `mst_s(Q)` is non-decreasing and the witness survives. ∎
+//!
+//! So a vertex only needs re-testing when its own star changed. [`StarWatch`]
+//! records a hash of the star of every vertex that failed and skips it until that
+//! hash moves.
+//!
+//! The two hypotheses are real and both are checked by the caller rather than
+//! assumed. Terminal *contraction* merges two vertices, which is a shortcut and
+//! can shorten `d` anywhere in the graph; cut-vertex promotion *adds* terminals,
+//! which gives `min_t` more to minimise over and can only lower `s`. Neither is
+//! covered by the lemma, so [`preprocess_bounded`](super::preprocess_bounded)
+//! calls [`StarWatch::invalidate_all`] whenever either fires.
 
 use std::time::Instant;
 
@@ -100,12 +139,70 @@ use crate::graph::{Cost, NodeId};
 use super::csr::{Csr, DijkstraWorkspace};
 use super::ReducibleGraph;
 
+/// Per-vertex memory of the star last seen to fail the test.
+///
+/// `None` means "must be tested". See the module comment for why a matching
+/// signature is a proof that the test would fail again.
+pub struct StarWatch {
+    failed_signature: Vec<Option<u64>>,
+}
+
+impl StarWatch {
+    pub fn new(num_nodes: usize) -> Self {
+        Self { failed_signature: vec![None; num_nodes + 1] }
+    }
+
+    /// Forget everything. Required after any reduction that can shorten
+    /// distances or enlarge the terminal set.
+    pub fn invalidate_all(&mut self) {
+        self.failed_signature.iter_mut().for_each(|s| *s = None);
+    }
+
+    fn is_clean(&self, v: NodeId, signature: u64) -> bool {
+        self.failed_signature.get(v as usize).copied().flatten() == Some(signature)
+    }
+
+    fn mark_failed(&mut self, v: NodeId, signature: u64) {
+        if let Some(slot) = self.failed_signature.get_mut(v as usize) {
+            *slot = Some(signature);
+        }
+    }
+}
+
+/// FNV-1a over the sorted `(neighbour, cost)` pairs of `v`'s live star.
+///
+/// A collision costs a skipped re-test, never an unsound deletion: the test
+/// itself is unchanged, this only decides whether to run it.
+fn star_signature(csr: &Csr, v: NodeId, scratch: &mut Vec<(NodeId, u64)>) -> u64 {
+    scratch.clear();
+    scratch.extend(
+        csr.neighbors(v).filter(|&(u, _, _)| !csr.is_masked(u)).map(|(u, c, _)| (u, c.to_bits())),
+    );
+    scratch.sort_unstable();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &(u, c) in scratch.iter() {
+        h = (h ^ u as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        h = (h ^ c).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// Only vertices of degree at most this are examined. The number of subsets to
 /// check grows as `2^k` and the star cost grows with `k`, so high-degree
 /// vertices are both expensive to test and unlikely to pass.
 const MAX_DEGREE: usize = 8;
 
+/// One sweep with no memory of previous sweeps.
 pub fn vertex_reductions(graph: &mut ReducibleGraph, deadline: Option<Instant>) -> u32 {
+    let mut watch = StarWatch::new(graph.nodes.iter().map(|n| n.id as usize).max().unwrap_or(0));
+    vertex_reductions_watched(graph, deadline, &mut watch)
+}
+
+pub fn vertex_reductions_watched(
+    graph: &mut ReducibleGraph,
+    deadline: Option<Instant>,
+    watch: &mut StarWatch,
+) -> u32 {
     let terminals: Vec<NodeId> = {
         let mut t: Vec<NodeId> = graph
             .terminals
@@ -132,6 +229,7 @@ pub fn vertex_reductions(graph: &mut ReducibleGraph, deadline: Option<Instant>) 
         .collect();
 
     let mut removed = 0;
+    let mut scratch: Vec<(NodeId, u64)> = Vec::new();
     for (seen, v) in candidates.into_iter().enumerate() {
         // The per-candidate cost is a handful of bounded Dijkstras, so checking
         // the clock every few hundred candidates is granular enough.
@@ -139,6 +237,10 @@ pub fn vertex_reductions(graph: &mut ReducibleGraph, deadline: Option<Instant>) 
             break;
         }
         if csr.is_masked(v) {
+            continue;
+        }
+        let signature = star_signature(&csr, v, &mut scratch);
+        if watch.is_clean(v, signature) {
             continue;
         }
         let star: Vec<(NodeId, Cost)> = csr
@@ -153,12 +255,16 @@ pub fn vertex_reductions(graph: &mut ReducibleGraph, deadline: Option<Instant>) 
         });
         star.dedup_by_key(|&mut (u, _)| u);
         let k = star.len();
+        // Both of these depend on the star alone, so they are failures the
+        // signature fully accounts for.
         if !(3..=MAX_DEGREE).contains(&k) {
+            watch.mark_failed(v, signature);
             continue;
         }
 
         let radius: Cost = star.iter().map(|&(_, c)| c).sum();
         if !radius.is_finite() {
+            watch.mark_failed(v, signature);
             continue;
         }
 
@@ -195,6 +301,7 @@ pub fn vertex_reductions(graph: &mut ReducibleGraph, deadline: Option<Instant>) 
         }
 
         if !star_is_dominated(&star, &sd, k) {
+            watch.mark_failed(v, signature);
             continue;
         }
 

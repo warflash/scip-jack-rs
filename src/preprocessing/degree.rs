@@ -67,7 +67,14 @@ pub fn degree_reductions(graph: &mut ReducibleGraph) -> (u32, Vec<EdgeId>, Cost)
     (changes, fixed_edges, lb_offset)
 }
 
-/// Remove parallel edges between same pair of nodes, keeping only the cheapest.
+/// Remove parallel edges between same pair of nodes, keeping only the cheapest,
+/// and drop self-loops.
+///
+/// A loop `{u, u}` is a cycle on its own, so no tree contains it and deleting it
+/// preserves every solution. Keying loops by `(u, u)` in the parallel-edge map
+/// would instead keep one of them forever, and a surviving loop is not merely
+/// useless: it lands twice in the LP's flow-balance row for `u`, which is an
+/// invalid model rather than a weak one.
 fn remove_parallel_edges(graph: &mut ReducibleGraph) -> u32 {
     let mut removed = 0u32;
     let mut seen: std::collections::HashMap<(u32, u32), (EdgeId, Cost)> = std::collections::HashMap::new();
@@ -75,6 +82,11 @@ fn remove_parallel_edges(graph: &mut ReducibleGraph) -> u32 {
 
     for edge in &graph.edges {
         if !graph.is_edge_valid(edge.id) {
+            continue;
+        }
+
+        if edge.src == edge.dst {
+            to_remove.push(edge.id);
             continue;
         }
 
