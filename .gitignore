@@ -7,6 +7,5 @@
 /benchmarks/pace2018-results/
 
 # Measurement scratch: frozen control binaries and per-instance sweep CSVs.
-/tmp/control/
-/tmp/measure/
-/tmp/cmp*.sh
+/tmp/*
+!/tmp/pdfs/

@@ -21,13 +21,39 @@
 //! ```text
 //! perturb the arc costs
 //! -> shortest-path heuristic on the perturbed costs
-//! -> key-path exchange against the true costs
+//! -> polish against the true costs
 //! -> merge with the incumbent
-//! -> key-path exchange again
+//! -> polish again
 //! ```
 //!
 //! Perturbation is what escapes the local optimum; the merge is what keeps the
 //! escape from losing the ground already gained.
+//!
+//! # What "polish" means, and why it changed
+//!
+//! Key-path exchange rewires one corridor at a time and leaves the branching
+//! structure exactly as the construction built it. Running it alone means every
+//! local optimum the loop reaches is a local optimum of a neighbourhood that
+//! cannot move a branch point, and perturbation then has to rediscover the whole
+//! topology by luck. The two moves that *do* change the topology —
+//! [`key_vertex_elimination`] and [`vertex_insertion`] — used to run once per
+//! round, after the loop had already converged, which is the one place they
+//! cannot influence where the loop goes.
+//!
+//! `polish` is now the closure of all three: exchange corridors until that
+//! stops paying, then try a topological move, and repeat until neither
+//! neighbourhood improves. Every tree the loop keeps is therefore a local
+//! optimum of the *combined* neighbourhood.
+//!
+//! # The pool
+//!
+//! The loop visits many distinct local optima and used to report only the
+//! cheapest. The rest are exactly what an exact recombination wants — the
+//! subgraph a set of good trees spans is a near-tree, so the best tree inside it
+//! can be computed rather than approximated (see
+//! [`crate::heuristics::exact_recombination`]) — and they are free, having
+//! already been built. `IlsWorkspace` keeps them, deduplicated by vertex set so
+//! that two runs landing on the same tree occupy one slot.
 //!
 //! Two perturbations alternate, and the pair is the point:
 //!
@@ -56,6 +82,7 @@ use crate::graph::algorithms::ArcIndex;
 use crate::graph::{ArcId, Cost, NodeId};
 
 use super::key_path::{key_path_exchange, KeyPathWorkspace};
+use super::key_vertex::{key_vertex_elimination, vertex_insertion, KeyVertexWorkspace};
 use super::sph::{mst_prune, shortest_path_heuristic, SphResult, SphWorkspace};
 
 /// Relative size of the random cost perturbation.
@@ -63,6 +90,20 @@ const LAMBDA: Cost = 0.6;
 
 /// Key-path passes applied to each candidate.
 const POLISH_PASSES: u32 = 6;
+
+/// Distinct local optima the pool retains, cheapest first.
+///
+/// A bound on memory and on the work the recombination downstream can be handed,
+/// not a quality dial: the recombination selects its parents by the width of the
+/// subgraph they span, so a longer list only ever gives it more to reject.
+const POOL_CAPACITY: usize = 48;
+
+/// Alternations between the two neighbourhoods before `polish` gives up.
+///
+/// The loop already exits as soon as neither neighbourhood improves, so this
+/// only bounds the pathological case where floating-point ties let the two
+/// moves undo each other.
+const POLISH_ROUNDS: u32 = 8;
 
 /// Consecutive iterations without an improvement before the loop concludes it
 /// has converged.
@@ -97,6 +138,11 @@ pub struct IlsWorkspace {
     in_best: Vec<bool>,
     nodes: Vec<NodeId>,
     rng: Rng,
+    /// Distinct local optima of the combined neighbourhood, cheapest first.
+    pool: Vec<SphResult>,
+    /// Vertex-set fingerprints of the pool's members, so a rediscovered tree
+    /// does not take a second slot.
+    seen: Vec<u64>,
 }
 
 impl IlsWorkspace {
@@ -106,8 +152,60 @@ impl IlsWorkspace {
             in_best: vec![false; num_arcs],
             nodes: Vec::new(),
             rng: Rng(0x2545_F491_4F6C_DD1D),
+            pool: Vec::new(),
+            seen: Vec::new(),
         }
     }
+
+    /// The distinct local optima this run visited, cheapest first.
+    pub fn pool(&self) -> &[SphResult] {
+        &self.pool
+    }
+
+    /// Offer a tree to the pool, keeping it sorted and deduplicated.
+    fn remember(&mut self, r: &SphResult, idx: &ArcIndex) {
+        let key = fingerprint(idx, &r.arcs);
+        if self.seen.contains(&key) {
+            return;
+        }
+        let at = self
+            .pool
+            .partition_point(|p| p.cost <= r.cost);
+        if at >= POOL_CAPACITY {
+            return;
+        }
+        self.seen.push(key);
+        self.pool.insert(at, r.clone());
+        if self.pool.len() > POOL_CAPACITY {
+            let dropped = self.pool.pop();
+            if let Some(d) = dropped {
+                let k = fingerprint(idx, &d.arcs);
+                self.seen.retain(|&x| x != k);
+            }
+        }
+    }
+}
+
+/// Order-independent fingerprint of a tree's vertex set.
+///
+/// Two trees on the same vertices are the same recombination parent — the
+/// ground set they contribute is their vertices and their edges, and a tree is
+/// determined by its vertices up to which spanning tree of the induced subgraph
+/// it happens to be, which the exact recombination re-optimises anyway.
+fn fingerprint(idx: &ArcIndex, arcs: &[ArcId]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut nodes: Vec<NodeId> = Vec::with_capacity(arcs.len() * 2);
+    for &a in arcs {
+        nodes.push(idx.tail(a));
+        nodes.push(idx.head(a));
+    }
+    nodes.sort_unstable();
+    nodes.dedup();
+    for v in nodes {
+        h ^= v as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    h
 }
 
 /// Improve on `seed` until it converges.
@@ -131,16 +229,20 @@ pub fn iterated_local_search(
     ws: &mut IlsWorkspace,
     sws: &mut SphWorkspace,
     kws: &mut KeyPathWorkspace,
+    vws: &mut KeyVertexWorkspace,
 ) -> (SphResult, IlsStats) {
     let num_arcs = idx.num_arcs();
     if ws.weights.len() < num_arcs {
         ws.weights.resize(num_arcs, 0.0);
         ws.in_best.resize(num_arcs, false);
     }
+    ws.pool.clear();
+    ws.seen.clear();
 
     let mut stats = IlsStats::default();
-    let mut best = polish(idx, active, root, seed, is_terminal, sws, kws);
+    let mut best = polish(idx, active, root, seed, is_terminal, sws, kws, vws, true);
     stats.seed_cost = best.cost;
+    ws.remember(&best, idx);
     if terminals.len() < 2 {
         stats.final_cost = best.cost;
         return (best, stats);
@@ -175,7 +277,8 @@ pub fn iterated_local_search(
         };
         unmark(idx, &best.arcs, &mut ws.in_best);
 
-        let candidate = polish(idx, active, root, candidate, is_terminal, sws, kws);
+        let candidate = polish(idx, active, root, candidate, is_terminal, sws, kws, vws, false);
+        ws.remember(&candidate, idx);
 
         // Merge: the cheapest tree inside `V(candidate) union V(best)` is no
         // worse than either.
@@ -189,8 +292,13 @@ pub fn iterated_local_search(
         }
         ws.nodes.sort_unstable();
         ws.nodes.dedup();
-        let merged = mst_prune(idx, active, root, &ws.nodes, is_terminal, sws)
-            .map(|m| polish(idx, active, root, m, is_terminal, sws, kws));
+        let nodes = std::mem::take(&mut ws.nodes);
+        let merged = mst_prune(idx, active, root, &nodes, is_terminal, sws)
+            .map(|m| polish(idx, active, root, m, is_terminal, sws, kws, vws, false));
+        ws.nodes = nodes;
+        if let Some(ref m) = merged {
+            ws.remember(m, idx);
+        }
 
         stats.iterations += 1;
         stalled += 1;
@@ -203,6 +311,12 @@ pub fn iterated_local_search(
         }
     }
 
+    // The topological closure runs once, on what the loop settled at. Running it
+    // on every candidate was measured and lost: it costs a Dijkstra per branch
+    // vertex per iteration, and the iterations it displaces were worth more than
+    // the basins it reached. See the notes.
+    let best = polish(idx, active, root, best, is_terminal, sws, kws, vws, true);
+    ws.remember(&best, idx);
     stats.final_cost = best.cost;
     (best, stats)
 }
@@ -216,6 +330,12 @@ pub struct IlsStats {
     pub final_cost: Cost,
 }
 
+/// Local optimum of the combined neighbourhood: key-path exchange to
+/// convergence, then a topological move, until neither pays.
+///
+/// Every step is a strict improvement measured against the true costs, so the
+/// result is never worse than the input and the loop always terminates.
+#[allow(clippy::too_many_arguments)]
 fn polish(
     idx: &ArcIndex,
     active: &[bool],
@@ -224,11 +344,33 @@ fn polish(
     is_terminal: &[bool],
     sws: &mut SphWorkspace,
     kws: &mut KeyPathWorkspace,
+    vws: &mut KeyVertexWorkspace,
+    topological: bool,
 ) -> SphResult {
-    match key_path_exchange(idx, active, root, &r, is_terminal, POLISH_PASSES, kws, sws) {
-        Some(better) if better.cost < r.cost => better,
-        _ => r,
+    let mut cur = r;
+    for _ in 0..POLISH_ROUNDS {
+        if let Some(better) =
+            key_path_exchange(idx, active, root, &cur, is_terminal, POLISH_PASSES, kws, sws)
+        {
+            if better.cost < cur.cost - 1e-9 {
+                cur = better;
+                continue;
+            }
+        }
+        if !topological {
+            break;
+        }
+        // The moves key-path exchange cannot make: delete a branch point and
+        // reconnect through the rest of the graph, or route through one more
+        // vertex. Both are strict improvements when they fire.
+        let move_ = key_vertex_elimination(idx, active, root, &cur, is_terminal, vws, sws)
+            .or_else(|| vertex_insertion(idx, active, root, &cur, is_terminal, sws));
+        match move_ {
+            Some(better) if better.cost < cur.cost - 1e-9 => cur = better,
+            _ => break,
+        }
     }
+    cur
 }
 
 /// Mark both orientations of every edge the tree uses.
@@ -294,6 +436,7 @@ mod tests {
         let active = vec![true; idx.num_arcs()];
         let mut sws = SphWorkspace::new(idx.num_nodes());
         let mut kws = KeyPathWorkspace::new(idx.num_nodes());
+        let mut vws = KeyVertexWorkspace::new(idx.num_nodes());
         let mut ws = IlsWorkspace::new(idx.num_arcs());
 
         let seed = shortest_path_heuristic(
@@ -304,6 +447,7 @@ mod tests {
 
         let (best, _) = iterated_local_search(
             &idx, &active, 1, &terminals, &is_t, seed, 0.0, 400, None, &mut ws, &mut sws, &mut kws,
+            &mut vws,
         );
         assert!((best.cost - 3.0).abs() < 1e-9, "expected 3, got {}", best.cost);
     }
@@ -345,6 +489,7 @@ mod tests {
             let costs: Vec<Cost> = (0..idx.num_arcs()).map(|a| idx.cost(a as ArcId)).collect();
             let mut sws = SphWorkspace::new(idx.num_nodes());
             let mut kws = KeyPathWorkspace::new(idx.num_nodes());
+            let mut vws = KeyVertexWorkspace::new(idx.num_nodes());
             let mut ws = IlsWorkspace::new(idx.num_arcs());
 
             let Some(seed) = shortest_path_heuristic(
@@ -355,7 +500,7 @@ mod tests {
             let before = seed.cost;
             let (best, _) = iterated_local_search(
                 &idx, &active, terminals[0], &terminals, &is_t, seed, 0.0, 200, None, &mut ws,
-                &mut sws, &mut kws,
+                &mut sws, &mut kws, &mut vws,
             );
             assert!(best.cost <= before + 1e-9, "{} > {before}", best.cost);
 

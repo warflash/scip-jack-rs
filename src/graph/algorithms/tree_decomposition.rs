@@ -70,6 +70,11 @@ pub struct TreeDecomposition {
     /// Bags, in the elimination order that produced them: `bags[i]` is the bag
     /// of the `i`-th eliminated vertex. Each bag is sorted.
     pub bags: Vec<Vec<u32>>,
+    /// `own[i]` is the vertex eliminated at step `i`, so `own[i] in bags[i]` and
+    /// `own` is a bijection onto the vertex set. The dynamic programme needs it
+    /// to assign each edge to the bag of its earliest-eliminated endpoint, which
+    /// is the bag axiom 2's proof exhibits.
+    pub own: Vec<u32>,
     /// `parent[i] == usize::MAX` marks a root of its component.
     pub parent: Vec<usize>,
     pub children: Vec<Vec<usize>>,
@@ -304,6 +309,7 @@ pub fn decompose_with(
     let mut parent = vec![usize::MAX; bags.len()];
     let mut children = vec![Vec::new(); bags.len()];
     let mut roots = Vec::new();
+    let mut owns = vec![0u32; bags.len()];
     for i in 0..bags.len() {
         // The eliminated vertex of bag `i` is the one whose position is `i`.
         let own = bags[i]
@@ -311,6 +317,7 @@ pub fn decompose_with(
             .copied()
             .find(|&u| pos[u as usize] == i)
             .expect("bag holds its own vertex");
+        owns[i] = own;
         let p = bags[i]
             .iter()
             .copied()
@@ -328,6 +335,7 @@ pub fn decompose_with(
 
     Some(TreeDecomposition {
         bags,
+        own: owns,
         parent,
         children,
         roots,

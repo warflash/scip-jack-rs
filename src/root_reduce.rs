@@ -40,11 +40,35 @@ use crate::graph::algorithms::{
 };
 use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, NodeId, NodeType, UndirectedGraph};
 use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
-use crate::heuristics::key_vertex::{key_vertex_elimination, vertex_insertion, KeyVertexWorkspace};
+use crate::heuristics::key_vertex::KeyVertexWorkspace;
 use crate::heuristics::sph::{shortest_path_heuristic, SphResult, SphWorkspace};
 use crate::heuristics::{iterated_local_search, IlsStats, IlsWorkspace};
 use crate::preprocessing::preprocess_bounded;
 use crate::graph::SteinerInstance;
+
+/// Widest decomposition the exact recombination will run its dynamic programme
+/// over.
+///
+/// This is a work bound, not a quality dial: the DP's table is
+/// `Bell(width + 2)` per bag, so a width of eleven is already a hundred
+/// thousand signatures on a bag and every unit above it costs a factor of five.
+/// Measured on the reduced PACE instances the unions that matter decompose at
+/// three to eight, so nothing this cap refuses was ever going to finish.
+const EXACT_RECOMB_WIDTH: usize = 11;
+
+/// Floor on the time the exact steps may be predicted to take, in seconds.
+///
+/// The allowance is otherwise self-scaling: an exact step may cost no more than
+/// the iterated local search that produced the trees it works on, which needs no
+/// clock fraction and adapts to the instance by construction. On an instance the
+/// construction solved outright that measures as zero, and this floor is what
+/// still lets a decomposition that costs microseconds run.
+const EXACT_MIN_SECS: f64 = 0.02;
+
+/// Pool members the exact recombination may consider as parents. Which of them
+/// it actually admits is decided by the width of the ground set they span, so
+/// this only bounds how many decompositions the greedy tries.
+const EXACT_RECOMB_PARENTS: usize = 12;
 
 /// Outcome of the tightening loop.
 pub struct Reduced {
@@ -281,7 +305,9 @@ fn round(
     // Every constructed tree goes through key-path exchange before it is scored:
     // the construction alone lands several percent above the optimum on the
     // larger instances.
-    let mut pool: Vec<(Cost, Vec<NodeId>)> = Vec::new();
+    // Each pool entry keeps both what it spans and how it spans it: the vertex
+    // set for the spanning-tree recombination, the arcs for the exact one.
+    let mut pool: Vec<(Cost, Vec<NodeId>, Vec<u32>)> = Vec::new();
 
     let polish = |r: SphResult,
                       root: NodeId,
@@ -326,9 +352,9 @@ fn round(
 
     let offer = |r: SphResult,
                      root: NodeId,
-                     pool: &mut Vec<(Cost, Vec<NodeId>)>,
+                     pool: &mut Vec<(Cost, Vec<NodeId>, Vec<u32>)>,
                      best: &mut Option<(SphResult, NodeId)>| {
-        pool.push((r.cost, nodes_of(&idx, &r.arcs, root)));
+        pool.push((r.cost, nodes_of(&idx, &r.arcs, root), r.arcs.clone()));
         if best.as_ref().is_none_or(|(b, _)| r.cost < b.cost - 1e-9) {
             *best = Some((r, root));
         }
@@ -379,9 +405,13 @@ fn round(
     // Iterated local search from the best tree anyone found, guided or not.
     let mut ils_ws = IlsWorkspace::new(num_arcs);
     let mut ils_stats = IlsStats::default();
+    // What the exact steps below are allowed to be predicted to cost: whatever
+    // the local search that produced their input cost. See [`EXACT_MIN_SECS`].
+    let mut exact_secs = EXACT_MIN_SECS;
     let mut upper_bound = incoming_ub;
     let mut incumbent_arcs: Option<Vec<u32>> = None;
     if let Some((s, r)) = best_solution.take() {
+        let ils_start = Instant::now();
         let (best, st) = iterated_local_search(
             &idx,
             &active,
@@ -395,71 +425,164 @@ fn round(
             &mut ils_ws,
             &mut ws,
             &mut kws,
+            &mut vws,
         );
+        exact_secs = ils_start.elapsed().as_secs_f64().max(EXACT_MIN_SECS);
         ils_stats = st;
-        pool.push((best.cost, nodes_of(&idx, &best.arcs, r)));
+        // Every distinct local optimum the loop visited, not just the cheapest.
+        // They are what the exact recombination selects its parents from.
+        for r0 in ils_ws.pool() {
+            pool.push((r0.cost, nodes_of(&idx, &r0.arcs, r), r0.arcs.clone()));
+        }
+        pool.push((best.cost, nodes_of(&idx, &best.arcs, r), best.arcs.clone()));
         if best.cost < upper_bound - 1e-9 {
             upper_bound = best.cost;
             incumbent_arcs = Some(best.arcs);
         }
     }
 
-    // Topological moves on the incumbent.
+    // The topological moves that used to run here — key-vertex elimination and
+    // vertex insertion — are now part of the iterated local search's own
+    // neighbourhood, which is the only place they can change where the loop
+    // goes rather than merely tidying what it returned. See
+    // [`crate::heuristics::ils`]. They still run once on the incumbent when the
+    // loop did not produce it, which happens when a guided construction beat
+    // every local optimum outright.
+    // A round in which no tree was constructed at all has nothing to polish;
+    // otherwise the incumbent is already a local optimum of that neighbourhood.
+
+    // Recombination, solved exactly.
     //
-    // Iterated local search runs a key-path neighbourhood, which rewires
-    // corridors but never changes where the tree branches. Deleting a branch
-    // point and reconnecting, or routing through one more vertex, are the two
-    // moves that do — see [`crate::heuristics::key_vertex`]. They cost a Dijkstra
-    // per candidate rather than per iteration, so they run once here on the best
-    // tree the round produced rather than inside the loop.
-    if let Some(arcs) = incumbent_arcs.clone() {
-        let mut current = SphResult { cost: upper_bound, arcs };
-        loop {
-            let stronger = key_vertex_elimination(
-                &idx, &active, primary, &current, &is_terminal, &mut vws, &mut ws,
-            )
-            .or_else(|| vertex_insertion(&idx, &active, primary, &current, &is_terminal, &mut ws));
-            let Some(better) = stronger else { break };
-            current = polish(better, primary, &mut kws, &mut ws);
-            if expired() {
-                break;
+    // The union of the vertex sets of several good solutions spans a subgraph
+    // containing each of them, so the cheapest tree inside it is no worse than
+    // the best input and is frequently strictly better: it can mix a cheap
+    // corridor from one solution with a cheap corridor from another. The old
+    // code approximated that cheapest tree by a minimum spanning tree, which is
+    // the one step in the solver whose ground set was small enough to solve
+    // exactly and was being solved most crudely.
+    //
+    // It is now solved exactly, because a union of good trees is a *near-tree*:
+    // its cyclomatic number counts the edges by which the parents disagree, and
+    // treewidth is bounded by that. See
+    // [`crate::heuristics::exact_recombination`], which decomposes the ground
+    // set and dispatches on the width it measures — and which chooses how many
+    // parents to admit by that same measured width, rather than by a fixed
+    // prefix nobody had looked at. The spanning-tree merge stays as the fallback
+    // for the unions that decompose too wide.
+    let mut grown: Option<SphResult> = None;
+    if pool.len() >= 2 {
+        pool.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        pool.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-9 && a.1 == b.1);
+        let parents: Vec<SphResult> = pool
+            .iter()
+            .take(EXACT_RECOMB_PARENTS)
+            .map(|(c, _, a)| SphResult { cost: *c, arcs: a.clone() })
+            .collect();
+        let exact = crate::heuristics::recombine_pool(
+            &idx,
+            primary,
+            &parents,
+            terminals,
+            &is_terminal,
+            EXACT_RECOMB_WIDTH,
+            exact_secs,
+            config.deadline,
+        );
+        match exact {
+            Some((merged, stat)) => {
+                if config.verbose {
+                    eprintln!(
+                        "[recomb] exact: |V'|={} |E'|={} width={} induced={} {:.1} -> {:.1}                          (pool {})",
+                        stat.nodes,
+                        stat.edges,
+                        stat.width,
+                        stat.induced,
+                        upper_bound,
+                        merged.cost,
+                        pool.len(),
+                    );
+                }
+                if merged.cost < upper_bound - 1e-9 {
+                    upper_bound = merged.cost;
+                    incumbent_arcs = Some(merged.arcs.clone());
+                }
+                grown = Some(merged);
             }
-        }
-        if current.cost < upper_bound - 1e-9 {
-            upper_bound = current.cost;
-            pool.push((current.cost, nodes_of(&idx, &current.arcs, primary)));
-            incumbent_arcs = Some(current.arcs);
+            None => {
+                for take in [2usize, 3, 5, 8] {
+                    if take > pool.len() || expired() {
+                        break;
+                    }
+                    let mut union: Vec<NodeId> =
+                        pool[..take].iter().flat_map(|(_, v, _)| v.iter().copied()).collect();
+                    union.sort_unstable();
+                    union.dedup();
+                    let Some(merged) = crate::heuristics::sph::mst_prune(
+                        &idx,
+                        &active,
+                        primary,
+                        &union,
+                        &is_terminal,
+                        &mut ws,
+                    ) else {
+                        continue;
+                    };
+                    let merged = polish(merged, primary, &mut kws, &mut ws);
+                    if merged.cost < upper_bound - 1e-9 {
+                        upper_bound = merged.cost;
+                        incumbent_arcs = Some(merged.arcs);
+                    }
+                }
+            }
         }
     }
 
-    // Recombination. The union of the vertex sets of several good solutions spans
-    // a subgraph containing each of them, so the minimum spanning tree of that
-    // union — pruned of non-terminal leaves — is no worse than the best input and
-    // is frequently strictly better: it can mix a cheap corridor from one solution
-    // with a cheap corridor from another.
-    if pool.len() >= 2 {
-        pool.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        for take in [2usize, 3, 5, 8] {
-            if take > pool.len() || expired() {
-                break;
-            }
-            let mut union: Vec<NodeId> = pool[..take].iter().flat_map(|(_, v)| v.iter().copied()).collect();
-            union.sort_unstable();
-            union.dedup();
-            let Some(merged) = crate::heuristics::sph::mst_prune(
+    // Grow the exact neighbourhood until the width cap binds.
+    //
+    // The recombination above is limited by what the local search happened to
+    // visit, and the measurement says that is nowhere near what can be solved:
+    // on PACE instance171 a pool of ninety distinct local optima spanned 52 of
+    // 241 vertices and decomposed at width four against a cap of eleven. So the
+    // ground set is grown — the rest of the graph offered in increasing order of
+    // the ascent's reduced costs, every batch that keeps the width inside the
+    // cap accepted — and solved exactly. What comes back is the optimum of a
+    // subgraph containing the incumbent, so it can only improve it, and no
+    // key-path, key-vertex or spanning-tree move confined to that subgraph can
+    // beat it. See [`crate::heuristics::exact_recombination::grow_and_solve`].
+    let seed = grown
+        .map(|g| g.arcs)
+        .or_else(|| incumbent_arcs.clone())
+        .filter(|_| upper_bound.is_finite());
+    if let Some(seed) = seed {
+        if !expired() {
+            // Arcs the dual leaves tight are the arcs a cheap tree wants, which
+            // is the same reason the guided construction uses them.
+            let guide = certificate
+                .as_ref()
+                .map(|c| c.reduced_costs.clone())
+                .unwrap_or_else(|| true_costs.clone());
+            let out = crate::heuristics::exact_recombination::grow_and_solve(
                 &idx,
-                &active,
                 primary,
-                &union,
+                &seed,
+                terminals,
                 &is_terminal,
-                &mut ws,
-            ) else {
-                continue;
-            };
-            let merged = polish(merged, primary, &mut kws, &mut ws);
-            if merged.cost < upper_bound - 1e-9 {
-                upper_bound = merged.cost;
-                incumbent_arcs = Some(merged.arcs);
+                &guide,
+                EXACT_RECOMB_WIDTH,
+                exact_secs,
+                config.deadline,
+            );
+            if let Some((better, stat)) = out {
+                if config.verbose {
+                    eprintln!(
+                        "[grow] |V'|={} |E'|={} width={} {:.1} -> {:.1}",
+                        stat.nodes, stat.edges, stat.width, upper_bound, better.cost
+                    );
+                }
+                if better.cost < upper_bound - 1e-9 {
+                    upper_bound = better.cost;
+                    incumbent_arcs = Some(better.arcs);
+                }
             }
         }
     }

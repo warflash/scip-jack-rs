@@ -1486,6 +1486,132 @@ The decomposition module stays: it is a proved structural object, it is cheap,
 and the width is exactly the kind of *computed* quantity a dispatch is allowed to
 key on.
 
+### 37. The width the instance does not have, a graph derived from it does
+
+§36 closed the treewidth DP as a direction *for the instance*. It did not close
+it for graphs **derived** from the instance, and that is where the width is.
+
+Measure first, again. Build the pool of trees a round already builds — greedy
+starts against the true costs, guided starts against each ascent's reduced
+costs, all key-path polished — take the best `k`, and decompose the subgraph
+they span:
+
+| instance | reduced \|V\| | \|R\| | tw(instance) | union of 2 | of 4 | of 8 |
+|---|---|---|---|---|---|---|
+| 197 | 6,598 | 101 | 66 | **2** | **3** | **4** |
+| 198 | 5,063 | 121 | 58 | 2 | 3 | 4 |
+| 200 | 5,225 | 134 | 60 | 3 | 4 | **5** |
+| 189 | 4,136 | 36 | 50 | 3 | 4 | 4 |
+| 193 | 599 | 38 | 29 | 3 | 4 | 6 |
+| 161 | 640 | 25 | — | 4 | 8 | 8 |
+| 172 | 243 | 27 | 121 | 7 | 20 | 21 |
+
+Width **four**, on the instance whose own decomposition is 66 and whose 101
+terminals lock the goal-directed search out entirely. The reason is a counting
+argument, and it is the lemma `heuristics/exact_recombination.rs` carries:
+
+> **Lemma.** For trees `T_1..T_k` with union `G'` of cyclomatic number
+> `nu = |E'| - |V'| + 1`, `tw(G') <= nu + 1`.
+
+with `nu` small precisely because the trees are *good* — it counts the edges by
+which they disagree. So the recombination step, the one step in this solver whose
+ground set was small enough to solve exactly, and which was being solved most
+crudely by a minimum spanning tree, can be solved **exactly**, at any terminal
+count.
+
+`graph/algorithms/steiner_td.rs` is that solver: the classical partition
+dynamic programme over a nice tree decomposition, with the root terminal placed
+in every bag, and with each of the five recurrences and the join's acyclicity
+criterion `|P_1| + |P_2| = |S| + |P_1 ⊔ P_2|` proved inline. It is gated by
+exhaustive random enumeration against `dreyfus_wagner` in two regimes — small
+dense graphs and the near-trees it is actually dispatched into — plus a
+50-vertex cycle with 25 terminals, which no subset table could address.
+
+**Three things were got wrong and are worth recording.**
+
+1. **A width cap is not a work bound.** The DP is `Bell(w+2)` per bag and there
+   is a bag per vertex, so width six on a 250-vertex ground set is `4140^2` pairs
+   at every join. Capping the width at eleven let one round of tightening spend
+   3.6 s of a 5 s budget on instance175 — a 298-vertex graph — and cost 174, 175
+   and 188 their proofs. `work_estimate` now computes what the decomposition in
+   hand will cost, in table entries touched, and the gate is that estimate
+   divided by a measured `TD_UNITS_PER_SECOND`, in the same shape as the
+   hypergraphic certificate's. The allowance is *self-scaling*: an exact step may
+   be predicted to cost no more than the iterated local search that produced its
+   input, which needs no clock fraction.
+2. **Bisection must not probe the expensive end first.** The affordable prefixes
+   of a candidate list are a prefix — treewidth is subgraph-monotone, proved
+   inline — so binary search is the right shape. Starting at the midpoint is not:
+   on a six-thousand-edge graph probe one decomposes three thousand candidates,
+   burns the whole allowance and accepts nothing, which is what it did on every
+   instance. Doubling from one until a prefix fails and then bisecting the
+   bracket has the same probe count and every probe before the last is cheaper
+   than the one after.
+3. **Parallel edges.** Deduplicating a ground set by vertex pair and keeping the
+   first arc can drop the edge a parent actually uses — and then the ground set
+   does not contain that parent and the "cannot lose" argument fails. Caught by
+   the property test, not by a benchmark: `recombined 10 > best parent 6`. The
+   dedup keeps the cheapest, which is also without loss.
+
+**Then grow the ground set.** Recombination can only return something inside the
+union of what it was given, and that union is far thinner than what can be
+solved: on instance171 a pool of ninety distinct local optima spanned 52 of 241
+vertices and decomposed at width **four**. `grow_and_solve` offers the rest of
+the graph in increasing order of the ascent's reduced costs and accepts the
+longest prefix that still decomposes affordably. What it returns is the optimum
+of a subgraph containing the incumbent — never worse than it, and unbeatable by
+any key-path, key-vertex or spanning-tree move confined to that subgraph. Its
+gate is that with the cap loose enough to admit the whole graph it returns the
+true optimum on **560 of 560** random instances.
+
+**Measured, against the frozen control on the same tree:**
+
+| slice | control | now |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 139/140, 49.9 s | 139/140, 54.4 s |
+| PACE Track 1 [155..200] @5 s | 26/46, 141.2 s | 26/46, 144.2 s |
+| SteinLib B @5 s | 18/18, 1.5 s | 18/18, 1.5 s |
+| SteinLib C @5 s | 20/20, 5.8 s | 20/20, 6.1 s |
+| SteinLib D @5 s | 20/20, 11.6 s | 20/20, **10.5 s** |
+| SteinLib E @20 s | 19/20, 68.5 s | 19/20, **66.3 s** |
+
+**Pass counts are unchanged, and that is the honest headline.** What did change
+is the primal, on the instances where it was the binding constraint:
+instance162 goes 5,259 -> **5,193**, which is the optimum; instance024 goes
+1,757 -> **1,756**, which is the optimum; instance194 -2. Against that,
+instance163 +63 and instance187 +3, from a round whose time went elsewhere. No
+instance reports a value differing from its reference under an `Optimal` status
+on any slice.
+
+instance024 is the one worth chasing. Its primal now reaches 1,756 and the
+**hypergraphic dual certifies exactly 1,756** in 0.17 s (§35) — the two objects
+that would close it are both present in the same binary and never meet, because
+by the time the certificate is offered the pass has 0.00 s left and it is
+skipped. That is a budget-ordering problem, not a mathematical one, and it is
+the cheapest unclaimed proof in this file.
+
+### 38. Two primal changes that measured as losses
+
+Both are recorded because they are the obvious things to try next and both are
+worse than what is there.
+
+**Folding the topological moves into the ILS neighbourhood.** Key-path exchange
+cannot move a branch point, so every local optimum the loop reaches is a local
+optimum of a neighbourhood blind to topology, and the natural fix is to close
+`polish` over key-path exchange, key-vertex elimination and vertex insertion
+together. Measured: **26/46 -> 25/46 and 141 s -> 177 s** on [155..200]. Key-vertex
+elimination is one multi-source Dijkstra per branch vertex, so per-iteration it
+displaces more iterations than the basins it reaches are worth — instance163's
+primal went 63 units the wrong way and instance188 lost its proof. Restricting
+the closure to the tree the loop settles on is what is in the code; running it on
+every candidate is not.
+
+**A larger pool, without a work bound.** Collecting every distinct local optimum
+the loop visits — deduplicated by vertex set, capped at 48 — is free and is what
+the exact recombination selects parents from. Collecting them *and* recombining
+fixed prefixes of them was 23/46 at 236 s. The pool is kept; the fixed prefixes
+are replaced by a selection made against the measured width.
+
 ---
 
 ## Where the remaining loss is
