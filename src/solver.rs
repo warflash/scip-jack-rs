@@ -312,6 +312,13 @@ fn finish(
         // Half the remaining time, so a search that does not close still leaves
         // the branch-and-cut a working budget.
         let search_deadline = Instant::now() + budget.mul_f64(0.5);
+        // The search may be rooted at any terminal, and its potential is a
+        // packing rooted at the same one. Which terminal is chosen was measured
+        // and does not matter: over the terminals of the instances the search
+        // fails to close, the ascent bound spans under 1 % (PACE 086: 3254 to
+        // 3286 against an optimum of 3661) and is flat on 085 and 087. The
+        // strength that is missing is not root-dependent.
+        let search_terminals = terminals.clone();
         // The ascent's cut packing becomes the search's potential. This is the
         // whole point of running it here rather than only using its scalar
         // bound: the packing bounds every sub-requirement of the instance, not
@@ -321,15 +328,20 @@ fn finish(
             let directed = DirectedGraph::from_undirected(&work_graph);
             let idx = ArcIndex::new(&directed);
             let active = vec![true; idx.num_arcs()];
-            // Rooted at the search's own root, not at the solver's preferred
-            // ascent root: the potential is only valid for sets missing the
-            // root, and `PackingPotential` drops the rest.
-            let da = dual_ascent_packing(&idx, terminals[0], &terminals, &active, DS_PACKING_NNZ);
+            // Rooted at the search's own root: the potential is only valid for
+            // sets missing the root, and `PackingPotential` drops the rest.
+            let da = dual_ascent_packing(
+                &idx,
+                search_terminals[0],
+                &search_terminals,
+                &active,
+                DS_PACKING_NNZ,
+            );
             da.sets
         };
         if let Some(r) = dijkstra_steiner_guided(
             &work_graph,
-            &terminals,
+            &search_terminals,
             root_upper_bound,
             DS_LABEL_BUDGET,
             Some(search_deadline),

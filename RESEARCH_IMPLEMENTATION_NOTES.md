@@ -509,20 +509,177 @@ where the object is built.
 
 ### What is left, in order
 
-1. **The search is the solver on few-terminal instances; make it the solver on
-   more of them.** The remaining unproved [1..140] cases are 24/25/26 (nine
-   terminals but average degree 639) and 86/87 (13 terminals, gap of 3). The
-   first group is bounded by neighbour scans, the second by the packing's
-   strength. A second ascent from a different root gives a second packing, and
-   the maximum of two valid lower bounds is valid — untested.
-2. **Lemma 15 of the paper** (prune `(v,I)` when some cheaper subgraph already
-   connects `I` to an outstanding terminal) is the pruning the authors report as
-   decisive, and it is not implemented. A cheap instance is
-   `mst(I) + min_{i∈I, t∉I} d(i,t) < l(v,I)`.
+1. ~~**A second ascent from a different root**~~ — closed in §15. The packing is
+   invalid for a different root, the salvage is a strength loss, the ascent from
+   the search's own root is *maximal*, and the root spread is under 1 %.
+2. ~~**Lemma 15 of the paper**~~ — implemented in full, including the
+   compositional rule the cheap version misses; see §16.
 3. **The 2–3 % dual gap on the many-terminal instances** (199: 114 terminals,
    200: 135) is untouched by any of this. That remains §6 of the scratchpad —
    hypergraphic component pricing — and it is now the only frontier left where
    neither reduction nor exact search applies.
+
+
+## 2026-08-01 (fourth round): the search's pruning and its inner loop
+
+The handoff list was: a second packing from a different root, Lemma 15, and the
+many-terminal dual gap. The first turns out to be provably empty, the second is
+implemented in full, and a complexity fix underneath it is what actually paid.
+
+### 15. A packing from a different root is not a second bound — and there is no second bound to have
+
+The idea was: dual ascent is root-dependent, so a second ascent from another
+root gives a second packing, and the maximum of two valid lower bounds is valid.
+Both halves of that sentence are true and the conclusion is still wrong.
+
+**Why the second packing is not valid.** `PackingPotential`'s proof charges each
+counted set `W` to an arc of the residual tree `T` entering `W`. That charging
+needs `T` to be *oriented*, because the packing condition
+`sum { y_W : a enters W } <= c(a)` is stated per arc, and an edge used in both
+orientations would be charged twice. `T` is oriented from the search's root
+`r0`, which is in `T` by construction, and an arc of the oriented tree enters `W`
+exactly when `W` misses `r0`. A set missing some *other* root `r1` carries no
+such guarantee: for a state that has already collected `r1`, the residual tree
+need not contain `r1` at all.
+
+The salvage — keep only the sets of the second packing that happen to miss `r0`
+— is exactly what `PackingPotential::new` already does to every packing handed
+to it, and it is a strength loss, not a gain: the sets it drops are the ones
+grown around `r0`, which is where the weight is.
+
+**Why there is nothing to add anyway.** After an ascent from `r0` terminates,
+every terminal is reachable from `r0` over zero-reduced-cost arcs. Let `W` be
+any set with `r0 ∉ W` and `W ∩ R ∋ t`. The zero-cost `r0 → t` path starts
+outside `W` and ends inside it, so it crosses `δ⁻(W)` at an arc of reduced cost
+zero, and `W` cannot be raised. **The ascent's packing is maximal: no set
+missing the root admits any increase at all.** Improving it requires *lowering*
+some `y_W` to raise others, which is an LP step, not another ascent. The same
+argument kills the residual-graph variant: an ascent on the reduced costs from
+any root produces only sets containing `r0`, all of which the filter discards.
+
+**And the root barely matters.** Measured directly — dual ascent from every
+terminal of the reduced graph the search runs on:
+
+| instance | terminals | worst root | best root | optimum |
+|---|---|---|---|---|
+| PACE 086 | 13 | 3254 | 3286 | 3661 |
+| PACE 087 | 13 | 31 | 31 | 36 |
+| PACE 085 | 13 | 18 | 18 | 20 |
+| PACE 113 | 11 | 2116 | 2177 | 2256 |
+
+Under 1 % of spread, and flat on two of the four. Rooting the search at the
+solver's best ascent root was implemented, measured (PACE 086's frontier bound
+*fell*, 3567 → 3544) and reverted. **Direction closed.** What 087 does say is
+where the strength is missing: the ascent reaches 31 where the branch-and-cut's
+LP reaches ~35 on the same relaxation family. The gap is dual-ascent-to-LP, not
+root-to-root.
+
+### 16. Lemma 15, in full, including the part that matters
+
+The paper's Lemma 15 is stated for an arbitrary subgraph `H` and an anchor set
+`S ⊆ R \ I` with `I ∪ S ⊆ V(H)` and *every component of `H` holding a terminal
+of `S`*. `H` need not be connected, and that is the whole point. The proof, and
+the three witness families, are in the module header of
+`graph/algorithms/dijkstra_steiner.rs`; the composition rule is
+
+```text
+U(I1 ∪ I2) <= U(I1) + U(I2)   when  S(I1) ∩ I2 = {} or S(I2) ∩ I1 = {},
+S(I1 ∪ I2) = (S(I1) ∪ S(I2)) \ (I1 ∪ I2).
+```
+
+The "or" is not a typo and the module proves why: if `S(I1) ∩ I2 = {}` then
+every component of `H1` is anchored in `S`, and a component of `H2` anchored at
+some `s ∈ I1` is glued to `H1` at `s` and inherits an anchor. A sum of two small
+witnesses is routinely far below any single label cost for the union, so this is
+where the pruning bites.
+
+Implemented as a per-terminal-set record `(U(I), S(I))` seeded from
+`mst(I) + d(I, R\I)`, lowered by every offer via
+`l(v,I) + min(d(v, R\I), d(I, R\I))`, and composed at every merge.
+
+**Measured, labels settled:**
+
+| instance | before | after |
+|---|---|---|
+| 085 (13 T) | 69,648 | 48,680 |
+| 113 (11 T) | 22,160 | 18,230 |
+| 086 (13 T, to completion) | 378,990 | 307,287 |
+
+**And on its own it was a net loss:** Track 1 [1..140] @3 s went 135/140 in
+55.0 s to 135/140 in 58.6 s. Fewer labels, more time per label. That is the
+useful measurement, because it says the search was already spending its time
+somewhere else.
+
+### 17. Where it was actually spending its time: the packing potential, and a zeta transform
+
+`L_pack(v, S)` splits into a term depending only on the outstanding set and a
+term `sum { y_W : v ∈ W, mask(W) misses S }`. The second was a scan of the raised
+sets containing `v`. Since no raised set holds the root, "misses the outstanding
+set" says precisely `mask(W) ⊆ I` for the *collected* set `I`, so the term is
+
+```text
+Z(v, I) = sum { y_W : v ∈ W, mask(W) ⊆ I },
+```
+
+the **subset-sum (zeta) transform** of the weights at `v` over the mask lattice.
+Precomputing it costs `n · 2^(k-1) · (k-1)` additions and turns every later
+evaluation into one indexed load — the scan was `O(distinct masks at v)`, up to
+`2^(k-1)`, and it runs once per *offer*, which on PACE instance023 means once
+per each of 639 neighbours of every settled label.
+
+The break-even is computed, not chosen. A search that sweeps the state space
+settles `2^(k-1)` labels at each vertex and offers to every neighbour, so the
+scan costs `2^(k-1) · sum_v deg(v) L(v)` against the transform's
+`2^(k-1) · n · (k-1)`. The table is built exactly when
+
+```text
+n · (k - 1)  <  sum_v deg(v) · L(v),
+```
+
+both sides being known before the search starts, and only when the dense label
+table — the same `n · 2^(k-1)` shape, so the same memory question — was itself
+affordable. The first attempt built it unconditionally and cost 1.8 s across the
+slice on sparse instances where the packing is nearly laminar and the lists are
+two entries long.
+
+**Measured.** With the transform, instance026 (9 terminals, average degree 639)
+goes from unproved at 4.4 s to **proved in 1.6 s**, closed by the search itself;
+instance024's search throughput rises 40 % at equal wall clock.
+
+### Round summary
+
+| slice | round 3 | now |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 135/140, 55.0 s | **136/140, 56.6 s** |
+| PACE Track 1 [155..200] @5 s | 21/46, 153.4 s | 20/46, 158.2 s |
+| SteinLib B @5 s | 18/18, 1.2 s | 18/18, 1.7 s |
+| SteinLib C @5 s | 20/20, 4.4 s | 20/20, 4.7 s |
+| SteinLib D @5 s | 20/20, 15.3 s | 20/20, 15.7 s |
+
+The remaining gaps on [1..140] narrowed as well — 024 from 0.285 % to 0.228 %,
+086 from 3.77 % to 2.37 % — and no instance reports a proved value that
+disagrees with its reference optimum. The [155..200] move is one instance on
+forty-six, which this file's own measurement discipline calls noise; nothing in
+this round touches those instances, whose terminal counts are far outside the
+search's 32-bit state.
+
+### What this round says about the next step
+
+Sections 15 and 17 point the same way. The goal-directed search on the
+instances it cannot close is limited by the strength of its potential, the
+potential is a dual-ascent packing, and the ascent is *provably maximal* — no
+combinatorial step can improve it. Meanwhile the LP on the same relaxation
+reaches materially further (087: ~35 against the ascent's 31, optimum 36).
+
+That makes one thing well-posed and worth doing: **certify a cut packing out of
+the LP's own dual.** The connectivity rows `y(δ⁻(W)) >= 1` carry explicit sets
+`W` and duals `λ_W >= 0`. Compute `load(a) = sum { λ_W : a ∈ δ⁻(W) }` and
+`μ = max_a load(a)/c(a)`; then `λ / max(μ, 1)` satisfies the packing condition by
+construction and is a valid `PackingPotential` for the same root, of value
+`(sum λ_W) / max(μ, 1)`. Nothing about it needs to be trusted — the scaling makes
+it feasible whatever the other row families' duals are doing. The cost is a
+pipeline reordering: the root LP would have to run before the search rather than
+after it.
 
 ---
 

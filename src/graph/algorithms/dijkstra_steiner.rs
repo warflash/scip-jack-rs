@@ -102,6 +102,80 @@
 //! `smt({v} ∪ (R\I)) >= L(v, R\I)`). The solver always has an incumbent from the
 //! primal heuristics by the time this runs, so the cutoff is real.
 //!
+//! # Pruning against a cheaper way of connecting the same terminals
+//!
+//! The incumbent cutoff compares a label against the *whole* instance. The
+//! second pruning compares a label against the only job its own tree has to do,
+//! and it is far sharper.
+//!
+//! > **Domination (Lemma 15 of the paper).** Let `I ⊆ K` be nonempty, let `H`
+//! > be any subgraph of `G` and `∅ != S ⊆ R \ I` with
+//! >
+//! > - `I ∪ S ⊆ V(H)`, and
+//! > - every connected component of `H` contains a terminal of `S`.
+//! >
+//! > Then every offer of the label `(v, I)` at a value strictly above `c(H)`
+//! > may be discarded, for every `v`, without losing an optimal tree.
+//!
+//! *Proof.* Let `T` be an optimal Steiner tree, rooted at `r0`, and suppose the
+//! Dreyfus-Wagner derivation of `T` passes through `(v, I)`. That derivation
+//! realises the state by a subtree `T_1 ⊆ T` containing `v` and `I`, whose only
+//! terminals are `I` together with possibly `v` itself; the remainder
+//! `T_2 = T - E(T_1)` is connected and contains `v`, `r0` and every terminal of
+//! `R \ I`. Suppose the offer for `(v, I)` has value `g > c(H)`. The value of an
+//! offer never exceeds the cost of the subtree the derivation attaches to the
+//! state, so `c(T_1) >= g > c(H)`. Now `T_2 + H` is connected: every component
+//! of `H` holds a terminal of `S ⊆ R \ I ⊆ V(T_2)`, so each is glued to `T_2`.
+//! It contains `I` (from `H`) and `R \ I` (from `T_2`), hence all of `R`; and it
+//! costs at most `c(H) + c(T_2) < c(T_1) + c(T_2) = c(T)`. That contradicts the
+//! optimality of `T`. ∎
+//!
+//! The authors report this as the pruning that does the work. Note that `H` need
+//! not be connected — that is what makes the third witness below possible, and
+//! it is the strongest of them. Write `U(I)` for the cheapest witness known for
+//! `I` and `S(I)` for the anchor set it came with. Three families feed it, all
+//! free:
+//!
+//! - **From the metric closure.** A spanning tree of `I` in the metric closure,
+//!   expanded to paths, plus a shortest edge from `I` to `R \ I`, is such a
+//!   subgraph: `U(I) <= mst(I) + d(I, R \ I)` with `S` the far endpoint. Both
+//!   terms are already computed for the 1-tree bound. This is the only witness
+//!   available before any label for `I` exists.
+//! - **From the search itself.** Every label value the search produces is the
+//!   cost of an actual connected subgraph containing `{u} ∪ I` — grow adds an
+//!   edge, merge takes a union at a shared vertex, and both can only overstate
+//!   the cost of the resulting subgraph. Hanging a shortest path off it gives
+//!   `U(I) <= l(u, I) + min( d(u, R \ I), d(I, R \ I) )`, again with `S` a
+//!   singleton. `d(u, R \ I)` is the `min` the 1-tree bound already takes.
+//! - **From composition.** If `I_1` and `I_2` are disjoint and
+//!   `S(I_1) ∩ I_2 = ∅` or `S(I_2) ∩ I_1 = ∅`, then
+//!
+//!   ```text
+//!   U(I_1 ∪ I_2) <= U(I_1) + U(I_2),   S(I_1 ∪ I_2) = (S(I_1) ∪ S(I_2)) \ (I_1 ∪ I_2).
+//!   ```
+//!
+//!   *Why the hypothesis is exactly the right one.* Take `H = H_1 + H_2` and
+//!   `S` as displayed. Suppose `S(I_1) ∩ I_2 = ∅`. Then `S(I_1) ⊆ S`, since
+//!   `S(I_1)` misses `I_1` by construction, so `S != ∅` and every component of
+//!   `H_1` is anchored in `S`. A component of `H_2` is anchored at some
+//!   `s ∈ S(I_2)`, which misses `I_2`; either `s ∉ I_1`, and then `s ∈ S`, or
+//!   `s ∈ I_1 ⊆ V(H_1)`, and then that component is glued to a component of
+//!   `H_1`, which is anchored in `S`. Either way every component of `H` holds a
+//!   terminal of `S`. ∎
+//!
+//!   This is where the strength is. `U(I_1) + U(I_2)` is a sum of two *small*
+//!   witnesses and is routinely far below any label cost for `I_1 ∪ I_2`, so it
+//!   prunes sets the singleton witnesses never touch.
+//!
+//! Strictness matters and is respected: an offer is discarded only when its
+//! value is *strictly* above the witness cost, so a tie — several optimal trees
+//! — keeps the derivation alive.
+//!
+//! Note what the proposition does *not* say: it does not claim `l(v, I)` is
+//! computed correctly for a dominated state. It claims no optimal tree needs
+//! one, which is what both the returned optimum and the frontier bound below
+//! actually depend on.
+//!
 //! # The dual bound this yields when it does *not* finish
 //!
 //! The search is given a label budget and a deadline, and abandons itself when
@@ -116,9 +190,11 @@
 //! settled. Each predecessor was settled with its correct `l`, and settling
 //! performs every grow and merge out of it, so `s` was inserted with its
 //! correct `l(s)`. Since `L` bounds the remaining cost,
-//! `key(s) = l(s) + L(s) <= smt(R)`. The pruning rule cannot have removed `s`,
-//! because it only removes labels with key above `U >= smt(R)`. So `s` is in the
-//! queue and the minimum key is at most `smt(R)`. ∎
+//! `key(s) = l(s) + L(s) <= smt(R)`. Neither pruning rule can have removed `s`:
+//! the incumbent rule only removes labels with key above `U >= smt(R)`, and the
+//! domination rule only removes labels no optimal derivation passes through,
+//! while `s` lies on one. So `s` is in the queue and the minimum key is at most
+//! `smt(R)`. ∎
 //!
 //! So an abandoned search still hands back a combinatorial dual bound, computed
 //! without an LP and without dual ascent.
@@ -145,12 +221,18 @@ impl Hasher for LabelHasher {
         self.0 = value.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         self.0 ^= self.0 >> 29;
     }
+    fn write_u32(&mut self, value: u32) {
+        self.write_u64(value as u64);
+    }
     fn finish(&self) -> u64 {
         self.0
     }
 }
 
 type LabelMap<V> = HashMap<u64, V, BuildHasherDefault<LabelHasher>>;
+/// Keyed by terminal-set bitmask. Same reasoning as [`LabelMap`]: these are
+/// probed once per settled label and the default SipHash is pure overhead.
+type MaskMap<V> = HashMap<u32, V, BuildHasherDefault<LabelHasher>>;
 
 /// Storage for the label costs.
 ///
@@ -307,14 +389,54 @@ impl Ord for Key {
 /// ```
 ///
 /// The first term is grouped by the distinct terminal masks of the raised sets,
-/// of which there are few, and the second runs over the sets containing `v`,
-/// which is a short list per vertex. Both are a handful of operations.
+/// of which there are few, and depends only on the outstanding set, so a growth
+/// step computes it once for all its neighbours.
+///
+/// The second term is the one that is evaluated per state, and its naive form is
+/// a scan of the sets containing `v`. That scan is the search's inner loop on a
+/// dense graph — instance023 has average degree 639, so every settled label
+/// makes 639 offers and every offer walks the list — and the list is as long as
+/// the number of distinct terminal masks, up to `2^(k-1)`.
+///
+/// It collapses to a table lookup. A raised set is counted exactly when its
+/// terminal mask misses the outstanding set, and since no raised set contains
+/// the root, that says precisely `mask(W) ⊆ I` for the *collected* set `I`. So
+///
+/// ```text
+/// second term = Z(v, I) := sum { y_W : v ∈ W, mask(W) ⊆ I },
+/// ```
+///
+/// which is the subset-sum (zeta) transform, over the mask lattice, of the
+/// weights at `v`. Computing it costs `n * 2^(k-1) * (k-1)` additions once and
+/// turns every later evaluation into one indexed load.
+///
+/// It is not always worth it, and the break-even is computed rather than tuned.
+/// Write `M = 2^(k-1)` and `L(v)` for the length of `v`'s list. A search that
+/// sweeps the state space settles `M` labels at each vertex and each settlement
+/// offers to every neighbour, so the scan does `M * sum_v deg(v) L(v)` work,
+/// while the transform does `M * n * (k-1)` once. The transform pays exactly
+/// when
+///
+/// ```text
+/// n * (k - 1)  <  sum_v deg(v) * L(v),
+/// ```
+///
+/// both sides of which are known before the search starts. On a sparse graph
+/// the packing is close to laminar, the lists are short, and the scan wins; on
+/// instance023, average degree 639, the right-hand side is orders of magnitude
+/// larger and the transform is the difference between closing the instance and
+/// not. Memory is only committed in the second case, and only when the dense
+/// label table — the same `n * M` shape — was itself affordable.
 pub struct PackingPotential {
     /// Distinct terminal masks among the raised sets, with their total weight.
     by_mask: Vec<(u32, Cost)>,
     /// For each vertex, the `(terminal mask, weight)` of every raised set that
     /// contains it.
     at_vertex: Vec<Vec<(u32, Cost)>>,
+    /// `Z(v, I)` at `[v * num_masks + (I >> 1)]`, when it was affordable.
+    subset_sums: Option<Vec<Cost>>,
+    /// `2^(k-1)`: the number of addressable collected sets.
+    num_masks: usize,
 }
 
 impl PackingPotential {
@@ -336,11 +458,19 @@ impl PackingPotential {
     /// preferred ascent root, which is chosen for bound strength and is usually
     /// *not* the first terminal, produced dual bounds above the optimum on seven
     /// PACE instances and reported them as proved.
+    ///
+    /// `num_masks` is `2^(k-1)`, and `affordable` says whether the dense label
+    /// table — the same `n * num_masks` shape — was itself affordable. The
+    /// subset-sum table is built when it is, *and* when the break-even above
+    /// says it pays.
     pub fn new(
         sets: &[(Cost, Vec<NodeId>)],
         terminal_index: &[u32],
         num_nodes: usize,
         root: NodeId,
+        num_masks: usize,
+        affordable: bool,
+        degree: &dyn Fn(usize) -> usize,
     ) -> Self {
         let mut grouped: HashMap<u32, Cost> = HashMap::new();
         let mut at_vertex: Vec<Vec<(u32, Cost)>> = vec![Vec::new(); num_nodes];
@@ -382,7 +512,32 @@ impl PackingPotential {
             }
             *list = merged;
         }
-        Self { by_mask: grouped.into_iter().collect(), at_vertex }
+        let bits = num_masks.trailing_zeros() as usize;
+        let scan_work: usize =
+            at_vertex.iter().enumerate().map(|(v, l)| degree(v).saturating_mul(l.len())).sum();
+        let pays = num_nodes.saturating_mul(bits) < scan_work;
+        let subset_sums = (affordable && pays).then(|| {
+            let mut table = vec![0.0 as Cost; num_nodes * num_masks];
+            for (v, list) in at_vertex.iter().enumerate() {
+                let base = v * num_masks;
+                for &(mask, weight) in list {
+                    // No raised set holds the root, so bit zero is never set and
+                    // `mask >> 1` is the index into the collected-set lattice.
+                    table[base + (mask >> 1) as usize] += weight;
+                }
+                // Zeta transform over subsets, one bit at a time.
+                for b in 0..bits {
+                    let bit = 1usize << b;
+                    for i in 0..num_masks {
+                        if i & bit != 0 {
+                            table[base + i] += table[base + (i ^ bit)];
+                        }
+                    }
+                }
+            }
+            table
+        });
+        Self { by_mask: grouped.into_iter().collect(), at_vertex, subset_sums, num_masks }
     }
 
     /// The part of the bound that depends only on the outstanding set. Every
@@ -398,7 +553,13 @@ impl PackingPotential {
         total
     }
 
-    fn value(&self, v: NodeId, outstanding: u32, shared: Cost) -> Cost {
+    /// `collected` is the label's own terminal set; `outstanding` its
+    /// complement plus the root. They carry the same information, and the two
+    /// evaluation paths each want one of them.
+    fn value(&self, v: NodeId, outstanding: u32, collected: u32, shared: Cost) -> Cost {
+        if let Some(table) = &self.subset_sums {
+            return shared + table[v as usize * self.num_masks + (collected >> 1) as usize];
+        }
         let mut total = shared;
         if let Some(list) = self.at_vertex.get(v as usize) {
             for &(mask, weight) in list {
@@ -450,6 +611,13 @@ impl Csr {
             fill[e.dst as usize] += 1;
         }
         Self { start, head, cost, num_nodes }
+    }
+
+    fn degree(&self, v: usize) -> usize {
+        match self.start.get(v + 1) {
+            Some(&e) => e as usize - self.start[v] as usize,
+            None => 0,
+        }
     }
 
     fn neighbors(&self, v: NodeId) -> impl Iterator<Item = (NodeId, Cost)> + '_ {
@@ -542,28 +710,51 @@ pub fn dijkstra_steiner_guided(
         }
     }
 
+    let num_masks = 1usize << (k - 1);
+    let labels = Labels::new(csr.num_nodes, num_masks);
     let potential = packing.map(|sets| {
         let mut terminal_index = vec![u32::MAX; csr.num_nodes];
         for (i, &t) in terminals.iter().enumerate() {
             terminal_index[t as usize] = i as u32;
         }
-        PackingPotential::new(sets, &terminal_index, csr.num_nodes, terminals[0])
+        PackingPotential::new(
+            sets,
+            &terminal_index,
+            csr.num_nodes,
+            terminals[0],
+            num_masks,
+            matches!(labels, Labels::Dense { .. }),
+            &|v| csr.degree(v),
+        )
     });
 
     let root_bit = 1u32;
     let all_labels: u32 = if k == 32 { !1u32 } else { ((1u32 << k) - 1) & !1 };
     let goal_key = ((all_labels as u64) << 32) | terminals[0] as u64;
 
+    let nearest_order: Vec<Vec<u32>> = (0..k)
+        .map(|i| {
+            let mut order: Vec<u32> = (0..k as u32).filter(|&j| j as usize != i).collect();
+            order.sort_by(|&a, &b| {
+                td[i][a as usize].partial_cmp(&td[i][b as usize]).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            order
+        })
+        .collect();
+
     let mut state = Search {
         csr: &csr,
         dist: &dist,
         td: &td,
+        nearest_order: &nearest_order,
         k,
         root_bit,
         potential,
-        mask_cache: HashMap::new(),
-        mst_cache: HashMap::new(),
-        label: Labels::new(csr.num_nodes, 1usize << (k - 1)),
+        info_cache: MaskMap::default(),
+        cur_mask: u32::MAX,
+        cur_info: MaskInfo::EMPTY,
+        mst_cache: MaskMap::default(),
+        label: labels,
         settled_masks: vec![Vec::new(); csr.num_nodes],
         heap: BinaryHeap::new(),
         upper_bound,
@@ -622,10 +813,13 @@ pub fn dijkstra_steiner_guided(
         // the pair are settled. Filtering on which half owns the lowest bit --
         // the Dreyfus-Wagner trick -- silently drops every merge whose partner
         // happens to hold it.
+        // The settled side of every merge is the same, so its witness is read
+        // once rather than once per partner.
+        let settled_info = state.info(mask);
         let partners = std::mem::take(&mut state.settled_masks[v as usize]);
         for &(other, g_other) in &partners {
             if other & mask == 0 {
-                state.offer(v, mask | other, g + g_other);
+                state.offer_merge(v, mask, &settled_info, other, g + g_other);
             }
         }
         state.settled_masks[v as usize] = partners;
@@ -640,16 +834,55 @@ pub fn dijkstra_steiner_guided(
     Some(DijkstraSteinerResult { optimal, lower_bound, labels_settled: settled_count })
 }
 
+/// The part of a label's evaluation that depends on its terminal set `I` alone.
+#[derive(Clone, Copy)]
+struct MaskInfo {
+    /// `mst(R \ I) / 2`, the spanning-tree half of the 1-tree bound.
+    mst_half: Cost,
+    /// The part of the packing potential that depends only on `R \ I`.
+    shared: Cost,
+    /// `d(I, R \ I)`, and the bit of a terminal of `R \ I` attaining it.
+    hop: Cost,
+    hop_bit: u32,
+    /// `U(I)`: the cheapest known Lemma-15 witness for `I`, and its anchor set
+    /// `S(I)`. Only ever decreases.
+    witness: Cost,
+    anchor: u32,
+}
+
+impl MaskInfo {
+    /// The value the one-entry memo starts at; never read, because `cur_mask`
+    /// starts at the illegal mask.
+    const EMPTY: Self = Self {
+        mst_half: 0.0,
+        shared: 0.0,
+        hop: Cost::INFINITY,
+        hop_bit: 0,
+        witness: Cost::INFINITY,
+        anchor: 0,
+    };
+}
+
 struct Search<'a> {
     csr: &'a Csr,
     dist: &'a [Vec<Cost>],
     td: &'a [Vec<Cost>],
+    /// For each terminal, the other terminals in order of increasing distance.
+    nearest_order: &'a [Vec<u32>],
     k: usize,
     root_bit: u32,
     potential: Option<PackingPotential>,
-    /// `(mst(out) / 2, packing shared term)` per outstanding set.
-    mask_cache: HashMap<u32, (Cost, Cost)>,
-    mst_cache: HashMap<u32, Cost>,
+    /// Everything about a label that depends on its terminal set alone.
+    info_cache: MaskMap<MaskInfo>,
+    /// One-entry memo in front of `info_cache`.
+    ///
+    /// The grow step offers the *same* terminal set to every neighbour, so on a
+    /// graph of average degree several hundred a hash probe per offer is the
+    /// dominant cost of the whole search. `u32::MAX` is not a legal mask — bit
+    /// zero is the root's and is never set — so it serves as "empty".
+    cur_mask: u32,
+    cur_info: MaskInfo,
+    mst_cache: MaskMap<Cost>,
     /// Cost of each reached label, and whether it has been settled.
     label: Labels,
     /// Settled labels per vertex, carrying their cost so the merge loop needs no
@@ -668,7 +901,24 @@ impl Search<'_> {
         if self.label.get(mask >> 1, v).is_some_and(|(old, done)| done || old <= value + 1e-12) {
             return;
         }
-        let h = self.heuristic(v, mask);
+        let info = self.info(mask);
+        // Lemma 15: an offer strictly above the cheapest known witness for this
+        // terminal set lies on no optimal tree. See the module header.
+        if value > info.witness + 1e-7 {
+            return;
+        }
+        let (h, nearest, nearest_bit) = self.evaluate(v, mask, &info);
+        // This offer is itself a connected subgraph containing `{v} ∪ I`, so
+        // hanging a shortest path off it — either from `v` or from `I` — is a
+        // witness for every later offer on the same terminal set. Recorded
+        // before the incumbent test, because a label the incumbent rejects is
+        // just as real a subgraph as one it keeps.
+        let (reach, bit) =
+            if nearest <= info.hop { (nearest, nearest_bit) } else { (info.hop, info.hop_bit) };
+        if bit != 0 && value + reach < self.cur_info.witness {
+            self.cur_info.witness = value + reach;
+            self.cur_info.anchor = bit;
+        }
         // Lemma 14: no optimal tree can use a label whose own cost plus a lower
         // bound on the rest already exceeds a known feasible value.
         if value + h > self.upper_bound + 1e-9 {
@@ -676,6 +926,110 @@ impl Search<'_> {
         }
         self.label.put(mask >> 1, v, value, false);
         self.heap.push((Reverse(Key(value + h)), pack(mask, v)));
+    }
+
+    /// Offer the merge of two disjoint terminal sets, composing their witnesses
+    /// first so the offer is tested against the stronger bound.
+    ///
+    /// `ia` is the witness of `a`, read once by the caller because the settled
+    /// side of every merge at a vertex is the same set.
+    fn offer_merge(&mut self, v: NodeId, a: u32, ia: &MaskInfo, b: u32, value: Cost) {
+        // `U(I1 ∪ I2) <= U(I1) + U(I2)` when the anchor sets permit it. At least
+        // one side's anchors must avoid the other side's terminals; then every
+        // component of the combined witness holds an anchor that is still
+        // outstanding. See the module header for why "or" suffices.
+        let composed = self.peek_info(b).and_then(|ib| {
+            let ok = ia.witness.is_finite()
+                && ib.witness.is_finite()
+                && (ia.anchor & b == 0 || ib.anchor & a == 0);
+            let anchor = (ia.anchor | ib.anchor) & !(a | b);
+            (ok && anchor != 0).then_some((ia.witness + ib.witness, anchor))
+        });
+        if let Some((total, anchor)) = composed {
+            let info = self.info(a | b);
+            if total < info.witness {
+                self.cur_info.witness = total;
+                self.cur_info.anchor = anchor;
+            }
+        }
+        self.offer(v, a | b, value);
+    }
+
+    /// The stored info for a terminal set, without disturbing the memo.
+    ///
+    /// Every settled set has been through `load_info`, so this only returns
+    /// `None` for sets the search has never touched.
+    fn peek_info(&self, mask: u32) -> Option<MaskInfo> {
+        if mask == self.cur_mask {
+            return Some(self.cur_info);
+        }
+        self.info_cache.get(&mask).copied()
+    }
+
+    /// The set-dependent part of a label's evaluation, through a one-entry memo.
+    fn info(&mut self, mask: u32) -> MaskInfo {
+        if mask != self.cur_mask {
+            self.flush();
+            let loaded = self.load_info(mask);
+            self.cur_mask = mask;
+            self.cur_info = loaded;
+        }
+        self.cur_info
+    }
+
+    /// Write any witness improvement held in the memo back to the table.
+    ///
+    /// Delaying it is safe: a witness only ever decreases, so a reader that
+    /// misses an improvement prunes less, never more.
+    fn flush(&mut self) {
+        if self.cur_mask == u32::MAX {
+            return;
+        }
+        if let Some(entry) = self.info_cache.get_mut(&self.cur_mask) {
+            if self.cur_info.witness < entry.witness {
+                entry.witness = self.cur_info.witness;
+                entry.anchor = self.cur_info.anchor;
+            }
+        }
+        self.cur_mask = u32::MAX;
+    }
+
+    fn load_info(&mut self, mask: u32) -> MaskInfo {
+        if let Some(&cached) = self.info_cache.get(&mask) {
+            return cached;
+        }
+        let out = self.outstanding(mask);
+        let mst_half = self.mst(out) / 2.0;
+        let shared = self.potential.as_ref().map_or(0.0, |p| p.shared(out));
+        // `d(I, R \ I)` over the terminal metric closure. Each terminal's
+        // neighbours are pre-sorted by distance, so the inner scan stops at the
+        // first one still outstanding — normally the first entry — rather than
+        // sweeping the whole complement.
+        let mut hop = Cost::INFINITY;
+        let mut hop_bit = 0u32;
+        let mut inside = mask;
+        while inside != 0 {
+            let i = inside.trailing_zeros() as usize;
+            inside &= inside - 1;
+            for &t in &self.nearest_order[i] {
+                let d = self.td[i][t as usize];
+                if d >= hop {
+                    break;
+                }
+                if out >> t & 1 == 1 {
+                    hop = d;
+                    hop_bit = 1u32 << t;
+                    break;
+                }
+            }
+        }
+        // The witness available before any label for `I` exists: a spanning tree
+        // of `I` in the metric closure, plus the cheapest hop out of it.
+        let (witness, anchor) =
+            if hop.is_finite() { (self.mst(mask) + hop, hop_bit) } else { (Cost::INFINITY, 0) };
+        let info = MaskInfo { mst_half, shared, hop, hop_bit, witness, anchor };
+        self.info_cache.insert(mask, info);
+        info
     }
 
     /// The outstanding terminal set of a label: the root plus everything the
@@ -686,8 +1040,17 @@ impl Search<'_> {
     }
 
     fn heuristic(&mut self, v: NodeId, mask: u32) -> Cost {
+        let info = self.info(mask);
+        self.evaluate(v, mask, &info).0
+    }
+
+    /// The A* potential, plus the distance from `v` to the nearest outstanding
+    /// terminal and which one it is — quantities the potential computes anyway
+    /// and the Lemma-15 witness needs.
+    fn evaluate(&self, v: NodeId, mask: u32, info: &MaskInfo) -> (Cost, Cost, u32) {
         let out = self.outstanding(mask);
         let mut first = Cost::INFINITY;
+        let mut first_bit = 0u32;
         let mut second = Cost::INFINITY;
         let mut farthest: Cost = 0.0;
         let mut count = 0usize;
@@ -698,11 +1061,12 @@ impl Search<'_> {
             count += 1;
             let d = self.dist[i][v as usize];
             if !d.is_finite() {
-                return Cost::INFINITY;
+                return (Cost::INFINITY, Cost::INFINITY, 0);
             }
             if d < first {
                 second = first;
                 first = d;
+                first_bit = 1u32 << i;
             } else if d < second {
                 second = d;
             }
@@ -710,25 +1074,16 @@ impl Search<'_> {
                 farthest = d;
             }
         }
-        let (mst_half, shared) = match self.mask_cache.get(&out) {
-            Some(&pair) => pair,
-            None => {
-                let mst_half = self.mst(out) / 2.0;
-                let shared = self.potential.as_ref().map_or(0.0, |p| p.shared(out));
-                self.mask_cache.insert(out, (mst_half, shared));
-                (mst_half, shared)
-            }
-        };
         // The 1-tree bound. With one outstanding terminal the tour degenerates
         // to the doubled edge and the pair `i = j` is the right reading.
         let pair = if count <= 1 { first } else { (first + second) / 2.0 };
-        let mut best = (pair + mst_half).max(farthest);
+        let mut best = (pair + info.mst_half).max(farthest);
         // The maximum of valid lower bounds is a valid lower bound, so the
         // packing bound simply joins the others.
         if let Some(p) = &self.potential {
-            best = best.max(p.value(v, out, shared));
+            best = best.max(p.value(v, out, mask, info.shared));
         }
-        best
+        (best, first, first_bit)
     }
 
     /// Minimum spanning tree of a terminal subset in the metric closure.
@@ -968,6 +1323,73 @@ mod tests {
             }
         }
         assert!(nontrivial > 0, "no abandoned run produced a positive bound");
+    }
+
+    /// The Lemma-15 domination is the one pruning that can discard a label the
+    /// search would otherwise settle, and its compositional rule only fires
+    /// once several terminals have been merged. Drive it with more terminals
+    /// than the other tests use, with and without the packing potential, and
+    /// insist on the Dreyfus-Wagner answer every time.
+    #[test]
+    fn domination_pruning_agrees_with_dreyfus_wagner() {
+        use crate::graph::algorithms::{dual_ascent_packing, ArcIndex};
+        use crate::graph::{DirectedGraph, NodeType};
+
+        let mut rng = rng_from(0xD0D0_1515_BEEF_0042);
+        let mut checked = 0;
+        for _ in 0..150 {
+            // Six to nine terminals, so the merge step composes witnesses of
+            // sets that themselves came from composition.
+            let n = 10 + (rng() % 10) as u32;
+            let k = 6 + (rng() % 4) as u32;
+            let mut g = UndirectedGraph::new(n);
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = v <= k;
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 4 != 0 {
+                        g.add_edge(u, v, 1.0 + (rng() % 20) as f64);
+                    }
+                }
+            }
+            let Some(dw) = dreyfus_wagner(&g, &terminals) else { continue };
+
+            let directed = DirectedGraph::from_undirected(&g);
+            let idx = ArcIndex::new(&directed);
+            let active = vec![true; idx.num_arcs()];
+            let da = dual_ascent_packing(&idx, terminals[0], &terminals, &active, 1 << 20);
+
+            for guide in [None, Some(&da.sets[..])] {
+                // A cutoff exactly at the optimum is the tightest valid one and
+                // stacks the incumbent rule on top of the domination rule.
+                for cutoff in [Cost::INFINITY, dw.optimal_cost] {
+                    let got = dijkstra_steiner_guided(
+                        &g,
+                        &terminals,
+                        cutoff,
+                        u64::MAX,
+                        None,
+                        guide,
+                    )
+                    .and_then(|r| r.optimal);
+                    assert!(
+                        got.is_some_and(|c| (c - dw.optimal_cost).abs() < 1e-6),
+                        "{k} terminals, guided={}, cutoff={cutoff}: \
+                         Dreyfus-Wagner says {}, search says {got:?}",
+                        guide.is_some(),
+                        dw.optimal_cost
+                    );
+                }
+            }
+            checked += 1;
+        }
+        assert!(checked > 100, "only {checked} instances exercised");
     }
 
     /// Cross-check against the Dreyfus-Wagner implementation on bigger graphs
