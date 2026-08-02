@@ -820,7 +820,9 @@ fn try_decomposition(
     deadline: Instant,
 ) -> Option<(Cost, f64)> {
     use crate::graph::algorithms::steiner_td::{steiner_tree_over_decomposition, MAX_BAG};
-    use crate::graph::algorithms::tree_decomposition::{decompose_with, Ordering};
+    use crate::graph::algorithms::tree_decomposition::{
+        decompose_portfolio, decompose_with, Ordering, ORDERINGS,
+    };
 
     if terminals.len() < 2 || Instant::now() >= deadline {
         return None;
@@ -829,13 +831,17 @@ fn try_decomposition(
     let cap = MAX_BAG - 2;
     let started = Instant::now();
     // The cheap ordering is the gate: it abandons an ordering at the first bag
-    // that exceeds the cap, so a wide graph costs microseconds to reject.
+    // that exceeds the cap, so a wide graph costs microseconds to reject. Only
+    // once it has shown the graph is narrow is the rest of the portfolio worth
+    // running, and the portfolio then chooses by the work each decomposition
+    // implies rather than by width alone.
     let cheap = decompose_with(graph, Ordering::MinDegree, cap, Some(deadline))?;
-    // Only now, knowing the graph is narrow, is the dearer ordering worth
-    // running -- and it is capped by what the cheap one already achieved, so it
-    // can only return something narrower.
-    let td = decompose_with(graph, Ordering::MinFill, cheap.width, Some(deadline))
-        .filter(|t| t.width <= cheap.width)
+    let td = decompose_portfolio(graph, cap, Some(deadline), &ORDERINGS[1..])
+        .map(|(t, _)| t)
+        .filter(|t| {
+            use crate::graph::algorithms::steiner_td::work_estimate;
+            work_estimate(t, graph.edges.len(), 1) <= work_estimate(&cheap, graph.edges.len(), 1)
+        })
         .unwrap_or(cheap);
     if !td.verify(graph) {
         return None;

@@ -27,6 +27,15 @@
 //! table `c_t(S, P)` holds the least cost of a partial solution with that
 //! signature.
 //!
+//! A partial solution is an **edge set, not a forest**. That is a deliberate
+//! choice and not a relaxation of the answer: with nonnegative costs the
+//! cheapest connected subgraph spanning the terminals is a tree, so minimising
+//! over the larger class returns the same number. It is forced on us — the
+//! forest restriction is *provably incompatible* with the rank-based reduction
+//! that makes the tables small, and the witness is recorded in
+//! [`rankreduce::tests::forest_completions_are_not_preserved`]. See the join
+//! recurrence below.
+//!
 //! The second bullet is not a restriction on optimal solutions:
 //!
 //! > **Lemma 1.** Let `T` be any tree in `G` containing every terminal, and let
@@ -60,11 +69,10 @@
 //!
 //! - **Introduce edge `{u,w}`**, `u,w in X_t`, `V_t = V_{t'}`. A partial
 //!   solution either omits the edge — giving `c_{t'}(S,P)` — or uses it, which
-//!   requires `u,w in S` and merges their blocks. Using it when `u` and `w`
-//!   already share a block would close a cycle; that is excluded because costs
-//!   are nonnegative, so some spanning forest of any such `F` is a partial
-//!   solution with the same signature and no greater cost. Nonnegativity is
-//!   checked, not assumed.
+//!   requires `u,w in S` and merges their blocks. Taking it when `u` and `w`
+//!   already share a block is skipped: it leaves the signature unchanged and
+//!   adds `c(u,w) >= 0`, so the entry it would write is never cheaper than the
+//!   one already there. Nonnegativity is checked, not assumed.
 //!
 //! - **Forget vertex `v`**, `X_t = X_{t'} - v`, `V_t = V_{t'}`. A partial
 //!   solution at `t` is one at `t'` with `v` no longer exposed. If `v` is a
@@ -79,29 +87,62 @@
 //!   partial solution splits as `F_1 = F ∩ G[V_{t_1}]`, `F_2 = F ∩ G[V_{t_2}]`,
 //!   which share exactly their vertices in `X_t` and no edges (each edge is
 //!   introduced once, below exactly one side). So `S_1 = S_2 = S`, the cost adds,
-//!   and `P` is the join `P_1 ⊔ P_2` in the partition lattice of `S`. The union
-//!   is a forest exactly when
+//!   and `P` is the join `P_1 ⊔ P_2` in the partition lattice of `S`. **Every**
+//!   such pair is accepted.
+//!
+//!   The union of two forests need not be a forest, and it is exactly the
+//!   cyclic unions that this recurrence used to reject, by the criterion
 //!
 //!   ```text
-//!   |P_1| + |P_2| = |S| + |P_1 ⊔ P_2|.
+//!   |P_1| + |P_2| = |S| + |P_1 ⊔ P_2|,
 //!   ```
 //!
-//!   *Proof of the criterion.* Contract each component of `F_i` to a spanning
-//!   tree of its trace on `S`: side `i` contributes `|S| - |P_i|` connections
-//!   between elements of `S`. Their union is a graph on `S` with
-//!   `(|S|-|P_1|) + (|S|-|P_2|)` edges and `|P_1 ⊔ P_2|` components, and a graph
-//!   with `n` vertices and `k` components is a forest iff it has exactly `n - k`
-//!   edges and never fewer. Rearranging gives the display, and `<=` always
-//!   holds. Cycles in the union are excluded for the same nonnegativity reason
-//!   as above. QED
+//!   which is a correct characterisation of when `F_1 ∪ F_2` is a forest:
+//!   contract each component of `F_i` to a spanning tree of its trace on `S`, so
+//!   side `i` contributes `|S| - |P_i|` connections; the union is a graph on `S`
+//!   with `(|S|-|P_1|) + (|S|-|P_2|)` edges and `|P_1 ⊔ P_2|` components, and a
+//!   graph with `n` vertices and `k` components is a forest iff it has exactly
+//!   `n - k` edges. **Correct, and unusable.** Imposing it makes the table's
+//!   query "which `P_1` complete this `P_2` into a *forest* spanning `S`", and
+//!   the rank-based reduction below preserves the least cost of the query
+//!   "which `P_1` complete this `P_2` into a *connected* spanning subgraph". The
+//!   two are different questions and the reduction answers only the second; on
+//!   `S = {a,b,c}` the discrete partition is the sum of the three two-block
+//!   partitions in cut space, so it is discarded as dependent, and it is the
+//!   unique forest-completion of the one-block query. The witness is a test.
+//!
+//!   Keeping the cyclic joins is what repairs it, and it costs nothing:
+//!
+//!   > **Lemma 2.** Let `OPT` be the Steiner minimum tree cost. Every state this
+//!   > DP reaches denotes a real edge set of its stated cost, and the optimal
+//!   > tree's restrictions are among the states reached. Hence the value read at
+//!   > the root is exactly `OPT`.
+//!
+//!   *Proof.* Soundness: each recurrence builds an actual edge set from actual
+//!   edge sets, joins union edge-disjoint sides, and the root state's defining
+//!   property — every component meets `{r}` — forces a single component covering
+//!   every terminal, so its cost is at least `OPT`. Completeness: restrict the
+//!   optimal tree `T` to each `V_t`. Lemma 1 says every component meets the bag,
+//!   so no forget-drop fires on it; `T` has no cycle, so the introduce-edge skip
+//!   never fires on it; and the join accepts unconditionally. So `T`'s
+//!   restrictions survive, giving at most `OPT`. QED
 //!
 //! # The answer
 //!
 //! The decomposition of a connected graph produced by the elimination game has
 //! a single root bag; forgetting down from it leaves the bag `{r}`, and the
-//! entry `c(S={r}, P={{r}})` is the cost of a least-cost forest in `G` in which
-//! every terminal appears and every component meets `{r}` — that is, a
-//! least-cost tree containing every terminal. That is the Steiner minimum tree.
+//! entry `c(S={r}, P={{r}})` is the cost of a least-cost edge set in `G` in
+//! which every terminal appears and every component meets `{r}` — that is, a
+//! least-cost connected subgraph containing every terminal, whose value is the
+//! Steiner minimum tree cost by Lemma 2.
+//!
+//! When the caller wants the tree and not only its value, the edge set read
+//! back from the backpointers is reduced to a spanning tree of itself. That
+//! cannot change the cost: an edge closing a cycle can be deleted without
+//! disconnecting anything, and if it had positive cost the remaining set would
+//! be a cheaper connected subgraph spanning the terminals, contradicting
+//! minimality. So every discarded edge has cost zero, and this is asserted
+//! rather than assumed.
 //!
 //! # What is bounded
 //!
@@ -151,20 +192,77 @@ const BELL: [f64; 17] = [
 pub fn work_estimate(td: &TreeDecomposition, num_edges: usize, extra: usize) -> f64 {
     let mut work = 0.0;
     for (i, bag) in td.bags.iter().enumerate() {
-        let b = (bag.len() + extra).min(BELL.len() - 2);
-        let states = BELL[b + 1];
+        let b = (bag.len() + extra).min(MAX_BAG);
         // One introduce or forget node per bag vertex, plus the edges assigned
         // here; each sweeps the table once.
-        work += (b as f64 + 1.0) * states;
-        // Every child past the first is a join, which pairs the two tables.
+        work += (b as f64 + 1.0) * table_bound(b);
+        // Every child past the first is a join, which pairs the two tables
+        // class by class.
         let joins = td.children[i].len().saturating_sub(1) as f64;
-        work += joins * states * states;
+        work += joins * join_bound(b);
     }
     // Edges are assigned one per bag on average; charge them at the widest bag
     // rather than tracking the assignment, which the caller has not made yet.
-    let widest = td.bags.iter().map(|b| b.len()).max().unwrap_or(0) + extra;
-    work += num_edges as f64 * BELL[(widest + 1).min(BELL.len() - 1)];
+    let widest = (td.bags.iter().map(|b| b.len()).max().unwrap_or(0) + extra).min(MAX_BAG);
+    work += num_edges as f64 * table_bound(widest);
     work
+}
+
+/// States a reduced table at a bag of `b` positions can hold.
+///
+/// The old estimate used `Bell(b+1)`, the number of signatures. That was right
+/// before the rank-based reduction existed and is wrong by an exponential factor
+/// now: a class whose used set has `s` elements is cut down to at most `2^{s-1}`
+/// representatives, so the bound is
+///
+/// ```text
+/// sum_{s=0}^{b} C(b,s) * min(Bell(s), 2^{max(s-1,0)}),
+/// ```
+///
+/// which is `O(3^b)` rather than `O(Bell(b))`. At `b = 13` that is the
+/// difference between `2.5e6` and `2.8e7`; at the widths the estimate is used to
+/// *compare* decompositions the difference is nine orders of magnitude, because
+/// the old form squared `Bell` at every join.
+///
+/// It is still an upper bound and still a loose one — the reachable signatures
+/// at a bag are a small fraction of the representable ones — so it remains
+/// unusable as an absolute admission test, which is why [`crate::solver`] bounds
+/// the DP by the clock instead. What it *is* good for is ranking two
+/// decompositions of the same graph against each other, where the looseness is a
+/// common factor that cancels.
+fn table_bound(b: usize) -> f64 {
+    let mut total = 0.0;
+    for s in 0..=b {
+        total += binom(b, s) * class_bound(s);
+    }
+    total
+}
+
+/// Pairs a join forms, summed over the classes of one bag.
+fn join_bound(b: usize) -> f64 {
+    let mut total = 0.0;
+    for s in 0..=b {
+        let e = class_bound(s);
+        total += binom(b, s) * e * e;
+    }
+    total
+}
+
+/// Representatives one `S`-class of size `s` can hold: the cut space has
+/// dimension `2^{s-1}`, and there are only `Bell(s)` partitions to begin with.
+fn class_bound(s: usize) -> f64 {
+    if s == 0 {
+        return 1.0;
+    }
+    BELL[s.min(BELL.len() - 1)].min((1u64 << (s - 1)) as f64)
+}
+
+fn binom(n: usize, k: usize) -> f64 {
+    let mut r = 1.0;
+    for i in 0..k {
+        r = r * (n - i) as f64 / (i + 1) as f64;
+    }
+    r
 }
 
 /// Table entries this dynamic programme touches per second, measured.
@@ -230,17 +328,87 @@ pub const TD_UNITS_PER_SECOND: f64 = 2.0e7;
 ///
 /// # Why it is sound to apply after every node
 ///
-/// The quantity the whole DP eventually reports is
-/// `min { w(p) : p ⊔ q = {S} }` for the single query `q` that closes the tree at
-/// the root bag. Every operation between here and there — introducing a vertex,
-/// forgetting one, taking an edge, joining two children — extends a partial
-/// solution, and *some* extension of a partial solution completes it into a tree
-/// exactly when the partition it carries joins with the partition of that
-/// extension to the single block. So the theorem's guarantee is precisely the
-/// invariant the DP needs: replacing a table by a representative set cannot
-/// change, for any way the rest of the tree might complete, the least cost at
-/// which it can be completed. Costs are only ever added on the way up, so the
-/// minimum is preserved with its weight.
+/// The theorem above is a statement about one table and one query. The DP
+/// applies the reduction at every node and then keeps computing, so what is
+/// actually needed is that *representation is preserved by every operation the
+/// DP performs*. Write `A ⊑ A'` for "`A'` is a subset of `A` and
+/// `opt(A',q) = opt(A,q)` for every partition `q` of `S`", where
+/// `opt(A,q) = min{ A(p) : p ⊔ q = {S} }`. Then:
+///
+/// > **Lemma J (join).** If `A ⊑ A'` then `join(A,B) ⊑ join(A',B)`, where
+/// > `join(A,B)(r) = min{ A(p)+B(p') : p ⊔ p' = r }`.
+///
+/// *Proof.* Let `p, p'` attain `opt(join(A,B), q)`, so `p ⊔ (p' ⊔ q) = {S}`.
+/// Apply `A ⊑ A'` with the query `p' ⊔ q`: some `p'' in A'` has
+/// `A'(p'') <= A(p)` and `p'' ⊔ p' ⊔ q = {S}`. Then `p'' ⊔ p'` is a state of
+/// `join(A',B)` of weight at most `A(p)+B(p')` completing `q`. QED
+///
+/// > **Lemma F (forget).** The projection `proj(A)(q) = min{ A(p) : p|_X = q,
+/// > v is not a singleton block of p }` preserves representation.
+///
+/// *Proof.* This is the one filter in the DP that looks at an individual
+/// partition, and it is exactly a connectivity query in disguise. In the union
+/// graph of `p` and `q ∪ {{v}}`, the vertex `v` is adjacent only to its
+/// `p`-blockmates, so `S ∪ {v}` is connected there iff `S` is connected in the
+/// union of `p|_X` and `q` **and** `v` has a `p`-blockmate. Hence
+/// `opt(proj(A), q) = opt(A, q ∪ {{v}})`, and the right-hand side is preserved
+/// by hypothesis. QED
+///
+/// Introduce-vertex is the injection `p ↦ p ∪ {{v}}`, whose queries pull back
+/// the same way; introduce-edge is `min(A, c + join(A, {uw}))`, covered by
+/// Lemma J; the pointwise `min` of two represented tables represents their
+/// `min`; and the terminal-coverage filter is a statement about `S` alone, so it
+/// deletes whole classes and never splits one. The root query is a single
+/// connectivity query. So the reduction is safe at every node.
+///
+/// # What it does *not* preserve: forest completions
+///
+/// The identity is about `p ⊔ q = {S}` and nothing else. If the DP instead asked
+/// "which `p` complete `q` into a *forest*", the reduction would be wrong, and
+/// the smallest witness is `S = {a,b,c}`. In cut space
+///
+/// ```text
+/// cuts({ab|c}) + cuts({ac|b}) + cuts({bc|a}) = cuts({a|b|c}),
+/// ```
+///
+/// so if the three two-block partitions are cheaper the discrete partition is
+/// discarded as dependent. Query `q = {abc}`: every `p` connects, so no
+/// connectivity answer changes — but the forest criterion
+/// `|p| + |q| = |S| + |p ⊔ q|` reads `|p| + 1 = 3 + 1`, which only the discrete
+/// partition satisfies. The reduced table has *no* forest completion of `q`
+/// while the full table has one. This is why the join in this module accepts
+/// cyclic unions; `forest_completions_are_not_preserved` keeps the witness
+/// alive so the filter cannot be reintroduced by accident.
+///
+/// ## Why the filtered join nevertheless passed every test it was given
+///
+/// The witness needs the discrete partition to be *strictly dearer* than the
+/// three two-block partitions, or to tie with them and lose the tie-break. It
+/// can never be strictly dearer:
+///
+/// > **Lemma D (discrete dominance).** At any node `t` and used set `S`, the
+/// > least cost of a partial solution with signature `(S,p)` is minimised over
+/// > `p` by the discrete partition of `S`.
+///
+/// *Proof.* Let `F` realise `(S,p)` and let `C` be a component of `F` with trace
+/// `B = C ∩ X_t`. Take a spanning tree of `C` and assign every vertex of `C` to
+/// the nearest vertex of `B` in that tree, breaking ties by index. Each class is
+/// a connected subtree — the whole path from a vertex to its representative is
+/// assigned to that representative — and contains exactly one vertex of `B`, so
+/// deleting the `|B| - 1` edges between classes splits `C` into `|B|` components
+/// each meeting `X_t` in one vertex, with every forgotten terminal of `C` still
+/// present in one of them. Doing this to every component yields a partial
+/// solution with the discrete signature and, costs being nonnegative, no greater
+/// cost. QED
+///
+/// So the discrete partition is processed first in the cost ordering, its cut
+/// vector — the all-ones vector — is independent of the empty basis, and it
+/// survives. The reduction can only discard it when several partitions tie at
+/// the minimum and the tie-break puts the discrete one last, which is decided by
+/// hash iteration order. That is why the filtered join answered every random
+/// instance correctly, including unit-cost instances built to maximise ties: it
+/// was correct by accident, on a hash order. Correctness that depends on hash
+/// order is not correctness, which is the whole reason the filter is gone.
 mod rankreduce {
     use super::{Cost, MAX_BAG, OUT};
 
@@ -300,53 +468,95 @@ mod rankreduce {
         }
     }
 
+    /// An incremental row-reduced basis of the cut space of an `s`-element
+    /// ground set.
+    ///
+    /// The reduction is a matroid greedy: process candidates in nondecreasing
+    /// weight and keep exactly those whose cut vector is independent of the ones
+    /// already kept. Making the basis an object rather than a loop is what lets
+    /// the join below run the greedy *while* it generates candidates, and stop
+    /// the moment the basis is full.
+    pub struct Basis {
+        bits: usize,
+        words: usize,
+        rows: Vec<Vec<u64>>,
+        pivots: Vec<usize>,
+        scratch: Vec<u64>,
+    }
+
+    impl Basis {
+        pub fn new(s: usize) -> Basis {
+            // `s <= 1` admits exactly one partition, so the cut space is the
+            // zero space and the first candidate is the only one.
+            let bits = if s <= 1 { 1 } else { 1usize << (s - 1) };
+            let words = bits.div_ceil(64).min(MAX_WORDS);
+            Basis { bits, words, rows: Vec::new(), pivots: Vec::new(), scratch: vec![0u64; words] }
+        }
+
+        /// Whether the basis spans the whole cut space, so that every further
+        /// candidate is dependent whatever it is.
+        pub fn is_full(&self) -> bool {
+            self.rows.len() >= self.bits
+        }
+
+        /// Offer a partition. Returns `true` — and keeps it — exactly when its
+        /// cut vector is outside the current span.
+        pub fn offer(&mut self, d: &[u8; MAX_BAG], used: &[usize]) -> bool {
+            if used.len() <= 1 {
+                // One partition exists; the first offer is it.
+                if self.rows.is_empty() {
+                    self.rows.push(vec![0u64; self.words]);
+                    self.pivots.push(0);
+                    return true;
+                }
+                return false;
+            }
+            cut_vector(d, used, &mut self.scratch);
+            let mut v = std::mem::replace(&mut self.scratch, vec![0u64; self.words]);
+            for (bi, &p) in self.pivots.iter().enumerate() {
+                if v[p >> 6] >> (p & 63) & 1 == 1 {
+                    for w in 0..self.words {
+                        v[w] ^= self.rows[bi][w];
+                    }
+                }
+            }
+            let Some(p) = (0..self.bits).find(|&c| v[c >> 6] >> (c & 63) & 1 == 1) else {
+                self.scratch = v;
+                return false;
+            };
+            // Normalise the kept rows so later reductions stay a single pass.
+            for bi in 0..self.rows.len() {
+                if self.rows[bi][p >> 6] >> (p & 63) & 1 == 1 {
+                    for w in 0..self.words {
+                        self.rows[bi][w] ^= v[w];
+                    }
+                }
+            }
+            self.rows.push(v);
+            self.pivots.push(p);
+            true
+        }
+    }
+
     /// Keep a minimum-weight representative subset of `entries`.
     ///
-    /// `entries` is `(code, cost, payload)` and must be sorted by cost
-    /// ascending; the returned indices are those to keep.
-    pub fn reduce(
-        decoded: &[[u8; MAX_BAG]],
-        used: &[usize],
-        order: &[usize],
-    ) -> Vec<usize> {
-        let s = used.len();
-        if s <= 1 {
+    /// `order` must list the entries by nondecreasing cost; the returned indices
+    /// are those to keep.
+    pub fn reduce(decoded: &[[u8; MAX_BAG]], used: &[usize], order: &[usize]) -> Vec<usize> {
+        if used.len() <= 1 {
             // A single element admits one partition, so nothing can be dropped
             // and no work is needed.
             return order.to_vec();
         }
-        let bits = 1usize << (s - 1);
-        let words = bits.div_ceil(64).min(MAX_WORDS);
-        let mut basis: Vec<Vec<u64>> = Vec::new();
-        let mut pivots: Vec<usize> = Vec::new();
+        let mut basis = Basis::new(used.len());
         let mut keep = Vec::new();
-        let mut row = vec![0u64; words];
         for &i in order {
-            cut_vector(&decoded[i], used, &mut row);
-            let mut v = row.clone();
-            for (bi, &p) in pivots.iter().enumerate() {
-                if v[p >> 6] >> (p & 63) & 1 == 1 {
-                    for w in 0..words {
-                        v[w] ^= basis[bi][w];
-                    }
-                }
+            if basis.is_full() {
+                break;
             }
-            // The leading set bit, if the vector survived reduction.
-            let Some(p) = (0..bits).find(|&c| v[c >> 6] >> (c & 63) & 1 == 1) else {
-                continue;
-            };
-            // Normalise the basis so later reductions stay a single pass.
-            for (bi, &q) in pivots.iter().enumerate() {
-                let _ = q;
-                if basis[bi][p >> 6] >> (p & 63) & 1 == 1 {
-                    for w in 0..words {
-                        basis[bi][w] ^= v[w];
-                    }
-                }
+            if basis.offer(&decoded[i], used) {
+                keep.push(i);
             }
-            basis.push(v);
-            pivots.push(p);
-            keep.push(i);
         }
         keep
     }
@@ -403,6 +613,226 @@ mod rankreduce {
                 }
             }
             (0..s).map(|i| find(&mut uf, i)).collect::<std::collections::HashSet<_>>().len() == 1
+        }
+
+        /// Blocks of a partition of `{0..s-1}`, as a vector of masks.
+        fn block_masks(p: &[u8; MAX_BAG], s: usize) -> Vec<u32> {
+            let mut by: std::collections::HashMap<u8, u32> = std::collections::HashMap::new();
+            for i in 0..s {
+                *by.entry(p[i]).or_insert(0) |= 1 << i;
+            }
+            let mut v: Vec<u32> = by.into_values().collect();
+            v.sort_unstable();
+            v
+        }
+
+        /// The join of two partitions of `{0..s-1}`, as a canonical signature.
+        fn join_of(p: &[u8; MAX_BAG], q: &[u8; MAX_BAG], s: usize) -> [u8; MAX_BAG] {
+            let mut uf: Vec<usize> = (0..s).collect();
+            fn find(uf: &mut Vec<usize>, mut x: usize) -> usize {
+                while uf[x] != x {
+                    uf[x] = uf[uf[x]];
+                    x = uf[x];
+                }
+                x
+            }
+            for side in [p, q] {
+                for i in 0..s {
+                    for j in i + 1..s {
+                        if side[i] == side[j] {
+                            let (a, b) = (find(&mut uf, i), find(&mut uf, j));
+                            uf[a] = b;
+                        }
+                    }
+                }
+            }
+            let mut out = [OUT; MAX_BAG];
+            let mut map = std::collections::HashMap::new();
+            let mut next = 0u8;
+            for i in 0..s {
+                let r = find(&mut uf, i);
+                let id = *map.entry(r).or_insert_with(|| {
+                    next += 1;
+                    next - 1
+                });
+                out[i] = id;
+            }
+            out
+        }
+
+        /// Whether `p ∪ q` is a forest: the rank criterion from the module
+        /// comment, `|p| + |q| = |S| + |p ⊔ q|`.
+        fn forest_compatible(p: &[u8; MAX_BAG], q: &[u8; MAX_BAG], s: usize) -> bool {
+            let j = join_of(p, q, s);
+            block_masks(p, s).len() + block_masks(q, s).len()
+                == s + block_masks(&j, s).len()
+        }
+
+        /// **The reason the join in this module accepts cyclic unions.**
+        ///
+        /// The reduction preserves the least cost among *connected*
+        /// completions. It does not preserve the least cost among
+        /// *forest-compatible* completions, and this is the smallest witness:
+        /// on `S = {a,b,c}` the three two-block partitions sum in cut space to
+        /// the discrete partition, so making them cheaper discards it — and the
+        /// discrete partition is the unique forest completion of the one-block
+        /// query.
+        ///
+        /// If this test ever starts failing, the reduction has changed and the
+        /// acyclicity filter might be safe again. Until then, reinstating that
+        /// filter in the join makes the DP report values above the optimum.
+        #[test]
+        fn forest_completions_are_not_preserved() {
+            let s = 3usize;
+            let used = vec![0usize, 1, 2];
+            let part = |a: u8, b: u8, c: u8| {
+                let mut d = [OUT; MAX_BAG];
+                d[0] = a;
+                d[1] = b;
+                d[2] = c;
+                d
+            };
+            // {ab|c}, {ac|b}, {bc|a} at cost 1; the discrete partition at 2.
+            let decoded = vec![part(0, 0, 1), part(0, 1, 0), part(0, 1, 1), part(0, 1, 2)];
+            let costs: Vec<Cost> = vec![1.0, 1.0, 1.0, 2.0];
+            let order = by_cost(&costs);
+            assert_eq!(order.last(), Some(&3), "the discrete partition must sort last");
+            let keep = reduce(&decoded, &used, &order);
+            assert!(
+                !keep.contains(&3),
+                "the discrete partition was expected to be dependent on the three \
+                 two-block partitions in cut space, but the reduction kept it"
+            );
+
+            // Connectivity is untouched: every one of the four connects with the
+            // one-block query, and the cheapest survivor still costs 1.
+            let q = part(0, 0, 0);
+            for i in 0..4 {
+                assert!(joins_connected(&decoded[i], &q, s));
+            }
+
+            // The forest question is answered differently by the two tables.
+            let full_forest: Vec<usize> =
+                (0..4).filter(|&i| forest_compatible(&decoded[i], &q, s)).collect();
+            assert_eq!(full_forest, vec![3], "only the discrete partition is acyclic here");
+            let kept_forest: Vec<usize> =
+                keep.iter().copied().filter(|&i| forest_compatible(&decoded[i], &q, s)).collect();
+            assert!(
+                kept_forest.is_empty(),
+                "the reduced table still had a forest completion; the witness has decayed"
+            );
+        }
+
+        /// The rank-reduced join equals the naive join, as a *represented*
+        /// table: for every ground set up to size six, every query partition,
+        /// and randomly weighted tables including adversarial block-count
+        /// distributions, joining the reduced tables answers every connectivity
+        /// query at exactly the cost the full pairwise join does.
+        ///
+        /// This is Lemma J of the module comment, checked by brute force. It is
+        /// the property the DP actually relies on — the single-table
+        /// representation theorem is not enough on its own, because the DP joins
+        /// tables that have already been reduced.
+        #[test]
+        fn reduced_join_matches_naive_join() {
+            let mut seed = 0x1010_C0DE_7777_1111u64;
+            let mut rng = move || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed
+            };
+            for s in 2..=6usize {
+                let used: Vec<usize> = (0..s).collect();
+                let parts = all_partitions(s);
+                for round in 0..40 {
+                    // Round 0..9 keep everything; later rounds bias towards
+                    // coarse or fine partitions, which is where the cut-space
+                    // dependencies concentrate.
+                    let bias = round % 4;
+                    let pick = |p: &[u8; MAX_BAG], r: &mut dyn FnMut() -> u64| {
+                        let blocks = block_masks(p, s).len();
+                        let want = match bias {
+                            0 => 70,
+                            1 => 25 + 60 * (blocks == 1 || blocks == s) as u64,
+                            2 => 90 - 12 * blocks as u64,
+                            _ => 20 + 14 * blocks as u64,
+                        };
+                        r() % 100 < want
+                    };
+                    let build = |r: &mut dyn FnMut() -> u64| {
+                        let chosen: Vec<[u8; MAX_BAG]> =
+                            parts.iter().copied().filter(|p| pick(p, r)).collect();
+                        let costs: Vec<Cost> =
+                            (0..chosen.len()).map(|_| (r() % 40) as Cost).collect();
+                        (chosen, costs)
+                    };
+                    let (pa, ca) = build(&mut rng);
+                    let (pb, cb) = build(&mut rng);
+                    if pa.is_empty() || pb.is_empty() {
+                        continue;
+                    }
+
+                    // The naive join: every pair, minimum per result partition.
+                    let mut naive: std::collections::HashMap<[u8; MAX_BAG], Cost> =
+                        std::collections::HashMap::new();
+                    for (i, p) in pa.iter().enumerate() {
+                        for (j, q) in pb.iter().enumerate() {
+                            let r = join_of(p, q, s);
+                            let w = ca[i] + cb[j];
+                            let e = naive.entry(r).or_insert(Cost::INFINITY);
+                            if w < *e {
+                                *e = w;
+                            }
+                        }
+                    }
+
+                    // The reduced join: reduce both sides, join, reduce again.
+                    let ka = reduce(&pa, &used, &by_cost(&ca));
+                    let kb = reduce(&pb, &used, &by_cost(&cb));
+                    let mut fast: std::collections::HashMap<[u8; MAX_BAG], Cost> =
+                        std::collections::HashMap::new();
+                    for &i in &ka {
+                        for &j in &kb {
+                            let r = join_of(&pa[i], &pb[j], s);
+                            let w = ca[i] + cb[j];
+                            let e = fast.entry(r).or_insert(Cost::INFINITY);
+                            if w < *e {
+                                *e = w;
+                            }
+                        }
+                    }
+                    let fp: Vec<[u8; MAX_BAG]> = fast.keys().copied().collect();
+                    let fc: Vec<Cost> = fp.iter().map(|k| fast[k]).collect();
+                    let kf = reduce(&fp, &used, &by_cost(&fc));
+
+                    for q in &parts {
+                        let want = naive
+                            .iter()
+                            .filter(|(p, _)| joins_connected(p, q, s))
+                            .map(|(_, &w)| w)
+                            .fold(Cost::INFINITY, Cost::min);
+                        let got = kf
+                            .iter()
+                            .filter(|&&i| joins_connected(&fp[i], q, s))
+                            .map(|&i| fc[i])
+                            .fold(Cost::INFINITY, Cost::min);
+                        assert_eq!(
+                            want.is_finite(),
+                            got.is_finite(),
+                            "reduced join changed feasibility at s={s}"
+                        );
+                        if want.is_finite() {
+                            assert!(
+                                (want - got).abs() < 1e-9,
+                                "reduced join answered {got} where the naive join answers \
+                                 {want} at s={s} query={:?}",
+                                &q[..s]
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         /// The identity the whole reduction rests on, by brute force over every
@@ -497,6 +927,177 @@ mod rankreduce {
             }
         }
     }
+}
+
+/// What the join actually cost, measured rather than predicted.
+///
+/// The width DP's remaining ceiling is the join, so the first thing to know
+/// about any replacement for it is what the old one was doing: how many classes
+/// it paired, how large those classes were, how many of the pairs it formed
+/// survived, and how much of the wall clock it owned. These counters are
+/// accumulated in locals and flushed once per node, so reading them costs
+/// nothing measurable.
+#[derive(Debug, Default, Clone)]
+pub struct JoinStats {
+    /// Join nodes executed.
+    pub joins: u64,
+    /// `S`-classes paired.
+    pub classes: u64,
+    /// Sum over classes of `|A| * |B|` — the pairs the naive join would form.
+    pub pairs_available: f64,
+    /// Pairs the cost-ordered join actually popped.
+    pub pairs_popped: u64,
+    /// States the join emitted after reduction.
+    pub emitted: u64,
+    /// Classes that stopped early because the cut-space basis filled.
+    pub saturated: u64,
+    /// Widest bag any join ran on.
+    pub max_bag: usize,
+    /// Nanoseconds inside join nodes.
+    pub nanos: u128,
+    /// Non-join nodes executed, and the states they left after reduction.
+    pub unary_nodes: u64,
+    pub unary_states: u64,
+}
+
+thread_local! {
+    static JOIN_STATS: std::cell::RefCell<JoinStats> =
+        std::cell::RefCell::new(JoinStats::default());
+}
+
+/// Read and clear the join counters for this thread.
+pub fn take_join_stats() -> JoinStats {
+    JOIN_STATS.with(|s| std::mem::take(&mut *s.borrow_mut()))
+}
+
+fn record<F: FnOnce(&mut JoinStats)>(f: F) {
+    JOIN_STATS.with(|s| f(&mut s.borrow_mut()));
+}
+
+/// `f64` under its total order, so costs can key a binary heap.
+#[derive(PartialEq, PartialOrd)]
+struct ByCost(Cost);
+impl Eq for ByCost {}
+impl Ord for ByCost {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+/// The rank-reduced join of two tables, computed without forming their product.
+///
+/// # The cost the naive join pays, and why it is avoidable
+///
+/// After the rank-based reduction a class of used-set size `s` holds at most
+/// `2^{s-1}` states, so pairing two of them is `4^{s-1}` and the whole join is
+/// `sum_s C(b,s) 4^{s-1} = 5^b / 4`. But the *result* is then reduced back to at
+/// most `2^{s-1}` states. Almost every pair the naive join forms is discarded a
+/// moment later, and the discarding rule is a matroid greedy: process candidates
+/// in nondecreasing cost, keep the ones independent of what is kept.
+///
+/// A matroid greedy does not need its candidates in advance. It needs them *in
+/// order*, one at a time, and it may stop as soon as the basis is full.
+///
+/// > **Theorem (lazy join).** Let `A` and `B` be tables over `Pi(S)` sorted by
+/// > cost. Enumerate the pairs `(p_i, q_j)` in nondecreasing order of
+/// > `A(p_i) + B(q_j)`, and for each pair whose join partition has not been seen
+/// > before, offer that partition to a cut-space basis at that cost; stop when
+/// > the basis has rank `2^{s-1}` or the pairs run out. The kept set is a
+/// > representative set of `join(A,B)` — that is, it answers every connectivity
+/// > query at exactly the cost `join(A,B)` answers it at.
+///
+/// *Proof.* Write `c(r) = min{A(p)+B(q) : p ⊔ q = r}` for the naive join. Since
+/// the pairs are enumerated in nondecreasing cost, the *first* pair whose join
+/// is `r` has cost exactly `c(r)`; so the sequence of first appearances lists
+/// the partitions of `join(A,B)` in nondecreasing `c`, which is precisely the
+/// input the representation theorem asks for, and the greedy run on it keeps a
+/// set satisfying that theorem's conclusion. Stopping at full rank changes
+/// nothing: every candidate offered afterwards is a linear combination of kept
+/// vectors of no greater cost, which is exactly the case the theorem's proof
+/// already covers. QED
+///
+/// The tie-break among partitions of equal cost may differ from the order a hash
+/// table would have produced. That is immaterial — the theorem's hypothesis is
+/// *nondecreasing* cost, not a particular order — and it is what the
+/// differential test `lazy_join_represents_the_naive_join` checks.
+///
+/// # What this buys
+///
+/// The pop count is bounded by the number of pairs, so nothing is worse than
+/// before; and it is bounded below the moment the basis fills, which is after at
+/// most `2^{s-1}` *successful* offers. On the tables the DP actually produces the
+/// basis fills early, and the measured pop counts are in [`JoinStats`]. This is
+/// not the `2^w poly(w)` join the research programme asks for — see the module
+/// notes for why the min-plus analogue of the Cut&Count linearisation collapses —
+/// but it is exact, it is proved, and it is bounded by the old cost.
+fn join_tables(
+    left: &HashMap<u64, (Cost, Back)>,
+    right: &HashMap<u64, (Cost, Back)>,
+    b: usize,
+) -> HashMap<u64, (Cost, Back)> {
+    use std::collections::BinaryHeap;
+    use std::cmp::Reverse;
+
+    let mut by_class: HashMap<u32, (Vec<(u64, Cost)>, Vec<(u64, Cost)>)> = HashMap::new();
+    for (&code, &(cost, _)) in left {
+        by_class.entry(used_mask(code, b)).or_default().0.push((code, cost));
+    }
+    for (&code, &(cost, _)) in right {
+        by_class.entry(used_mask(code, b)).or_default().1.push((code, cost));
+    }
+
+    let mut out: HashMap<u64, (Cost, Back)> = HashMap::new();
+    let mut st = JoinStats { joins: 1, max_bag: b, ..Default::default() };
+    for (mask, (mut l, mut r)) in by_class {
+        if l.is_empty() || r.is_empty() {
+            continue;
+        }
+        st.classes += 1;
+        st.pairs_available += l.len() as f64 * r.len() as f64;
+        l.sort_by(|a, c| a.1.total_cmp(&c.1));
+        r.sort_by(|a, c| a.1.total_cmp(&c.1));
+        let used: Vec<usize> = (0..b).filter(|&j| mask & (1 << j) != 0).collect();
+        let dl: Vec<[u8; MAX_BAG]> = l.iter().map(|&(c, _)| decode(c, b)).collect();
+        let dr: Vec<[u8; MAX_BAG]> = r.iter().map(|&(c, _)| decode(c, b)).collect();
+
+        let mut basis = rankreduce::Basis::new(used.len());
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut heap: BinaryHeap<Reverse<(ByCost, u32, u32)>> = BinaryHeap::with_capacity(l.len());
+        for i in 0..l.len() {
+            heap.push(Reverse((ByCost(l[i].1 + r[0].1), i as u32, 0)));
+        }
+        while let Some(Reverse((ByCost(cost), i, j))) = heap.pop() {
+            if basis.is_full() {
+                st.saturated += 1;
+                break;
+            }
+            st.pairs_popped += 1;
+            let (li, rj) = (i as usize, j as usize);
+            if rj + 1 < r.len() {
+                heap.push(Reverse((ByCost(l[li].1 + r[rj + 1].1), i, j + 1)));
+            }
+            // Same class, so the used sets agree and the union always exists.
+            let Some(mut d) = union_partitions(&dl[li], &dr[rj], b) else { continue };
+            let code = encode_canonical(&mut d, b);
+            if !seen.insert(code) {
+                continue;
+            }
+            if basis.offer(&d, &used) {
+                out.insert(code, (cost, Back::Join(l[li].0, r[rj].0)));
+            }
+        }
+    }
+    st.emitted = out.len() as u64;
+    record(|g| {
+        g.joins += st.joins;
+        g.classes += st.classes;
+        g.pairs_available += st.pairs_available;
+        g.pairs_popped += st.pairs_popped;
+        g.emitted += st.emitted;
+        g.saturated += st.saturated;
+        g.max_bag = g.max_bag.max(st.max_bag);
+    });
+    out
 }
 
 /// How a state was reached, so the tree can be read back out.
@@ -605,6 +1206,7 @@ pub fn steiner_tree_over_decomposition(
         let bag = &node_bags[i];
         let b = bag.len();
         let mut table: HashMap<u64, (Cost, Back)> = HashMap::new();
+        let mut already_reduced = false;
         match nodes[i].clone() {
             Nice::Leaf => {
                 table.insert(0, (0.0, Back::Leaf));
@@ -667,30 +1269,16 @@ pub fn steiner_tree_over_decomposition(
                 }
             }
             Nice::Join { left, right } => {
-                // Group the right table by which vertices it uses, so only
-                // states with a matching `S` are paired.
-                let mut by_used: HashMap<u32, Vec<(u64, Cost)>> = HashMap::new();
-                for (&code, &(cost, _)) in &tables[right] {
-                    by_used.entry(used_mask(code, b)).or_default().push((code, cost));
-                }
-                for (&lc, &(lcost, _)) in &tables[left] {
-                    let Some(bucket) = by_used.get(&used_mask(lc, b)) else { continue };
-                    let dl = decode(lc, b);
-                    let pl = blocks(&dl, b);
-                    let size = (0..b).filter(|&j| dl[j] != OUT).count();
-                    for &(rc, rcost) in bucket {
-                        let dr = decode(rc, b);
-                        let pr = blocks(&dr, b);
-                        let Some(mut d) = union_partitions(&dl, &dr, b) else { continue };
-                        let pj = blocks(&d, b);
-                        // Acyclicity, exactly as derived in the module comment.
-                        if pl + pr != size + pj {
-                            continue;
-                        }
-                        let code = encode_canonical(&mut d, b);
-                        relax(&mut table, code, lcost + rcost, Back::Join(lc, rc));
-                    }
-                }
+                // The join is where the DP's remaining cost lives, so it is the
+                // one node type that reduces as it generates rather than
+                // afterwards. Unconditional in the acyclicity sense: the union
+                // of the two sides is an edge set, not necessarily a forest, and
+                // Lemma 2 says that is the right semantics.
+                let t0 = std::time::Instant::now();
+                table = join_tables(&tables[left], &tables[right], b);
+                let ns = t0.elapsed().as_nanos();
+                record(|g| g.nanos += ns);
+                already_reduced = true;
             }
         }
         if table.is_empty() {
@@ -699,8 +1287,19 @@ pub fn steiner_tree_over_decomposition(
         // Rank-based reduction, applied per `S`-class: within a class the
         // partitions are comparable and the theorem in `rankreduce` says a
         // spanning subset of their cut vectors preserves the least completion
-        // cost for every way the rest of the tree might close.
-        let table = reduce_table(table, b);
+        // cost for every way the rest of the tree might close. The join has
+        // already done this inline.
+        let table = if already_reduced {
+            table
+        } else {
+            let t = reduce_table(table, b);
+            let states = t.len() as u64;
+            record(|g| {
+                g.unary_nodes += 1;
+                g.unary_states += states;
+            });
+            t
+        };
         live_states += table.len();
         if live_states > state_cap {
             return None;
@@ -756,7 +1355,43 @@ pub fn steiner_tree_over_decomposition(
             _ => return None,
         }
     }
-    Some((cost, used))
+    // The edge set is connected and spans every terminal, but it may carry
+    // zero-cost cycles now that the join no longer rejects them. Take a
+    // spanning tree; the module comment proves every edge this drops has cost
+    // zero, and the assertion below is that proof made executable.
+    let tree = spanning_tree(graph, &used);
+    let dropped: Cost = used.iter().map(|&e| graph.edges[e as usize].cost).sum::<Cost>()
+        - tree.iter().map(|&e| graph.edges[e as usize].cost).sum::<Cost>();
+    debug_assert!(dropped < 1e-9, "spanning tree discarded {dropped} of cost");
+    Some((cost - dropped, tree))
+}
+
+/// A spanning forest of `used`, by union-find over the endpoints.
+fn spanning_tree(graph: &UndirectedGraph, used: &[EdgeId]) -> Vec<EdgeId> {
+    let mut uf: HashMap<NodeId, NodeId> = HashMap::new();
+    fn find(uf: &mut HashMap<NodeId, NodeId>, x: NodeId) -> NodeId {
+        let mut r = x;
+        while let Some(&p) = uf.get(&r) {
+            if p == r {
+                break;
+            }
+            r = p;
+        }
+        uf.insert(x, r);
+        r
+    }
+    let mut out = Vec::with_capacity(used.len());
+    for &id in used {
+        let e = &graph.edges[id as usize];
+        uf.entry(e.src).or_insert(e.src);
+        uf.entry(e.dst).or_insert(e.dst);
+        let (a, c) = (find(&mut uf, e.src), find(&mut uf, e.dst));
+        if a != c {
+            uf.insert(a, c);
+            out.push(id);
+        }
+    }
+    out
 }
 
 /// Nice-ify: expand each decomposition node into introduce/forget chains, join
@@ -978,18 +1613,6 @@ fn used_mask(code: u64, b: usize) -> u32 {
     m
 }
 
-/// Number of blocks in a decoded signature.
-#[inline]
-fn blocks(d: &[u8; MAX_BAG], b: usize) -> usize {
-    let mut seen = 0u16;
-    for j in 0..b {
-        if d[j] != OUT {
-            seen |= 1 << d[j];
-        }
-    }
-    seen.count_ones() as usize
-}
-
 /// The join of two partitions of the same set, by union-find over bag positions.
 /// `None` when the two disagree on which positions are used.
 fn union_partitions(l: &[u8; MAX_BAG], r: &[u8; MAX_BAG], b: usize) -> Option<[u8; MAX_BAG]> {
@@ -1123,6 +1746,158 @@ mod tests {
         }
     }
 
+    /// Every partition of the positions in `mask`, as canonical signatures.
+    fn partitions_of(mask: u32, b: usize) -> Vec<u64> {
+        let used: Vec<usize> = (0..b).filter(|&j| mask & (1 << j) != 0).collect();
+        let mut out = Vec::new();
+        fn grow(k: usize, next: u8, cur: &mut Vec<u8>, used: &[usize], b: usize, out: &mut Vec<u64>) {
+            if k == used.len() {
+                let mut d = [OUT; MAX_BAG];
+                for (i, &p) in used.iter().enumerate() {
+                    d[p] = cur[i];
+                }
+                out.push(encode_canonical(&mut d, b));
+                return;
+            }
+            for v in 0..=next {
+                cur.push(v);
+                grow(k + 1, next.max(v + 1), cur, used, b, out);
+                cur.pop();
+            }
+        }
+        grow(0, 0, &mut Vec::new(), &used, b, &mut out);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Whether two signatures over the same used set join to one block.
+    fn connects(a: u64, c: u64, b: usize) -> bool {
+        let (da, dc) = (decode(a, b), decode(c, b));
+        let Some(mut u) = union_partitions(&da, &dc, b) else { return false };
+        let code = encode_canonical(&mut u, b);
+        let d = decode(code, b);
+        (0..b).filter(|&j| d[j] != OUT).all(|j| d[j] == 0)
+            && (0..b).any(|j| d[j] != OUT)
+    }
+
+    /// The lazy cost-ordered join answers every connectivity query at exactly
+    /// the cost the full pairwise join answers it at, on random tables over
+    /// random used-set classes.
+    ///
+    /// This is the theorem on [`join_tables`] checked against the algorithm it
+    /// replaces, at the level of the tables the DP actually manipulates rather
+    /// than at the level of abstract partitions. It also checks the two
+    /// invariants that make the replacement safe to dispatch on: the lazy join
+    /// never pops more pairs than the naive join would form, and it never emits
+    /// more states than the cut-space dimension allows.
+    #[test]
+    fn lazy_join_represents_the_naive_join() {
+        let mut s = 0x_ABBA_1234_5678_9ABCu64;
+        let mut rng = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for b in 2..=5usize {
+            for _ in 0..300 {
+                // Two random tables. Costs are small integers so that ties are
+                // frequent, which is where the two orders can disagree.
+                let mut build = || {
+                    let mut t: HashMap<u64, (Cost, Back)> = HashMap::new();
+                    let draws = 1 + rng() % 24;
+                    for _ in 0..draws {
+                        let mask = (rng() as u32) & ((1u32 << b) - 1);
+                        let all = partitions_of(mask, b);
+                        let code = all[(rng() as usize) % all.len()];
+                        let cost = (rng() % 12) as Cost;
+                        relax(&mut t, code, cost, Back::Leaf);
+                    }
+                    t
+                };
+                let l = build();
+                let r = build();
+                if l.is_empty() || r.is_empty() {
+                    continue;
+                }
+
+                // The naive join: every same-class pair.
+                let mut naive: HashMap<u64, Cost> = HashMap::new();
+                for (&lc, &(lw, _)) in &l {
+                    for (&rc, &(rw, _)) in &r {
+                        if used_mask(lc, b) != used_mask(rc, b) {
+                            continue;
+                        }
+                        let (dl, dr) = (decode(lc, b), decode(rc, b));
+                        let Some(mut d) = union_partitions(&dl, &dr, b) else { continue };
+                        let code = encode_canonical(&mut d, b);
+                        let e = naive.entry(code).or_insert(Cost::INFINITY);
+                        if lw + rw < *e {
+                            *e = lw + rw;
+                        }
+                    }
+                }
+
+                let before = take_join_stats();
+                drop(before);
+                let fast = join_tables(&l, &r, b);
+                let stats = take_join_stats();
+                assert!(
+                    stats.pairs_popped as f64 <= stats.pairs_available,
+                    "popped {} of {} available pairs",
+                    stats.pairs_popped,
+                    stats.pairs_available
+                );
+
+                // Every state the lazy join emits is one the naive join has, at
+                // the same cost: it is a subset, not an approximation.
+                for (&code, &(cost, _)) in &fast {
+                    let want = naive.get(&code).copied().unwrap_or(Cost::INFINITY);
+                    assert!(
+                        (cost - want).abs() < 1e-9,
+                        "lazy join priced {code:x} at {cost}, naive join at {want}"
+                    );
+                }
+
+                // And it answers every connectivity query identically.
+                let masks: std::collections::HashSet<u32> =
+                    naive.keys().map(|&c| used_mask(c, b)).collect();
+                for mask in masks {
+                    let used_count = (mask.count_ones()) as usize;
+                    assert!(
+                        fast.keys().filter(|&&c| used_mask(c, b) == mask).count()
+                            <= if used_count <= 1 { 1 } else { 1 << (used_count - 1) },
+                        "class of {used_count} elements kept more than its cut-space dimension"
+                    );
+                    for q in partitions_of(mask, b) {
+                        let want = naive
+                            .iter()
+                            .filter(|&(&c, _)| used_mask(c, b) == mask && connects(c, q, b))
+                            .map(|(_, &w)| w)
+                            .fold(Cost::INFINITY, Cost::min);
+                        let got = fast
+                            .iter()
+                            .filter(|&(&c, _)| used_mask(c, b) == mask && connects(c, q, b))
+                            .map(|(_, &(w, _))| w)
+                            .fold(Cost::INFINITY, Cost::min);
+                        assert_eq!(
+                            want.is_finite(),
+                            got.is_finite(),
+                            "lazy join changed feasibility at b={b} mask={mask:b}"
+                        );
+                        if want.is_finite() {
+                            assert!(
+                                (want - got).abs() < 1e-9,
+                                "lazy join answered {got} where the naive join answers {want}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn matches_dreyfus_wagner_on_small_graphs() {
         // Exhaustive-in-spirit enumeration: every graph the generator can make
@@ -1165,6 +1940,70 @@ mod tests {
                 assert!(
                     (cost - dw.optimal_cost).abs() < 1e-6,
                     "DP {cost} vs Dreyfus-Wagner {} on n={n} edges={edges:?}",
+                    dw.optimal_cost
+                );
+                check_tree(&g, &terminals, cost, &used);
+                ran += 1;
+            }
+        }
+        assert!(ran > 500, "only {ran} cases ran");
+    }
+
+    /// Unit costs, so every tie the reduction can face actually happens.
+    ///
+    /// The rank-based reduction breaks ties by whatever order equal costs come
+    /// out in, and a partition discarded on a tie is exactly the situation the
+    /// forest-versus-connectivity witness describes. Weighted random graphs
+    /// almost never produce those ties; a graph whose edges all cost one
+    /// produces almost nothing else. This test failed on the acyclicity-filtered
+    /// join that this module used to run — that is what established the bug was
+    /// reachable and not only a statement about partitions.
+    #[test]
+    fn matches_dreyfus_wagner_with_heavy_ties() {
+        let mut s = 0x7EED_0F00_D1CE_2468u64;
+        let mut rng = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let mut ran = 0;
+        for n in 6..=12u32 {
+            for _ in 0..120 {
+                let mut edges = Vec::new();
+                let mut perm: Vec<u32> = (1..=n).collect();
+                for i in (1..perm.len()).rev() {
+                    perm.swap(i, (rng() % (i as u64 + 1)) as usize);
+                }
+                for w in perm.windows(2) {
+                    edges.push((w[0], w[1], 1.0));
+                }
+                // Dense enough that bags carry three or more exposed vertices,
+                // which is the smallest ground set on which the discrete
+                // partition is cut-space dependent.
+                for u in 1..=n {
+                    for v in u + 1..=n {
+                        if rng() % 100 < 30 {
+                            edges.push((u, v, 1.0));
+                        }
+                    }
+                }
+                let k = 3 + (rng() % 4) as u32;
+                let mut terminals: Vec<u32> = Vec::new();
+                while (terminals.len() as u32) < k.min(n) {
+                    let t = 1 + (rng() % n as u64) as u32;
+                    if !terminals.contains(&t) {
+                        terminals.push(t);
+                    }
+                }
+                terminals.sort();
+                let g = make(n, &edges, &terminals);
+                let Some(dw) = dreyfus_wagner(&g, &terminals) else { continue };
+                let Some((cost, used)) = solve(&g, &terminals) else { continue };
+                assert!(
+                    (cost - dw.optimal_cost).abs() < 1e-6,
+                    "DP {cost} vs Dreyfus-Wagner {} on n={n} terminals={terminals:?} \
+                     edges={edges:?}",
                     dw.optimal_cost
                 );
                 check_tree(&g, &terminals, cost, &used);

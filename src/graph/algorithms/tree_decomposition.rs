@@ -175,34 +175,124 @@ impl TreeDecomposition {
 }
 
 /// Which greedy the elimination ordering follows.
+///
+/// Every one of these produces a valid decomposition — the validity theorem at
+/// the top of this module is stated for an *arbitrary* elimination ordering —
+/// so the portfolio can be extended freely and the only thing at stake is the
+/// width and the work it implies. Each is a lexicographic pair; see [`score`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ordering {
     /// Eliminate a vertex of least current degree. Cheap, and optimal on trees
     /// and series-parallel graphs.
     MinDegree,
     /// Eliminate a vertex whose neighbourhood needs the fewest fill edges to
-    /// become a clique. Slower per step and usually narrower.
+    /// become a clique, degree breaking ties. Slower per step and usually
+    /// narrower.
     MinFill,
+    /// Least degree, with fill breaking ties. Follows min-degree's shape but
+    /// prefers, among equally cheap eliminations, the one that adds least to the
+    /// graph — so it does not pay min-fill's price and still avoids min-degree's
+    /// worst arbitrary choices.
+    MinDegreeFill,
+    /// `fill * (degree + 1) + degree`, as a single number.
+    ///
+    /// This is not min-fill and is not a lexicographic order: because the
+    /// multiplier is the degree of the vertex being scored, a vertex needing one
+    /// fill edge at degree two outranks a vertex needing none at degree one
+    /// hundred. It was in this module under the name min-fill, which is the bug
+    /// this enum's split repairs — but it is kept, correctly named, because on
+    /// some graphs it is measurably the *better* heuristic: penalising fill in
+    /// proportion to degree is a real bias towards eliminating low-degree
+    /// vertices early, and the portfolio picks whichever wins on the instance.
+    FillWeighted,
 }
 
-/// Build a tree decomposition, taking the narrower of the two heuristics.
+/// The whole portfolio, cheapest heuristic first.
+pub const ORDERINGS: [Ordering; 4] =
+    [Ordering::MinDegree, Ordering::MinDegreeFill, Ordering::MinFill, Ordering::FillWeighted];
+
+/// Build a tree decomposition, taking the one the dynamic programme will find
+/// cheapest.
 ///
 /// `max_width` aborts an ordering as soon as a bag would exceed it; a caller
 /// that only wants to know whether the DP is affordable does not need the exact
-/// width of a decomposition it will refuse. `None` means both orderings hit the
+/// width of a decomposition it will refuse. `None` means every ordering hit the
 /// cap or the graph was empty.
+///
+/// # Why not simply the narrowest
+///
+/// The width is a summary; what the DP pays is
+/// [`crate::graph::algorithms::steiner_td::work_estimate`], which counts states
+/// and join pairs over *every* bag. Two decompositions of the same graph can
+/// have the same width and differ by a large factor in that sum — one may reach
+/// its width in a single bag and be narrow everywhere else, the other may sit at
+/// the maximum throughout — and the second can even be the narrower of the two
+/// while being the dearer to run. So the portfolio scores each candidate by the
+/// work it implies and keeps the minimum, with the width as the tie-break.
+///
+/// This is a decision made from quantities computed on the graph in hand. It
+/// does not consult, and cannot consult, where the graph came from.
+///
+/// # Stopping early, with a proof
+///
+/// Lemma A below says `tw(G) >= delta(G)`, the minimum degree. If a candidate's
+/// width already equals `delta(G)` it is a *minimum-width* decomposition and no
+/// further ordering can be narrower, so the portfolio stops. That is an exact
+/// optimality test, not a budget.
+///
+/// The stronger [`treewidth_lower_bound`] — the same lemma over a contraction
+/// sequence — would fire more often, and was measured here and removed: it is
+/// `O(n^2)` with the adjacency sets this module keeps, it cost 0.2 to 0.4
+/// seconds per call on the reduced PACE Track 2 graphs, and the solver calls
+/// this once per pass. A certified stop that costs more than the search it saves
+/// is not a saving. `delta(G)` is one pass over the degrees.
 pub fn decompose(
     graph: &UndirectedGraph,
     max_width: usize,
     deadline: Option<Instant>,
 ) -> Option<TreeDecomposition> {
-    let mut best: Option<TreeDecomposition> = None;
-    for order in [Ordering::MinDegree, Ordering::MinFill] {
-        let cap = best.as_ref().map_or(max_width, |b| b.width.min(max_width));
-        if let Some(td) = decompose_with(graph, order, cap, deadline) {
-            if best.as_ref().map_or(true, |b| td.width < b.width) {
-                best = Some(td);
+    decompose_portfolio(graph, max_width, deadline, &ORDERINGS).map(|(td, _)| td)
+}
+
+/// [`decompose`] over a chosen subset of the portfolio, also returning the work
+/// the winner implies.
+pub fn decompose_portfolio(
+    graph: &UndirectedGraph,
+    max_width: usize,
+    deadline: Option<Instant>,
+    orderings: &[Ordering],
+) -> Option<(TreeDecomposition, f64)> {
+    use crate::graph::algorithms::steiner_td::work_estimate;
+
+    let mut best: Option<(TreeDecomposition, f64)> = None;
+    // Computed once and only when a candidate exists: on a graph too wide for
+    // any ordering the first refusal is microseconds and this is never reached.
+    let mut certified_min: Option<usize> = None;
+    for (k, &order) in orderings.iter().enumerate() {
+        let last = k + 1 == orderings.len();
+        // Capping at the incumbent width would forbid a wider decomposition that
+        // is nonetheless cheaper. The cap is the caller's alone.
+        let Some(td) = decompose_with(graph, order, max_width, deadline) else {
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
             }
+            continue;
+        };
+        // One vertex per bag is spent on the root terminal the DP pins there,
+        // and the DP's cost is what is being compared, so the estimate is taken
+        // in the DP's own units.
+        let work = work_estimate(&td, graph.edges.len(), 1);
+        let width = td.width;
+        if best.as_ref().is_none_or(|(b, w)| work < *w || (work == *w && width < b.width)) {
+            best = Some((td, work));
+        }
+        if last {
+            break;
+        }
+        let lb = *certified_min.get_or_insert_with(|| min_degree_bound(graph));
+        if best.as_ref().is_some_and(|(b, _)| b.width <= lb) {
+            // Minimum width, certified. Nothing narrower exists to look for.
+            break;
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
             break;
@@ -233,7 +323,7 @@ pub fn decompose_with(
     // always holds an entry carrying each alive vertex's current score; a
     // popped entry whose score is stale-low is recomputed and re-pushed, which
     // makes the pop sequence exactly the greedy one.
-    let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::with_capacity(n);
+    let mut heap: BinaryHeap<Reverse<((u64, u64), u32)>> = BinaryHeap::with_capacity(n);
     for v in 0..n {
         heap.push(Reverse((score(&adj, v as u32, order), v as u32)));
     }
@@ -287,7 +377,7 @@ pub fn decompose_with(
         // from every common neighbour's count. Re-pushing that ring is what
         // keeps the greedy exact.
         let mut touched: HashSet<u32> = nbrs.iter().copied().collect();
-        if order == Ordering::MinFill {
+        if order != Ordering::MinDegree {
             for &x in &nbrs {
                 for &y in &adj[x as usize] {
                     touched.insert(y);
@@ -343,6 +433,18 @@ pub fn decompose_with(
         index_to_node,
         node_to_index,
     })
+}
+
+/// The cheapest certified lower bound on treewidth: the minimum degree, over
+/// the graph's non-isolated part.
+///
+/// Lemma A below proves `tw(G) >= delta(G)`. Isolated vertices are their own
+/// components and say nothing about the width of the rest, so they are skipped
+/// rather than pinning the minimum at zero — the decomposition of a disconnected
+/// graph is a forest whose width is the maximum over components.
+pub fn min_degree_bound(graph: &UndirectedGraph) -> usize {
+    let (_, _, adj) = dense_adjacency(graph);
+    adj.iter().map(|a| a.len()).filter(|&d| d > 0).min().unwrap_or(0)
 }
 
 /// A certified *lower* bound on the treewidth of `graph`.
@@ -452,25 +554,37 @@ pub fn treewidth_lower_bound(graph: &UndirectedGraph) -> usize {
 }
 
 /// Greedy score of a vertex under one heuristic; lower is eliminated sooner.
-fn score(adj: &[HashSet<u32>], v: u32, order: Ordering) -> u64 {
+///
+/// The score is a *pair* compared lexicographically, not a single number. That
+/// is not a presentational detail. This function used to return
+/// `missing * (degree + 1) + degree` for min-fill, whose multiplier depends on
+/// the vertex being scored, so it is not the lexicographic order it was
+/// documented as: a vertex with one missing pair and degree two scores `5`,
+/// while a vertex needing *no* fill at all but of degree one hundred scores
+/// `100`, and the greedy eliminates the wrong one. Min-fill is
+/// `(fill, degree)`; min-degree is `(degree, 0)`.
+fn score(adj: &[HashSet<u32>], v: u32, order: Ordering) -> (u64, u64) {
     let d = adj[v as usize].len() as u64;
-    match order {
-        Ordering::MinDegree => d,
-        Ordering::MinFill => {
-            let nbrs: Vec<u32> = adj[v as usize].iter().copied().collect();
-            let mut missing = 0u64;
-            for (a, &x) in nbrs.iter().enumerate() {
-                for &y in &nbrs[a + 1..] {
-                    if !adj[x as usize].contains(&y) {
-                        missing += 1;
-                    }
-                }
+    if order == Ordering::MinDegree {
+        return (d, 0);
+    }
+    let nbrs: Vec<u32> = adj[v as usize].iter().copied().collect();
+    let mut missing = 0u64;
+    for (a, &x) in nbrs.iter().enumerate() {
+        for &y in &nbrs[a + 1..] {
+            if !adj[x as usize].contains(&y) {
+                missing += 1;
             }
-            // Degree breaks ties, so min-fill degenerates to min-degree on a
-            // graph whose neighbourhoods are already cliques rather than
-            // picking arbitrarily among them.
-            missing * (d + 1) + d
         }
+    }
+    match order {
+        Ordering::MinDegree => unreachable!(),
+        // Degree breaks ties, so min-fill degenerates to min-degree on a graph
+        // whose neighbourhoods are already cliques rather than picking
+        // arbitrarily among them.
+        Ordering::MinFill => (missing, d),
+        Ordering::MinDegreeFill => (d, missing),
+        Ordering::FillWeighted => (missing * (d + 1) + d, 0),
     }
 }
 

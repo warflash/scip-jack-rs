@@ -75,6 +75,7 @@ impl BenchResult {
         let method = match self.result.method {
             SolveMethod::DreyfusWagner => "DW",
             SolveMethod::AscendAndPrune => "AP",
+            SolveMethod::TreeDecomposition => "TD",
             SolveMethod::BranchAndCut => "BC",
         };
         eprintln!(

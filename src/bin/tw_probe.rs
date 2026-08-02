@@ -52,22 +52,28 @@ fn main() {
     let t = Instant::now();
     let lb = scip_jack::graph::algorithms::tree_decomposition::treewidth_lower_bound(&ru);
     row.push_str(&format!(",{lb},{:.2}", t.elapsed().as_secs_f64()));
-    for order in [Ordering::MinDegree, Ordering::MinFill] {
+    // The whole width/work Pareto frontier, not only the narrowest point.
+    for order in scip_jack::graph::algorithms::tree_decomposition::ORDERINGS {
         let t = Instant::now();
         let deadline = Some(Instant::now() + Duration::from_secs_f64(budget));
         match decompose_with(&ru, order, max_width, deadline) {
             Some(td) => {
                 assert!(td.verify(&ru), "decomposition failed its own axioms");
-                row.push_str(&format!(",{},{:.2}", td.width, t.elapsed().as_secs_f64()));
+                let w = scip_jack::graph::algorithms::steiner_td::work_estimate(
+                    &td,
+                    ru.edges.len(),
+                    1,
+                );
+                row.push_str(&format!(",{},{:.1e},{:.2}", td.width, w, t.elapsed().as_secs_f64()));
             }
-            None => row.push_str(&format!(",>{max_width},{:.2}", t.elapsed().as_secs_f64())),
+            None => row.push_str(&format!(",>{max_width},,{:.2}", t.elapsed().as_secs_f64())),
         }
     }
-    // And what the exact width-parameterised DP costs on it, which is the
-    // question the width was measured to answer.
+    // And what the exact width-parameterised DP costs on the one the portfolio
+    // picks, which is the question the widths were measured to answer.
     let t = Instant::now();
-    let td = decompose_with(&ru, Ordering::MinFill, max_width, None)
-        .or_else(|| decompose_with(&ru, Ordering::MinDegree, max_width, None));
+    let td = scip_jack::graph::algorithms::tree_decomposition::decompose(&ru, max_width, None);
+    let _ = Ordering::MinFill;
     match td {
         Some(td) => {
             let work = scip_jack::graph::algorithms::steiner_td::work_estimate(&td, ru.edges.len(), 1);
@@ -85,5 +91,20 @@ fn main() {
         None => row.push_str(",toowide,,,"),
     }
     let _ = t;
+    // What the join actually did, which is the quantity any replacement for it
+    // has to be judged against.
+    let js = scip_jack::graph::algorithms::steiner_td::take_join_stats();
+    row.push_str(&format!(
+        ",{},{},{:.0},{},{},{},{:.2},{},{}",
+        js.joins,
+        js.classes,
+        js.pairs_available,
+        js.pairs_popped,
+        js.emitted,
+        js.saturated,
+        js.nanos as f64 / 1e9,
+        js.unary_nodes,
+        js.unary_states,
+    ));
     println!("{row}");
 }
