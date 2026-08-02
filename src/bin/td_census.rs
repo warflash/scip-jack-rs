@@ -92,11 +92,32 @@ fn main() {
         terminals.len(),
     );
 
+    // The decomposition gets its own budget, separate from the DP's.
+    //
+    // The first version of this probe handed `decompose_portfolio` the overall
+    // deadline, which by then the reduction had usually consumed — so an
+    // ordering that never ran was recorded as "the graph is too wide". On PACE
+    // Track 2's instance052 that mislabelled a graph of width **8** as refused
+    // at a cap of 13, and instance089 (width 10) with it. Refusal has to mean
+    // refusal.
     let cap = MAX_BAG - 2;
-    let td = decompose_portfolio(&g, cap, Some(deadline), &ORDERINGS).map(|(t, _)| t);
+    let order_deadline = Instant::now() + Duration::from_secs_f64(30.0);
+    let td = decompose_portfolio(&g, cap, Some(order_deadline), &ORDERINGS).map(|(t, _)| t);
     match td {
         None => {
-            println!("{row},>{cap},,,refused");
+            // What the width actually is, so "refused" can be read as a number
+            // rather than as an inequality.
+            let wide = decompose_portfolio(
+                &g,
+                64,
+                Some(Instant::now() + Duration::from_secs_f64(30.0)),
+                &ORDERINGS,
+            )
+            .map(|(t, _)| t.width);
+            match wide {
+                Some(w) => println!("{row},{w},,,refused"),
+                None => println!("{row},>64,,,refused"),
+            }
         }
         Some(td) => {
             let work = work_estimate(&td, g.edges.len(), 1);
