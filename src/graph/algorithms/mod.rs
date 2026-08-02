@@ -7,7 +7,8 @@ pub mod tree_decomposition;
 pub mod steiner_td;
 
 pub use dijkstra_steiner::{
-    dijkstra_steiner, dijkstra_steiner_guided, DijkstraSteinerResult, SteinerSearch,
+    dijkstra_steiner, dijkstra_steiner_guided, DijkstraSteinerResult, PackingAdmission,
+    SteinerSearch, MAX_PACKING_LAYERS,
 };
 pub use dijkstra::{shortest_path, shortest_paths_from, ShortestPathResult};
 pub use max_flow::{max_flow_min_cut, MaxFlowResult, MaxFlowWorkspace};

@@ -21,12 +21,13 @@ use std::time::Instant;
 
 use crate::branch_and_bound::{BranchAndCutSolver, SolveStatus, SolverConfig};
 use crate::graph::algorithms::{
-    dreyfus_wagner, dual_ascent_packing, ArcIndex, SteinerSearch,
+    dreyfus_wagner, dual_ascent_packing, ArcIndex, PackingAdmission, SteinerSearch,
+    MAX_PACKING_LAYERS,
 };
 use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, SteinerInstance, UndirectedGraph};
 use crate::io;
 use crate::model::{
-    hyp_certificate, hyp_work, root_certificate, verify_solution, HYP_UNITS_PER_SECOND,
+    hyp_certificate, hyp_work, verify_solution, RootSeparation, HYP_UNITS_PER_SECOND,
     HYP_WORK_CEILING,
 };
 use crate::preprocessing::preprocess_until;
@@ -189,12 +190,21 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     // once the first pass has already run the reductions to a fixpoint — the
     // search continues instead of starting over. See [`SteinerSearch`].
     let mut search_cache: Option<SteinerSearch> = None;
+    // The root separation loop, carried the same way and for the same reason.
+    // Unlike the tightening fixpoint this is not redundant work — the loop is
+    // deadline-truncated, so a second run with more clock genuinely separates
+    // more — which is why the repair is resumption rather than memoisation. See
+    // [`RootSeparation`].
+    let mut sep_cache: Option<RootSeparation> = None;
     // Root bounds an earlier pass proved, restated for the current pass's graph
     // exactly as `incoming_ub` is, and a note on whether the branch-and-cut has
     // been observed to do anything on this instance. The first pass assumes it
     // does; only a pass that watched it solve nothing says otherwise.
     let mut carried_lower_bound: Cost = 0.0;
     let mut branch_and_cut_works = true;
+    // Dual bound per second, as the goal-directed search itself was observed to
+    // produce it. See `finish` for what it is compared against.
+    let mut search_rate: Cost = 0.0;
 
     // A converged tightening carried into the next pass; see below.
     let mut reuse: Option<crate::root_reduce::Reduced> = None;
@@ -260,8 +270,10 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             start,
             pass_deadline,
             &mut search_cache,
+            &mut sep_cache,
             &mut carried_lower_bound,
             &mut branch_and_cut_works,
+            &mut search_rate,
         );
         outcome.primal_bound += carried_offset;
         outcome.dual_bound += carried_offset;
@@ -357,8 +369,10 @@ fn finish(
     start: Instant,
     deadline: Instant,
     search_cache: &mut Option<SteinerSearch>,
+    sep_cache: &mut Option<RootSeparation>,
     carried_lower_bound: &mut Cost,
     branch_and_cut_works: &mut bool,
+    search_rate: &mut Cost,
 ) -> SolveResult {
 
     if config.verbose {
@@ -426,7 +440,9 @@ fn finish(
             deadline,
             *branch_and_cut_works,
             search_cache,
+            sep_cache,
             &mut search_lower_bound,
+            search_rate,
         );
         if let Some(value) = search_cache.as_ref().and_then(|s| s.optimum()) {
             // The search runs on a graph that keeps only trees at or below the
@@ -577,9 +593,9 @@ fn finish(
         solver.seed_incumbent(arcs);
     }
 
+    let bnc_started = Instant::now();
     let (solution, stats) = solver.solve();
-    // Whether it did anything at all, for the next pass to act on.
-    *branch_and_cut_works = stats.lp_solves > 0 || stats.nodes_processed > 0;
+    let bnc_secs = bnc_started.elapsed().as_secs_f64();
 
     let mut verified = false;
     let mut primal = root_upper_bound;
@@ -617,6 +633,44 @@ fn finish(
         100.0
     };
 
+    // Whether the branch-and-cut earns its half of the next window, for the next
+    // pass to act on.
+    //
+    // This used to read `lp_solves > 0 || nodes_processed > 0`, which measures
+    // *activity* and not progress, and the difference is half the budget on the
+    // instances where it matters. On PACE instance167 the branch-and-cut solves
+    // twelve LPs, opens one node, and moves the dual bound by a single unit in
+    // 1.06 s, while the goal-directed search it took the second off was moving
+    // it by about six units a second — and on the strength of "it did something"
+    // it keeps taking half of every subsequent search window.
+    //
+    // The comparison that means something is between the two stages' *observed
+    // rates of dual improvement*, both measured on this instance, in this pass,
+    // in the same units of bound per second. Neither is estimated and neither is
+    // a clock fraction: each stage is timed doing the thing it is being asked to
+    // keep doing.
+    //
+    // The measurement is one-directional and self-correcting: it is taken after
+    // the run, so the branch-and-cut always gets its share until it has been
+    // seen to lose the comparison. SteinLib c18, where it closes the instance in
+    // 0.38 s after the search fails, keeps its share because a completed proof
+    // wins the comparison outright.
+    let bnc_rate = if bnc_secs > 1e-9 { (dual - root_lower_bound).max(0.0) / bnc_secs } else { 0.0 };
+    *branch_and_cut_works = matches!(stats.status, SolveStatus::Optimal | SolveStatus::Infeasible)
+        || primal < root_upper_bound - 1e-6
+        || bnc_rate >= *search_rate;
+    if config.verbose {
+        eprintln!(
+            "[B&C] dual {:.1} -> {:.1} in {:.2}s = {:.2}/s against the search's {:.2}/s:              {} its share of the next window",
+            root_lower_bound,
+            dual,
+            bnc_secs,
+            bnc_rate,
+            search_rate,
+            if *branch_and_cut_works { "keeps" } else { "loses" },
+        );
+    }
+
     // `Optimal` is reported if and only if the bounds being reported prove it.
     //
     // The status must not be an independent flag that can drift away from the
@@ -648,6 +702,122 @@ fn finish(
     }
 }
 
+/// Labels in the first slice of the search's own doubling schedule.
+///
+/// This is a *granularity*, not a tuning dial, and the distinction is what keeps
+/// [`potential_will_not_close`] honest. The schedule doubles, so whatever the
+/// right moment to re-decide is, a doubling schedule reaches a slice boundary
+/// within a factor of two of it and has spent at most twice the labels getting
+/// there. Any starting value has that property; this one is the search's own
+/// deadline-polling granularity, so a slice is never shorter than the interval
+/// at which the search already checks its clock.
+const SEARCH_SLICE_LABELS: u64 = 4096;
+
+/// Whether the potential the search is running under will fail to close the
+/// instance inside the budget it has left.
+///
+/// # The measurement
+///
+/// A* under a valid potential `h` settles labels in nondecreasing `g + h`, and
+/// it terminates when it pops the goal state, whose key is the optimum. So the
+/// whole run is a march of the frontier key from zero to `OPT <= UB`, and the
+/// only question is how many labels sit in the interval that is left.
+///
+/// Two quantities are read off the search's own trace over the slice just run:
+///
+/// ```text
+/// rate  = (frontier_after - frontier_before) / labels_in_slice     [bound/label]
+/// speed = labels_in_slice / seconds_in_slice                       [label/second]
+/// ```
+///
+/// and two are known: the remaining gap `UB - frontier_after` and the remaining
+/// seconds. The projection is
+///
+/// ```text
+/// labels_needed    = (UB - frontier) / rate
+/// labels_available = speed * seconds_left
+/// ```
+///
+/// and the predicate is `labels_needed > labels_available`.
+///
+/// # What it does and does not claim
+///
+/// It is an *estimate of the schedule*, and it is stated as one. Label density
+/// per unit of key is not constant — it generally rises, because the number of
+/// states within reach grows with the key — so `labels_needed` is optimistic and
+/// the predicate fires later than a perfect oracle would. In the other direction
+/// it targets `UB` rather than `OPT`, which is pessimistic. Neither error is
+/// bounded and neither needs to be, because of what the predicate is allowed to
+/// do:
+///
+/// > **Proposition (scheduling cannot change an answer).** Whatever this returns,
+/// > the search's completed answer is unchanged.
+/// >
+/// > *Proof.* Its only effect is whether a further packing is built and offered
+/// > to the search. A packing is offered through
+/// > [`SteinerSearch::add_packing`], which is sound for *any* valid packing by
+/// > the resumption theorem on [`SteinerSearch`], and every packing this solver
+/// > can produce is verified against (PACK) before it is offered. The set of
+/// > labels the search must settle to reach the goal state is determined by the
+/// > graph and the cutoff, not by the potential; the potential determines only
+/// > the order. So a search that reaches the goal state reaches it with the same
+/// > `g`, and a search that does not reports a frontier maximum, which is a valid
+/// > lower bound under any valid potential. ∎
+///
+/// It may also *refuse*: `rate > 0` and a projection that fits leave the LP
+/// unbuilt, which is exactly what protects the instances where the cheap
+/// potential is enough. On SteinLib c18 and PACE instance024/025 the frontier
+/// advances steadily and the projection fits, so nothing is built — the
+/// behaviour the old phase order was measured into having, now derived from the
+/// instance rather than assumed from the phase number.
+///
+/// # A frontier that does not move is not evidence that it will not
+///
+/// A slice over which the frontier stands still yields no rate, and the first
+/// version of this predicate read that as an infinite projection and diverted
+/// the budget. That is wrong, and it cost a proof: PACE Track 1's instance026
+/// has a gap of *one* unit — the frontier sits at 1750 against an incumbent of
+/// 1751 — and the search pops the goal state at 23,640 labels. Diverting at
+/// 8,192 because it had not moved yet lost an instance the ascent packing closes
+/// outright.
+///
+/// The honest reading of a stall is the one the same argument gives. If the
+/// frontier has stood still for `M` labels, the observation supports exactly one
+/// statement about how many more are needed: **at least `M`**, since `M` have
+/// already been spent without moving it. So a stall diverts the budget only when
+/// `M` already exceeds what the remaining budget can settle — when the search
+/// has spent more labels failing to move the frontier than it has left to spend
+/// at all. The doubling schedule makes that condition arrive on a stalled run
+/// and never on a run that is about to finish.
+fn potential_will_not_close(
+    frontier_before: Cost,
+    frontier_after: Cost,
+    upper_bound: Cost,
+    labels_in_slice: u64,
+    labels_since_advance: u64,
+    slice_secs: f64,
+    seconds_left: f64,
+) -> bool {
+    if !upper_bound.is_finite() || labels_in_slice == 0 || seconds_left <= 0.0 {
+        return false;
+    }
+    let gap = upper_bound - frontier_after;
+    if gap <= 0.0 {
+        // The frontier has already reached the incumbent; the search is about to
+        // finish whatever anyone thinks.
+        return false;
+    }
+    let speed = labels_in_slice as f64 / slice_secs.max(1e-9);
+    let labels_available = speed * seconds_left;
+    let advance = frontier_after - frontier_before;
+    let labels_needed = if advance > 0.0 {
+        gap * labels_in_slice as f64 / advance
+    } else {
+        labels_since_advance as f64
+    };
+    labels_needed > labels_available
+}
+
 /// Advance the goal-directed search, creating it or continuing it.
 ///
 /// The search's whole state — settled labels, open queue, Lemma-15 witnesses —
@@ -656,6 +826,25 @@ fn finish(
 /// hundred thousand labels per slice and needs roughly their sum, and under the
 /// old wiring it was handed four disjoint slices and started each of them from
 /// nothing.
+///
+/// # Scheduling the potential
+///
+/// The old wiring was two phases: sweep under the ascent packing, and only if
+/// that failed, build the LP potential and sweep again. That order was measured
+/// in — SteinLib c18 and PACE instance024/025 are closed by the first phase and
+/// were lost when the certificate was given the budget first — and it is
+/// provably wasted on the opposite group. On PACE instance167 the first phase
+/// settles 350,000 labels and moves the frontier by 7 units against a gap of 3,
+/// while a quarter-second of separation produces a packing under which the same
+/// instance closes in 29,000 labels.
+///
+/// Neither order is right, so neither is used. The search runs in doubling label
+/// slices and, at each slice boundary, asks [`potential_will_not_close`] — a
+/// statement about the instance, computed from the frontier's own rate of
+/// advance — whether to spend the next of its budget on sweeping or on
+/// separation. The separation loop is resumable, so "spend some on separation"
+/// is a genuine increment and not a restart, and the answer can be revisited
+/// every slice.
 #[allow(clippy::too_many_arguments)]
 fn run_search(
     work_graph: &UndirectedGraph,
@@ -666,7 +855,9 @@ fn run_search(
     deadline: Instant,
     branch_and_cut_works: bool,
     cache: &mut Option<SteinerSearch>,
+    sep_cache: &mut Option<RootSeparation>,
     search_lower_bound: &mut Cost,
+    search_rate: &mut Cost,
 ) {
     // The search may be rooted at any terminal, and its potential is a packing
     // rooted at the same one. Which terminal is chosen was measured and does not
@@ -699,77 +890,188 @@ fn run_search(
     // that has already run under the looser one. That only ever prunes more.
     search.set_upper_bound(root_upper_bound);
 
-    // Two phases, and the second is only paid for when the first fails. The
-    // ascent's packing is *maximal* - no set missing the root admits any increase
-    // - so when it is not strong enough there is no combinatorial way to
-    // strengthen it. The LP on the same relaxation reaches materially further,
-    // and `root_certificate` turns its dual back into a packing. That LP is not
-    // free, so it is run only after the cheap potential has been shown, by
-    // running it, not to suffice.
+    // The window this whole step gets.
     //
-    // Unlike the old wiring, the second phase *continues* the first: the labels
-    // it settled, the queue it built and the witnesses it found are all still
-    // there, and only the potential and the graph get stronger.
-    for phase in 0..2 {
+    // The exception is measured rather than guessed. A branch-and-cut that has
+    // already run on this instance and solved *no* LP and opened *no* node is
+    // not going to contribute: on PACE instance024 its model has 205,726 rows
+    // and it cannot finish a single solve inside any share it could be given.
+    // When that has been observed, the search keeps the whole budget instead of
+    // handing half of it to a stage known to do nothing. SteinLib c18 is why
+    // this is a measurement and not a rule: there the branch-and-cut closes the
+    // instance in 0.38 s after the search fails, so it must keep its share until
+    // it has been seen to fail.
+    let window = {
         let budget = deadline.saturating_duration_since(Instant::now());
-        if budget.is_zero() {
-            break;
-        }
-        // The first phase keeps the share it always had, so an instance the cheap
-        // potential already closes is untouched by any of this. Everything the
-        // certificate costs comes out of what is left after that phase failed.
-        //
-        // The exception is measured rather than guessed. A branch-and-cut that
-        // has already run on this instance and solved *no* LP and opened *no*
-        // node is not going to contribute: on PACE instance024 its model has
-        // 205,726 rows and it cannot finish a single solve inside any share it
-        // could be given. When that has been observed, the search keeps the whole
-        // budget instead of handing half of it to a phase known to do nothing.
-        // SteinLib c18 is why this is a measurement and not a rule: there the
-        // branch-and-cut closes the instance in 0.38 s after the search fails, so
-        // it must keep its share until it has been seen to fail.
-        let slice = if branch_and_cut_works {
+        if branch_and_cut_works {
             Instant::now() + budget.mul_f64(0.5)
         } else {
             deadline
-        };
+        }
+    };
+
+    // The resumable separation loop, carried across attempts and passes exactly
+    // as the search is. It applies when it is literally the same model: same
+    // arcs, same costs, same root, same terminals.
+    let mut separation =
+        sep_cache.take().filter(|s| s.applies_to(&directed, terminals[0], terminals));
+
+    // The strongest packing value the search has actually been given, which is
+    // what the "did the potential get stronger" test has to be stated over. The
+    // ascent's own bound is what it started under.
+    let mut potential_value = root_lower_bound;
+    let mut slice_labels = SEARCH_SLICE_LABELS;
+    let mut first = true;
+    // What this whole step cost and what it moved, in the units the
+    // branch-and-cut is judged in: bound per second. The clock includes the
+    // separation increments, because they come out of the same window and the
+    // question being answered is what a second spent here is worth against a
+    // second spent there.
+    // The baseline is the bound the branch-and-cut would *also* be seeded with,
+    // not the search's own zero. A search starting from nothing jumps its
+    // frontier from 0 to the whole root bound in its first slice, and calling
+    // that a rate would make every comparison against it degenerate.
+    let step_started = Instant::now();
+    let step_frontier_before = search.lower_bound().max(root_lower_bound);
+    // Labels settled since the frontier last rose. See
+    // [`potential_will_not_close`] for what a stall is and is not evidence of.
+    let mut labels_since_advance = 0u64;
+    // A separation increment that did not pay for itself stops the loop asking
+    // for more of them *within this call*.
+    //
+    // Two things set it, and both are measurements rather than give-ups. It is
+    // reset by the next call, which is where the resumption pays — the second
+    // solver pass hands the loop a fresh window and it continues from the rows it
+    // already has, so refusing a second increment here costs nothing later.
+    let mut stalled = false;
+    // The frontier's rate of advance in the slice *before* the last increment,
+    // and what that increment cost, so the slice after it can be asked whether
+    // the investment repaid. See the repayment test below.
+    let mut pre_increment: Option<(f64, f64)> = None;
+    loop {
+        if Instant::now() >= window || search.labels_settled() >= DS_LABEL_BUDGET {
+            break;
+        }
         let left = DS_LABEL_BUDGET.saturating_sub(search.labels_settled());
-        let r = search.run(left, Some(slice));
-        if config.verbose {
+        let before_frontier = search.lower_bound();
+        let before_labels = search.labels_settled();
+        let t0 = Instant::now();
+        let r = search.run(slice_labels.min(left), Some(window));
+        let slice_secs = t0.elapsed().as_secs_f64();
+        let slice_labels_done = r.labels_settled - before_labels;
+        if r.lower_bound > before_frontier + 1e-9 {
+            labels_since_advance = 0;
+        } else {
+            labels_since_advance += slice_labels_done;
+        }
+        if config.verbose && first {
             eprintln!(
-                "[dsearch] phase {phase}{}: {} labels total, optimal {:?}, lower bound {:.1}",
-                if resumed && phase == 0 { " (resumed)" } else { "" },
+                "[dsearch] start{}: {} labels, optimal {:?}, lower bound {:.1}",
+                if resumed { " (resumed)" } else { "" },
                 r.labels_settled,
                 r.optimal,
                 r.lower_bound
             );
         }
+        first = false;
         *search_lower_bound = search_lower_bound.max(r.lower_bound);
-        if r.optimal.is_some() {
+        if r.optimal.is_some() || search.is_exhausted() {
             break;
         }
-        // Nothing left in the queue, or nothing left in the label budget: another
-        // phase would settle nothing.
-        if phase == 1 || search.is_exhausted() || search.labels_settled() >= DS_LABEL_BUDGET {
-            break;
+        // The next slice is twice this one whatever is decided below; see
+        // [`SEARCH_SLICE_LABELS`].
+        slice_labels = slice_labels.saturating_mul(2);
+
+        // Did the last increment pay for itself?
+        //
+        // An increment costs `t` seconds during which the search advances
+        // nothing, and buys a potential under which it advances at some new
+        // rate. It was worth taking only if the improvement recovers the lost
+        // time inside the window that is left:
+        //
+        // ```text
+        //   (rate_after - rate_before) * seconds_left  >=  rate_before * t.
+        // ```
+        //
+        // Every term is measured on this instance in this call. PACE Track 1's
+        // instance086 is why the test exists: three increments raise the packing
+        // from 3343.4 to 3345.5 — two units against a gap of sixty — while the
+        // frontier is already at 3610 and advancing at 420 units a second, and
+        // the search that closes the instance at 309,935 labels under the old
+        // wiring is starved of exactly the time they took. The first increment
+        // is never refused by this: there is no "before" until one has been
+        // taken, which is the only way to find out what one buys.
+        if let Some((rate_before, spent)) = pre_increment.take() {
+            let rate_after = if slice_secs > 1e-9 {
+                (r.lower_bound - before_frontier).max(0.0) / slice_secs
+            } else {
+                0.0
+            };
+            let seconds_left = window.saturating_duration_since(Instant::now()).as_secs_f64();
+            if (rate_after - rate_before) * seconds_left < rate_before * spent {
+                if config.verbose {
+                    eprintln!(
+                        "[certify] the last increment cost {spent:.2}s and moved the frontier's                          rate {rate_before:.1}/s -> {rate_after:.1}/s: it does not repay inside                          {seconds_left:.2}s, so no more this pass"
+                    );
+                }
+                stalled = true;
+            }
         }
 
-        // Build the stronger potential. Both its outputs are valid bounds on the
-        // reduced instance: the LP's own optimum, and the packing's value.
-        let budget = deadline.saturating_duration_since(Instant::now());
+        // Is the potential in hand going to close this? The question is only
+        // worth asking while there is something stronger available to build.
+        let can_strengthen = !stalled
+            && separation.as_ref().map_or(true, |s| !s.is_converged())
+            && search.potential_layers() < MAX_PACKING_LAYERS;
+        if !can_strengthen {
+            continue;
+        }
+        let seconds_left = window.saturating_duration_since(Instant::now()).as_secs_f64();
+        if !potential_will_not_close(
+            before_frontier,
+            r.lower_bound,
+            root_upper_bound,
+            slice_labels_done,
+            labels_since_advance,
+            slice_secs,
+            seconds_left,
+        ) {
+            continue;
+        }
+        if config.verbose {
+            eprintln!(
+                "[dsearch] frontier {:.1} -> {:.1} over {} labels in {:.2}s: \
+                 projected short of the incumbent {:.1}, asking for a stronger potential",
+                before_frontier, r.lower_bound, slice_labels_done, slice_secs, root_upper_bound,
+            );
+        }
+
+        // Spend the next increment on separation instead. Both of its outputs
+        // are valid bounds on the reduced instance: the LP's own optimum, and
+        // the packing's value.
+        let budget = window.saturating_duration_since(Instant::now());
         if budget.is_zero() {
             break;
         }
         let cert_deadline = Instant::now() + budget.mul_f64(0.25);
-        let Some(cert) = root_certificate(
-            &directed,
-            terminals[0],
-            terminals,
+        let increment_started = Instant::now();
+        let rate_before = if slice_secs > 1e-9 {
+            (r.lower_bound - before_frontier).max(0.0) / slice_secs
+        } else {
+            0.0
+        };
+        let sep = separation.get_or_insert_with(|| {
+            RootSeparation::new(&directed, terminals[0], terminals)
+        });
+        let solves_before = sep.lp_solves();
+        let Some(cert) = sep.advance(
             root_upper_bound,
             cert_deadline,
             ROOT_CERT_ROUNDS,
             DS_PACKING_NNZ,
         ) else {
+            // No LP solve has ever reached optimality on this model, so there is
+            // no dual to read and there never will be.
             break;
         };
         *search_lower_bound = search_lower_bound.max(cert.lp_bound).max(cert.packing.value);
@@ -793,12 +1095,15 @@ fn run_search(
             .collect();
         if config.verbose {
             eprintln!(
-                "[certify] lp bound {:.1}, packing {:.1} over {} sets, {} solves \
-                 (ascent {:.1}), edges {} -> {}",
+                "[certify] lp bound {:.1}, packing {:.1} over {} sets, {} solves (+{}), \
+                 {} rows{} (ascent {:.1}), edges {} -> {}",
                 cert.lp_bound,
                 cert.packing.value,
                 cert.packing.sets.len(),
                 cert.lp_solves,
+                cert.lp_solves - solves_before,
+                sep.num_rows(),
+                if sep.is_converged() { ", converged" } else { "" },
                 root_lower_bound,
                 before,
                 smaller.edges.len(),
@@ -809,19 +1114,36 @@ fn run_search(
         if smaller.edges.len() < before {
             search.restrict_to(&smaller);
         }
-        // Continue only when the object the search actually consumes got
+        // Offer the layer only when the object the search actually consumes got
         // stronger. The potential is the packing, so the test is on the packing's
-        // own value: if it did not rise above the bound the search already ran
-        // under, continuing would sweep against a potential no stronger at the
-        // root, and the budget belongs to the branch-and-cut instead. This is a
-        // measured fact about the two objects, not an estimate of how long a
-        // continuation would take.
-        if cert.packing.value <= root_lower_bound + 1e-9 {
-            break;
+        // own value: a packing no stronger at the root than the one already
+        // installed re-keys the whole open queue for nothing. This is a measured
+        // fact about the two objects, not an estimate of how long a continuation
+        // would take.
+        if cert.packing.value <= potential_value + 1e-9 {
+            stalled = true;
+            continue;
         }
-        search.add_packing(&cert.packing.sets);
+        pre_increment = Some((rate_before, increment_started.elapsed().as_secs_f64()));
+        match search.add_packing(&cert.packing.sets) {
+            PackingAdmission::Added => potential_value = cert.packing.value,
+            // Loud, because a silent one invalidated an experiment once. See
+            // [`MAX_PACKING_LAYERS`].
+            other => {
+                if config.verbose {
+                    eprintln!("[certify] packing refused: {other:?}");
+                }
+            }
+        }
     }
+    let step_secs = step_started.elapsed().as_secs_f64();
+    *search_rate = if step_secs > 1e-9 {
+        ((search.lower_bound() - step_frontier_before).max(0.0)) / step_secs
+    } else {
+        0.0
+    };
     *cache = Some(search);
+    *sep_cache = separation;
 }
 
 
@@ -951,4 +1273,86 @@ fn trivial_result(start: Instant, value: Cost, method: SolveMethod) -> SolveResu
 pub fn solve_file(path: &str, config: SolverConfig) -> SolveResult {
     let instance = io::read_instance(path).expect("Failed to read instance");
     solve(&instance, config)
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+
+    /// The units-short shape: a frontier that barely moves.
+    ///
+    /// PACE instance167's measured trace (§38, ninth round): 350,000 labels
+    /// under the ascent packing take the frontier from 2,600,420 to 2,600,427
+    /// against an incumbent of 2,600,443, in about two seconds, with about one
+    /// second left. The projection is `16 / (7/350000) = 800,000` labels needed
+    /// against `175,000/s * 1 s = 175,000` available, so the potential is asked
+    /// to get stronger — which is what the LP packing then does, closing the
+    /// instance in 29,000 labels.
+    #[test]
+    fn a_crawling_frontier_asks_for_a_stronger_potential() {
+        assert!(potential_will_not_close(
+            2_600_420.0,
+            2_600_427.0,
+            2_600_443.0,
+            350_000,
+            0,
+            2.0,
+            1.0
+        ));
+    }
+
+    /// The same rate with a gap small enough to reach does *not* ask. The
+    /// predicate is a projection, not a verdict on the packing's quality.
+    #[test]
+    fn a_crawling_frontier_with_a_reachable_gap_keeps_the_budget() {
+        assert!(!potential_will_not_close(
+            2_600_420.0,
+            2_600_427.0,
+            2_600_430.0,
+            350_000,
+            0,
+            2.0,
+            1.0
+        ));
+    }
+
+    /// A stall diverts the budget only once it is bigger than the budget.
+    ///
+    /// 100,000 labels in 0.5 s is 200,000/s, so four seconds can settle 800,000.
+    /// A stall of 100,000 is not evidence against that; a stall of 900,000 is.
+    #[test]
+    fn a_stall_asks_only_when_it_outweighs_the_remaining_budget() {
+        assert!(!potential_will_not_close(100.0, 100.0, 110.0, 100_000, 100_000, 0.5, 4.0));
+        assert!(potential_will_not_close(100.0, 100.0, 110.0, 100_000, 900_000, 0.5, 4.0));
+    }
+
+    /// PACE Track 1's instance026: a one-unit gap, a frontier that stands still
+    /// at 1750 against an incumbent of 1751, and a goal state popped at 23,640
+    /// labels. The first version of this predicate diverted at 8,192 and lost
+    /// the proof. At that boundary the stall is 12,288 labels against 46,000 the
+    /// remaining 0.79 s can settle, so it must not divert.
+    #[test]
+    fn a_one_unit_gap_is_not_abandoned_for_standing_still() {
+        assert!(!potential_will_not_close(1750.0, 1750.0, 1751.0, 8_192, 12_288, 0.14, 0.79));
+    }
+
+    /// The case the old phase order was measured into protecting: a frontier
+    /// advancing fast enough to arrive inside the budget must not divert it.
+    #[test]
+    fn a_marching_frontier_keeps_the_budget() {
+        // Half the gap closed in a fifth of the time.
+        assert!(!potential_will_not_close(0.0, 500.0, 1000.0, 100_000, 0, 0.2, 1.0));
+    }
+
+    /// Degenerate inputs never divert the budget: no incumbent to aim at, no
+    /// labels to measure a rate from, no time left to spend, or a frontier that
+    /// has already arrived.
+    #[test]
+    fn degenerate_inputs_refuse_to_ask() {
+        assert!(!potential_will_not_close(0.0, 10.0, Cost::INFINITY, 1000, 0, 1.0, 1.0));
+        assert!(!potential_will_not_close(0.0, 10.0, 100.0, 0, 0, 1.0, 1.0));
+        assert!(!potential_will_not_close(0.0, 10.0, 100.0, 1000, 0, 1.0, 0.0));
+        assert!(!potential_will_not_close(0.0, 100.0, 100.0, 1000, 0, 1.0, 5.0));
+        assert!(!potential_will_not_close(0.0, 101.0, 100.0, 1000, 0, 1.0, 5.0));
+    }
 }

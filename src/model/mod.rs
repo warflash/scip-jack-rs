@@ -15,7 +15,7 @@ pub use hyp_pricing::{
     farthest_first_groups, group_steiner_costs, group_steiner_work, grouped_hyp_dual,
     price_and_repair, GroupedHypDual, PricedDual,
 };
-pub use lp_packing::{root_certificate, CertifiedPacking, RootCertificate};
+pub use lp_packing::{root_certificate, CertifiedPacking, RootCertificate, RootSeparation};
 pub use lp_relaxation::{LpRelaxation, LpStatus};
 pub use solution::SteinerSolution;
 pub use verifier::{verify_solution, VerificationResult};

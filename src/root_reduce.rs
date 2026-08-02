@@ -65,9 +65,29 @@ const EXACT_RECOMB_WIDTH: usize = 11;
 /// still lets a decomposition that costs microseconds run.
 const EXACT_MIN_SECS: f64 = 0.02;
 
-/// Pool members the exact recombination may consider as parents. Which of them
-/// it actually admits is decided by the width of the ground set they span, so
-/// this only bounds how many decompositions the greedy tries.
+/// Pool members the exact recombination may consider as parents.
+///
+/// # This is a cap on *probes*, and lifting it was measured as a loss
+///
+/// [`crate::heuristics::recombine_pool`] chooses how many parents to admit by
+/// binary search on the measured width of the ground set they span, so the
+/// constant looks like the fixed prefix that criterion exists to replace, and
+/// the pool it is applied to is much larger than the constant: on PACE
+/// instance196 the local search leaves 106 distinct optima and twelve of them
+/// span 84 vertices at width five against a cap of eleven.
+///
+/// Lifting it entirely — letting the width search see the whole pool — was
+/// implemented and A/B'd, and it is **worse**. It grows the ground set on some
+/// instances (instance171: 51 -> 55 vertices; instance173: 59 -> 71) and
+/// improves the incumbent on none of 171, 172, 173, 195, 196, while the extra
+/// `O(log)` decompositions cost four Track 1 proofs (182, 188, 192, 193) and one
+/// on Track 2. The binary search's probes are not free and the ones it adds are
+/// the expensive end of the range.
+///
+/// So the twelve stays, and what it bounds is stated honestly: it is a budget on
+/// how many decompositions the search may run, not a belief about how many
+/// parents are useful. The measurement that would change it is a probe schedule
+/// whose cost does not grow with the prefix, not a larger constant.
 const EXACT_RECOMB_PARENTS: usize = 12;
 
 /// Outcome of the tightening loop.
@@ -619,9 +639,40 @@ fn round(
     let mut node_dead = vec![false; idx.num_nodes()];
     let mut arc_dead = vec![false; num_arcs];
 
-    if upper_bound.is_finite() {
-        for (r, da) in &ascents {
-            if expired() {
+    // The strongest certificate first, and that one runs whatever the clock says.
+    //
+    // # Why the deadline must not reach this block
+    //
+    // Every phase above this one improves a *bound*. This is the only phase that
+    // makes the graph smaller, and it was the only phase the deadline could
+    // cancel outright — so a round that spent its clock on the primal returned a
+    // slightly better incumbent and not one deleted element, and the next round
+    // started on exactly the same graph.
+    //
+    // On PACE instance161 that is the whole of the dense group's reduction
+    // failure. At a five-second limit the round reports `kill 0n/0e` and the
+    // graph stays at 40,857 edges; the *same round*, under the *same* bounds
+    // `LB = 5134`, `UB = 5260`, given more clock deletes **7,478 edges**, and
+    // the fixpoint then runs 40,857 -> 21,426. Nothing about the mathematics was
+    // missing. The round was cancelled one step before it did its job.
+    //
+    // The step is affordable unconditionally, which is what licenses ignoring
+    // the deadline for one root: it is two reduced-cost Dijkstras and a linear
+    // scan over the arcs, `O(m + n log n)`, with no enumeration and no LP —
+    // milliseconds on the graphs where the phases above cost seconds. The
+    // remaining roots stay under the clock, because their cost is a multiple of
+    // that and their marginal value is small: the first root is the one with the
+    // best certificate, and elimination power is `UB - LB`.
+    if upper_bound.is_finite() && !ascents.is_empty() {
+        let best_first = ascents
+            .iter()
+            .position(|(r, _)| *r == best_root)
+            .unwrap_or(0);
+        let order: Vec<usize> =
+            std::iter::once(best_first).chain((0..ascents.len()).filter(|&i| i != best_first)).collect();
+        for (nth, &i) in order.iter().enumerate() {
+            let (r, da) = &ascents[i];
+            if nth > 0 && expired() {
                 break;
             }
             let dists = reduced_cost_distances(&idx, *r, terminals, &da.reduced_costs, &active);
@@ -820,6 +871,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The invariant the whole pipeline rests on, under a **loose** cutoff.
+    ///
+    /// Every bound-based rule in the round preserves the trees strictly cheaper
+    /// than the incumbent it is given, not the optimum outright. So the test
+    /// that means something is: hand the tightening an upper bound strictly
+    /// above the optimum, and check that the optimum is still *in the graph it
+    /// returns*, at `reduced optimum + offset`.
+    ///
+    /// The default configuration never exercises this. Its heuristics find the
+    /// optimum on graphs this small, so the cutoff is always tight and the rules
+    /// are allowed to delete everything but the incumbent. PACE Track 1's
+    /// instance184 is what asks for it: an experiment that left the heuristic
+    /// five units above the optimum produced a graph in which the search
+    /// exhausted below the cutoff and the incumbent was announced as proved.
+    #[test]
+    fn a_loose_cutoff_still_leaves_the_optimum_in_the_graph() {
+        let mut seed = 0xFEED_FACE_1234_5678u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut checked = 0;
+        for _ in 0..400 {
+            let n = 5 + (rng() % 4) as u32;
+            let mut g = UndirectedGraph::new(n);
+            let k = 2 + (rng() % 3) as u32;
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = v <= k;
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            let mut edges = Vec::new();
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 3 != 0 {
+                        let c = 1.0 + (rng() % 9) as f64;
+                        g.add_edge(u, v, c);
+                        edges.push((u, v, c));
+                    }
+                }
+            }
+            let Some(opt) = brute_force(n, &edges, &terminals) else { continue };
+
+            for slack in [1.0, 2.0, 5.0] {
+                let cfg = ReduceConfig {
+                    initial_upper_bound: opt + slack,
+                    ..ReduceConfig::default()
+                };
+                let out = tighten(g.clone(), terminals.clone(), &cfg);
+                let red_edges: Vec<(NodeId, NodeId, Cost)> =
+                    out.graph.edges.iter().map(|e| (e.src, e.dst, e.cost)).collect();
+                let max_id = out.graph.nodes.iter().map(|x| x.id).max().unwrap_or(0);
+                let Some(red_opt) = brute_force(max_id, &red_edges, &out.terminals) else {
+                    continue;
+                };
+                assert!(
+                    (red_opt + out.offset - opt).abs() < 1e-6,
+                    "reduced optimum {red_opt} + offset {} != optimum {opt} at cutoff {}",
+                    out.offset,
+                    opt + slack
+                );
+                assert!(out.lower_bound <= opt + 1e-6, "LB {} > optimum {opt}", out.lower_bound);
+                checked += 1;
+            }
+        }
+        assert!(checked > 200, "only {checked} cases were exercised");
     }
 
     fn brute_force(n: u32, edges: &[(NodeId, NodeId, Cost)], terminals: &[NodeId]) -> Option<Cost> {

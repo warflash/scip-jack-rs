@@ -4,6 +4,7 @@ pub mod distance;
 pub mod blocks;
 pub mod bottleneck;
 pub mod csr;
+pub mod implied_profit;
 pub mod nearest_vertex;
 pub mod sd_closure;
 pub mod vertex_test;

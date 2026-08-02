@@ -486,10 +486,54 @@ struct PackingLayer {
     num_masks: usize,
 }
 
-/// Packings the potential will carry. The evaluation cost is linear in this, and
-/// the two sources that exist — the ascent's own packing and the one read off an
-/// LP dual — are what it is sized for.
-pub const MAX_PACKING_LAYERS: usize = 2;
+/// Packings the potential will carry.
+///
+/// # Why four, and what four costs
+///
+/// This was two, sized for the two sources that then existed: the ascent's
+/// packing and one read off an LP dual. It is no longer two sources. The root
+/// separation loop is resumable ([`crate::model::lp_packing::RootSeparation`]),
+/// so the search can be handed a *sequence* of LP packings, each read off a
+/// strictly larger row set, and neither dominates the other pointwise — the
+/// lattice theorem says to keep both.
+///
+/// The cost of a layer is exactly computable and is why this is a small number
+/// rather than unbounded. Per settled label the potential evaluates every layer
+/// once, and a layer's evaluation is `O(|at_vertex[v]|)` in scan mode or `O(1)`
+/// against its subset-sum table; per cached mask it carries one `Cost`, so the
+/// per-mask cache grows by 8 bytes a layer and the subset-sum table, when it is
+/// built at all, by `n * 2^(k-1)` costs. Four layers is therefore at most four
+/// times the potential's evaluation cost and at most four times its table
+/// memory, against a state space that is `2^(k-1) * n` — the layers are a
+/// constant factor on a term that is not the bottleneck.
+///
+/// # Truncation is not silent
+///
+/// A previous experiment handed the search twenty-six ascent packings *and* the
+/// LP's, and the cap dropped the LP's — which showed up as a pointwise maximum
+/// scoring worse than one of its arguments, an impossibility that took a while
+/// to read as an experimental error rather than a mathematical one. So
+/// [`SteinerSearch::add_packing`] now returns a typed [`PackingAdmission`] and
+/// the solver reports refusals; a truncation can be seen in a trace instead of
+/// being inferred from an impossible measurement.
+pub const MAX_PACKING_LAYERS: usize = 4;
+
+/// What happened to a packing offered to a running search.
+///
+/// See [`MAX_PACKING_LAYERS`] for why this is a value rather than a `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackingAdmission {
+    /// Installed as a new layer of the pointwise maximum.
+    Added,
+    /// The potential is already carrying [`MAX_PACKING_LAYERS`] layers. The
+    /// offered packing is *not* in the potential; a caller comparing potentials
+    /// must know this.
+    AtCapacity,
+    /// Nothing to add: the packing raised no set.
+    Empty,
+    /// The search has already finished; a potential cannot change its answer.
+    AlreadySolved,
+}
 
 impl PackingLayer {
     /// Build from one dual-ascent packing. `terminal_index[v]` is the index of
@@ -1084,9 +1128,12 @@ impl SteinerSearch {
     /// Returns whether the layer was accepted. See the type's documentation for
     /// why resuming under the stronger potential is sound, and why the re-key is
     /// mandatory.
-    pub fn add_packing(&mut self, sets: &[(Cost, Vec<NodeId>)]) -> bool {
+    pub fn add_packing(&mut self, sets: &[(Cost, Vec<NodeId>)]) -> PackingAdmission {
         if self.optimal.is_some() {
-            return false;
+            return PackingAdmission::AlreadySolved;
+        }
+        if sets.is_empty() {
+            return PackingAdmission::Empty;
         }
         let num_nodes = self.state.csr.num_nodes;
         let root = self.root;
@@ -1102,7 +1149,7 @@ impl SteinerSearch {
         let added =
             potential.push(sets, &self.terminal_index, num_nodes, root, dense, &|v| degrees[v]);
         if !added {
-            return false;
+            return PackingAdmission::AtCapacity;
         }
         // Everything cached from the old potential is now wrong, and every open
         // key is now too low.
@@ -1117,7 +1164,18 @@ impl SteinerSearch {
                 self.state.heap.push((Reverse(Key(key)), packed));
             }
         }
-        true
+        PackingAdmission::Added
+    }
+
+    /// The strongest frontier value any slice has reached: a valid lower bound
+    /// on the optimum of the graph the search was built for.
+    pub fn lower_bound(&self) -> Cost {
+        self.lower_bound
+    }
+
+    /// Layers the potential is carrying, against [`MAX_PACKING_LAYERS`].
+    pub fn potential_layers(&self) -> usize {
+        self.state.potential.as_ref().map_or(0, |p| p.layers.len())
     }
 
     /// Settle up to `label_budget` further labels, or until `deadline`.

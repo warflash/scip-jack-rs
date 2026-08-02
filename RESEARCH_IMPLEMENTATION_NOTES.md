@@ -2405,3 +2405,824 @@ Open directions, unchanged in priority except that direction 1 is now closed:
    over the existing packing is the concrete version left to try.
 5. **Exact subsolvers dispatched on a computed work bound**, never on a family
    label. `dw_is_affordable` remains the right shape.
+
+## 2026-08-02 (tenth round): work that was thrown away, and a schedule derived from the instance
+
+Everything below was A/B'd against a control frozen at `7297bb4` on this tree,
+eight instances in parallel on both sides throughout. The absolute numbers are
+not serial numbers and are not comparable to the sections before the ninth
+round.
+
+### 46. The control, and a harness that says what "wrong" means
+
+`benchmarks/par_measure.sh` is `measure.sh` farmed out to eight workers and
+sorted back into instance order, because every A/B since the ninth round is
+taken eight-way parallel and a serial harness cannot reproduce those numbers.
+`benchmarks/summarize.sh` reports the gate the notes actually state: a value
+differing from its reference **under an `Optimal` status**. Its first version
+counted every unproved instance whose incumbent sat above the optimum as
+"wrong", which made all 79 Track 2 misses look like correctness failures and
+every A/B unreadable.
+
+Control at `7297bb4`:
+
+| slice | proved | time |
+|---|---|---|
+| PACE Track 2 [1..200] @5 s | 107/200, 26 by the width DP | 814.8 s |
+| PACE Track 1 [1..140] @3 s | 138/140 | 75.0 s |
+| PACE Track 1 [155..200] @5 s | 26/46 | 157.0 s |
+| SteinLib B @5 s | 18/18 | 3.3 s |
+| SteinLib C @5 s | 20/20 | 7.7 s |
+| SteinLib D @5 s | 20/20 | 16.2 s |
+| SteinLib E @20 s | 19/20 | 75.9 s |
+
+Zero instances report a value differing from the reference under `Optimal`.
+
+### 47. The width census, and what it decides
+
+`src/bin/td_census.rs` reproduces the pipeline rather than approximating it.
+`tw_probe` decomposes the output of the *classical* reduction; the graph
+`try_decomposition` actually sees has been through `root_reduce::tighten` as
+well, whose reduced-cost eliminations routinely halve the edge count, and width
+is not monotone under anything but vertex deletion. The census runs
+`preprocess_until` at a third of the limit, `tighten` at 35 % of what is left,
+then the whole ordering portfolio at the encoding's cap, then the DP — the same
+shares `solver::solve` uses, with the DP given the *whole* remainder rather than
+half of it, which over-states its budget in the safe direction for this question.
+
+The 93 Track 2 failures at 5 s split:
+
+| outcome | count |
+|---|---|
+| **refused** — no ordering keeps every bag at or below 13 | **66** |
+| **timeout** inside the DP | **23** |
+| decomposes and finishes inside 5 s | 4 |
+
+The four that finish (026, 058, 059, 064) prove *serially*; the solver loses
+them to parallel contention at the limit, not to scheduling. That was checked
+rather than assumed — instance058 run alone at 5 s returns `Optimal 28652`,
+which is its reference.
+
+For the 23 timeouts, the census re-run at 90 s: **19 finish**, four do not (061,
+103, 105, 106). Writing `B` for the DP budget the 5-second census gave and `T`
+for the time the 90-second census needed, a factor-`f` join speedup closes an
+instance exactly when `T/f <= B`:
+
+| instance | B | T | factor needed |
+|---|---|---|---|
+| 040 | 2.71 | 2.93 | 1.08 |
+| 093 | 4.35 | 5.00 | 1.15 |
+| 085 | 3.26 | 4.05 | 1.24 |
+| 094 | 2.99 | 3.73 | 1.25 |
+| 090 | 5.23 | 7.48 | 1.43 |
+| 070 | 4.91 | 7.26 | 1.48 |
+| 087 | 3.88 | 6.84 | 1.76 |
+| 092 | 3.25 | 8.80 | 2.71 |
+| 095 | 2.76 | 9.16 | 3.32 |
+| 096 | 2.78 | 10.86 | 3.91 |
+| 099 | 2.66 | 11.24 | 4.23 |
+| 086 | 3.66 | 15.79 | 4.31 |
+| 065, 066, 076, 088, 097 | | | 9.5 – 221 |
+
+(084 and 075 are excluded: at the longer limit the tightening had more clock and
+reduced further, so the two runs are not the same graph.) The real pass gives the
+DP about half what the census gave it, so the honest factors are about twice
+these, and the §34 ceiling of 2.5–4× overall closes roughly **7** of the 23 and
+at most 11.
+
+**Decision, stated as item 0 asks.** Item 3 stays ahead of item 4, and item 4 is
+not implemented this round. 66 of the 93 failures are out of the DP's reach at
+*any* join speed — a faster join changes nothing about a graph that does not
+decompose — while item 4's entire reachable prize is 7 to 11 instances. A
+reduction that shrinks graphs pays into the LP size, the search state space *and*
+the decomposition width; a faster join pays into one of them, on a quarter of the
+failures.
+
+### 48. A separation loop that is resumed instead of rebuilt
+
+`RootSeparation` is `root_certificate` with its state exposed: the LP model, the
+installed-signature set, the partition witnesses, the batch counter, the running
+bound, the last harvest and the reduced costs that go with it. `root_certificate`
+is now a one-shot wrapper around it, and `solver.rs` carries one across attempts
+and across passes the way it already carries `SteinerSearch`.
+
+> **Proposition (resumed dominance).** Let `S` be a separation loop stopped after
+> `k` rounds and resumed for `k'` more, and `F` a fresh loop run for `k + k'`
+> rounds on the same graph, root and terminals. Then `S` and `F` solve the same
+> LPs in the same order and reach the same bound.
+>
+> *Proof.* The round body is a function of (model rows, installed signatures,
+> partition witnesses, batch counter, running bound) and the clock, and the clock
+> bounds how many rounds happen rather than what a round does. Resumption
+> preserves every one of those. ∎
+
+The clock is the whole asymmetry and it is the asymmetry that pays: `S` spends
+its second budget on rounds `k+1 .. k+k'` while `F` spends it re-deriving rounds
+`1 .. k`. Convergence — a round that installs nothing — is *recorded*, so every
+later call returns the certificate without solving an LP; the one thing a later
+call still recomputes is the elimination set, from `last_obj` and the reduced
+costs of the same solve, because the caller may have improved the incumbent
+since.
+
+Gated by `a_resumed_loop_matches_a_fresh_loop_at_convergence` (random instances,
+one round at a time against 200 at once, equal bound *and* equal LP-solve count),
+`a_resumed_loop_matches_a_fresh_loop_round_for_round` (the truncated half of the
+proposition, `k = 1..5`), and `applies_to_rejects_a_changed_graph`.
+
+**(PACK) is now re-derived on every extraction, not in a debug build.**
+
+> **Lemma (certified scaling).** If `y >= 0` loads every arc by at most
+> `mu * c(a)` with `mu >= 1`, then `y / mu` satisfies (PACK) and its value is
+> `value(y) / mu`.
+
+`CertifiedPacking::repair` computes `mu` and applies it. It can only *lower* a
+claim, so it never manufactures a bound, and a packing that needed no repair is
+returned untouched. When it does fire, the value is re-derived as the sum over
+the sets actually checked rather than scaled from the composite claim — a
+composite value can legitimately exceed that sum, because an ascent layer
+truncated by its nnz cap raises sets it does not store, and that composition is
+only justified while the invariant it rests on holds.
+
+### 49. Scheduling the potential by the frontier's own rate
+
+The old wiring was two phases: sweep under the ascent packing, and only if that
+failed build the LP potential and sweep again. That order was measured in and it
+is provably wasted on the opposite group, so it is replaced by a computed test
+rather than inverted.
+
+The search now runs in **doubling label slices** — a granularity, not a dial:
+whatever the right moment to re-decide is, a doubling schedule reaches a slice
+boundary within a factor of two of it, having spent at most twice the labels
+getting there. At each boundary `potential_will_not_close` reads two quantities
+off the trace and compares them with two that are known:
+
+```text
+labels_needed    = (UB - frontier) * labels_in_slice / frontier_advance
+labels_available = (labels_in_slice / slice_secs) * seconds_left
+```
+
+> **Proposition (scheduling cannot change an answer).** Whatever the predicate
+> returns, a completed search returns the same value.
+>
+> *Proof.* Its only effect is whether a further packing is built and offered. A
+> packing is offered through `SteinerSearch::add_packing`, which is sound for any
+> valid packing by the resumption theorem, and every packing here is verified
+> against (PACK) first. The labels that must be settled to reach the goal state
+> are determined by the graph and the cutoff; the potential determines only the
+> order. ∎
+
+**A frontier that does not move is not evidence that it will not.** The first
+version read a stalled slice as an infinite projection and diverted the budget,
+and that cost a proof: PACE Track 1's instance026 has a gap of *one* unit — the
+frontier sits at 1750 against an incumbent of 1751 — and the search pops the goal
+state at 23,640 labels. Diverting at 8,192 because it had not moved yet lost an
+instance the ascent packing closes outright. The honest reading of a stall is the
+one the same argument gives: if the frontier has stood still for `M` labels, the
+observation supports exactly one statement — **at least `M` more are needed** —
+so a stall diverts the budget only once `M` exceeds what the remaining budget can
+settle at the observed speed. `a_one_unit_gap_is_not_abandoned_for_standing_still`
+is that case, kept as a test.
+
+**`MAX_PACKING_LAYERS` is 4, and truncation is loud.** It is no longer 2, because
+the resumable loop hands the search a *sequence* of LP packings, each read off a
+strictly larger row set, and neither dominates the other pointwise — the lattice
+theorem says to keep both. Four layers cost at most four layer evaluations per
+settled label and 8 bytes a layer in the per-mask cache, against a state space of
+`2^(k-1) * n`. `add_packing` returns a typed `PackingAdmission` and the solver
+reports refusals, so the failure that made a pointwise maximum score worse than
+one of its arguments (§37) can be read off a trace instead of inferred from an
+impossibility.
+
+**A separation increment has to pay for itself.** The predicate above says
+whether a *stronger* potential is wanted; it does not say whether the last one
+was worth what it cost, and on PACE Track 1's instance086 that difference is a
+proof. Three increments there raise the packing from 3343.4 to 3345.5 — two units
+against a gap of sixty — while the frontier is already at 3610 and advancing at
+420 units a second, and the search that closes the instance at 309,935 labels is
+starved of exactly the time they took. So an increment is followed by a
+repayment test on the next slice,
+
+```text
+(rate_after - rate_before) * seconds_left  >=  rate_before * increment_secs,
+```
+
+every term of it measured on this instance in this call. The *first* increment is
+never refused by it — there is no "before" until one has been taken, which is the
+only way to find out what one buys — and a refusal lasts only for the current
+call, because the loop is resumable and the next pass continues it from the rows
+it already has.
+
+**`branch_and_cut_works` measures progress, not activity.** It read
+`lp_solves > 0 || nodes_processed > 0`, which on PACE instance167 is satisfied by
+twelve LP solves, one node, and one unit of dual bound in 1.06 s — while the
+search it took that second off was moving the bound about six units a second.
+It is now a comparison of the two stages' *observed rates of dual improvement*,
+both measured on this instance, in this pass, in bound per second. A completed
+proof or a better incumbent wins outright, which is what keeps SteinLib c18's
+0.38 s branch-and-cut in the schedule. The search's rate is measured from
+`max(frontier, root_lower_bound)` rather than from its own zero: a search
+starting from nothing jumps its frontier to the whole root bound in one slice,
+and calling that a rate makes every comparison against it degenerate.
+
+### 50. The dense group's reduction was starved, not weak
+
+PACE instance161, 640 vertices and 40,857 edges after the classical reduction, at
+a five-second limit:
+
+```text
+[reduce] round 1: |V|=640 |E|=40857 LB=5134.0 UB=5260.0 kill 0n/0e
+```
+
+The same round, on the same graph, under the *same* bounds, given more clock:
+
+```text
+[reduce] round 1: |V|=640 |E|=40857 LB=5134.0 UB=5260.0 kill 0n/7478e
+...
+[reduce] after 8 rounds: |V|=639 |E|=21568
+```
+
+Nothing about the mathematics was missing. Every phase of a round improves a
+*bound*; the elimination is the only phase that makes the graph smaller, it runs
+last, and `expired()` cancelled it outright — so a round that spent its clock on
+the primal returned a slightly better incumbent and not one deleted element, and
+the next round started on exactly the same graph. That is the whole of the dense
+group's reduction failure, and it is a scheduling defect in a phase whose
+mathematics was already correct.
+
+The repair rests on the phase being affordable unconditionally: it is two
+reduced-cost Dijkstras and a linear scan over the arcs, `O(m + n log n)`, with no
+enumeration and no LP, on a round whose earlier phases build trees without bound.
+So the *best* certificate's elimination runs whatever the clock says — best
+first, because elimination power is `UB - LB` — and the remaining roots stay
+under the deadline.
+
+Reduced edge counts at a five-second limit:
+
+| instance | control | now |
+|---|---|---|
+| 161 | 33,379 | 32,764 |
+| 162 | 33,794 | **19,801** |
+| 163 | 40,896 (unreduced) | 35,953 |
+| 164 | 40,857 (unreduced) | 35,473 |
+| 165 | 40,896 (unreduced) | 38,346 |
+
+### 51. Negative result: the strongest first layer is a worse packing
+
+`certify` has two repair rules and both of them only push the LP's multipliers
+*down*: uniform scaling divides every weight by the same number, greedy admission
+caps each weight at the room the earlier ones left. Neither can do the thing this
+module's own header says an LP can do and an ascent cannot — lower one weight in
+order to raise another. So a third rule was written that discards the multipliers
+and re-prices the recovered family from scratch:
+
+```text
+max  sum_i y_i   s.t.   sum_{i : a in delta^-(W_i)} y_i <= c(a),   y >= 0.
+```
+
+> **Lemma (family optimality).** The optimum of that programme is at least
+> `max(uniform_value, greedy_value)`, and any feasible point of it is a cut
+> packing whose value is a lower bound on the instance.
+>
+> *Proof.* Both closed-form rules produce feasible points of exactly this
+> programme — that is what "satisfies (PACK) on the recovered boundaries" means —
+> so the optimum dominates both. And feasibility is the entire hypothesis of the
+> packing theorem: each `W_i` misses the root by the recovery lemma and
+> `delta^-(W_i)` is its true in-boundary, so `sum y_i <= OPT` for any
+> non-negative `y` obeying the arc rows, whatever produced it. ∎
+
+It was implemented with the solver trusted for nothing — the returned point goes
+through `CertifiedPacking::repair` before its value is reported, a solve that does
+not reach optimality is discarded because a truncated simplex leaves an interior
+point whose objective bounds nothing, and the row order is sorted rather than
+taken from a `HashMap` for §32's reason.
+
+**It is a loss, in both compositions, and the second one is the interesting
+result.**
+
+Choosing rule C whenever it wins its own stage took Track 1 [155..200] from 28/46
+to 26/46, Track 1 [1..140] from 140 to 139, and *lowered* the reported dual on
+four instances:
+
+| instance | without rule C | with rule C on the first stage |
+|---|---|---|
+| 171 | 41 | 40 |
+| 172 | 7110 | 7019 |
+| 188 | 3600610 | 3600601 |
+| 192 | 4167 | 4125 |
+
+A stronger lower bound cannot lower a lower bound, so the fault is not in the
+rule. What the caller reports is `certify` **followed by**
+`extend_by_residual_ascent`, and the residual ascent harvests slack over the
+*whole* cut family, not only over the recovered one:
+
+```text
+value = sum y  +  ascent(c - load(y)).
+```
+
+Uniform scaling leaves slack on *every* arc — the module header has always said
+so, and calls it recoverable. Rule C deliberately leaves none: saturating arcs is
+exactly what maximising `sum y` on a fixed family means. So it trades a first
+layer larger by a few units for a residual on which the ascent, which ranges over
+all cuts, can raise nothing.
+
+The correct comparison is therefore to defer the choice until after the
+composition — extend every rule's output by its own residual ascent, keep the
+best *combined* value, which is valid because each candidate is separately a
+packing and the maximum of valid bounds is a valid bound. That was implemented
+too. It is **also** a loss: 25/46 and 109/200 against 28/46 and 110/200 with no
+rule C at all. The extra simplex per extraction costs more clock than the units
+it buys are worth in a five-second budget, and a certificate the resumable loop
+extracts several times per solve cannot afford one.
+
+Both variants were removed and the reasoning kept in the module. The general
+statement is worth more than the rule and is not specific to this module:
+
+> **In a residual cascade, greedily maximising layer `k` is not a step towards
+> maximising the sum.** The layers compete for the same arc capacities and the
+> later ones range over a strictly larger family.
+
+
+### 52. Item 4, derived and deferred: what an output-sensitive join would have to be
+
+Not implemented, and the reason is item 0's census rather than a proof of
+impossibility. What was derived, so the next attempt starts here:
+
+**The join is a cut-space intersection.** Writing `cuts(p)` for the set of
+`X` subset of `S` that are unions of blocks of `p` — a GF(2) subspace of
+dimension `|p|` —
+
+```text
+cuts(p join q) = cuts(p) intersect cuts(q).
+```
+
+**For a fixed `q`, the join depends on `p` only through its image in
+`Pi(S/q)`.** Contract every block of `q` to a point; then `p join q` is
+determined by the projection of `p` onto that quotient. So the distinct joins
+against a given `q` number at most `Bell(|q|)`, usually far fewer than the left
+table's size — which is exactly the output-sensitivity wanted. The obstruction is
+that computing that projection *is* the join: an index over the left table keyed
+by the image costs one join per (left state, right state) pair to build, which is
+the very count it was meant to avoid. Any cheaper index would have to read the
+image off a precomputed summary of `p` that does not depend on `q`, and cut-space
+membership is the only such summary available; `cuts(p) intersect cuts(q)` is a
+subspace intersection, `O(|S|^3)` per pair, worse than the union-find join it
+replaces.
+
+**Two output-sensitive stops are provable, and both fire at the wrong end.**
+
+> **Stop (i).** The lazy join may halt the moment the one-block partition `{S}` is
+> emitted.
+>
+> *Proof.* The table represents `opt(A, q) = min { w(p) : p join q = {S} }`. Once
+> `{S}` is present at cost `c*`, `opt(A,q) <= c*` for every `q`, and every later
+> candidate has cost at least `c*` by the enumeration order. ∎
+
+> **Stop (ii).** A candidate `r` may be discarded if some already-emitted `r'` is
+> coarser than it.
+>
+> *Proof.* `r join q = {S}` implies `r' join q = {S}` because `r'` coarser than
+> `r` gives `r' join q` coarser than `r join q`, and `w(r') <= w(r)` by the
+> enumeration order. ∎
+
+Lemma D of §32 — discrete dominance — is what kills both. It says the discrete
+partition of `S` attains the minimum cost, so the nondecreasing enumeration
+*starts* at the finest partition and `{S}`, the coarsest, arrives last: stop (i)
+fires after the work is done. And stop (ii) needs a coarser partition to be
+*cheaper*, which is the exception rather than the rule for the same reason.
+
+So the `2^w poly(w)` weighted join remains open, §35's obstruction stands, and
+the two obvious output-sensitive prunes are now closed with proofs of why they do
+not fire. Given the census — 66 of 93 Track 2 failures never enter the DP at all,
+and a 2.5–4× join closes 7 to 11 of the rest — this is the right thing to have
+spent a derivation and not an implementation on.
+
+### 53. Item 5: the exact recombination is not under-used, and the primal gap is outside every width-bounded neighbourhood
+
+The suspicion was that `EXACT_RECOMB_PARENTS = 12` was throttling a search that
+already chooses its own ground set by measured width. It is a real fixed prefix —
+`recombine_pool` binary-searches the number of parents against the width, and it
+was being handed twelve out of pools of 84 to 113 — so it was lifted entirely and
+A/B'd.
+
+**It is worse.** The ground set grows on some instances (171: 51 to 55 vertices;
+173: 59 to 71) and the incumbent improves on **none** of 171, 172, 173, 195, 196,
+while the extra `O(log)` decompositions cost four Track 1 proofs (182, 188, 192,
+193) and one on Track 2. The binary search's probes are not free and the ones a
+larger pool adds are the expensive end of the range. Reverted, with the constant
+re-documented as what it actually is: a budget on decomposition probes, not a
+belief about how many parents are useful.
+
+**What the measurement does establish** is sharper than the original question. On
+instance196 the pool holds 106 distinct local optima spanning 84 vertices at
+width 5 against a cap of 11; the *exact optimum of that ground set* is 68 on the
+reduced scale, and the true reduced optimum is 66. So a better tree exists outside
+the union of every local optimum the search visits. And `grow_and_solve`, which
+offers the rest of the graph in increasing reduced cost and accepts every batch
+that keeps the width inside the cap, accepts **zero** candidates on 195 and 196 —
+its reported decomposition is width 1 on `|V'| = |E'| + 1`, which is the seed tree
+alone.
+
+That is the diagnosis for the primal-limited group: **the missing 1.4–4.8 % lives
+outside every width-bounded neighbourhood of the incumbent.** Recombination and
+growth are not being throttled by a constant; they are at the boundary of what a
+width-11 ground set on a 694-vertex, 4,286-edge graph can express. Making them
+find it needs a neighbourhood chosen by something other than treewidth, or an
+exact method that is not a decomposition DP — not a larger pool and not a larger
+cap.
+
+### 54. Two dual directions rejected before implementation
+
+**Multi-root ascent as an additive residual layer adds exactly zero.** §37 closed
+multi-root ascent as extra layers of the pointwise *maximum*. The residual
+cascade of the scratchpad's §12.7 is a different composition — layers generated
+against `c - load` may be **added** — so the question is worth re-asking there,
+and the answer is no.
+
+> *Proof.* After `extend_by_residual_ascent` has run Wong's ascent from `r0`
+> against the residual capacities, the resulting packing is maximal among sets
+> missing `r0`: every terminal is reachable from `r0` over zero-residual-cost
+> arcs, so every set missing `r0` is crossed by a saturated arc and admits no
+> increase. An ascent rooted at `r'` raises sets missing `r'`; only those that
+> *also* miss `r0` are legal members here, and those are a subfamily of the sets
+> already shown to admit no increase. ∎
+
+So the residual cascade cannot be continued by any ascent, from any root. The
+only thing that beats a maximal packing is an object that lowers some weights to
+raise others, which is what §51's rule C does on the recovered family and what a
+full LP does on all of them.
+
+**The `k`-restricted hypergraphic relaxation is not a lower bound on `OPT`.** The
+tempting escape from §41's twelve-terminal ceiling is to enumerate only full
+components spanning at most `k` terminals — `C(25,3) = 2300` columns on the dense
+Track 1 group, each a three-terminal Steiner tree that Dreyfus–Wagner computes
+instantly. It does not work, and the reason is one line: the integral solutions
+of that programme are `k`-restricted Steiner trees, whose optimum `OPT_k` is at
+least `OPT`, so `LP_k <= OPT_k` says nothing about `OPT`. Borchers–Du puts
+`OPT_k` as far as `(1 + 1/floor(log2 k)) OPT` above it — a factor of two at
+`k = 3`. Rejected without implementation; it would have produced numbers above
+the optimum and reported them as bounds.
+
+### 55. Measurements
+
+Every row eight-way parallel on both sides, on the same tree. **Repeated runs of
+the same binary vary by about two proofs a slice under that parallelism**, so
+each column is the range over repeated whole-matrix runs — two of the control,
+three of the shipped build — rather than a single number. Reporting a single run
+would have overstated this round by two and understated it by two on different
+slices.
+
+| slice | control `7297bb4` | this round |
+|---|---|---|
+| PACE Track 2 [1..200] @5 s | 107, 109 | **111, 113, 113** |
+| PACE Track 1 [1..140] @3 s | 138, 139 | **139, 140, 140** |
+| PACE Track 1 [155..200] @5 s | 26, 26 | **26, 27, 28** |
+| SteinLib B @5 s | 18/18 | 18/18 |
+| SteinLib C @5 s | 20/20 | 20/20 |
+| SteinLib D @5 s | 20/20 | 20/20 |
+| SteinLib E @20 s | 19/20 | 19/20 |
+
+Better on every slice at the median, and never worse than the control's best at
+its own worst. Instances gained, taking the intersection over the shipped runs:
+Track 2's 026, 058, 059, 081, 117 and 194; Track 1's **024 and 025**, which the
+control has never proved; and Track 1's 167 and 193 from the units-short group
+that motivated items 1 and 2. The Track 2 method census moves from 26 proofs by
+the width DP to 27–29.
+
+166 library tests, `cargo check --all-targets` clean, and **no instance reporting
+a value differing from its reference under an `Optimal` status in any slice of
+any of the five whole-matrix runs of the shipped build**.
+
+Intermediate A/Bs, all on the same tree and at the same parallelism, kept because
+three of them are the negative results above:
+
+| build | Track 2 | Track 1 [1..140] | Track 1 [155..200] |
+|---|---|---|---|
+| control `7297bb4` | 107, 109 | 138, 139 | 26, 26 |
+| §48–§49 with the stall clause wrong | 111 | 136 | 27 |
+| §48–§50 — shipped | 111, 113, 113 | 139, 140, 140 | 26, 27, 28 |
+| + unbounded recombination pool (§53) | 109 | 140 | 24 |
+| + rule C chosen on the first stage (§51) | 109 | 139 | 26 |
+| + rule C chosen on the composition (§51) | 109 | 140 | 25 |
+
+### 56. What was delivered, and what was not
+
+- **Item 0 — in full.** Control frozen and measured, a parallel per-instance
+  harness added, the "wrong" definition corrected, the width census run and its
+  split reported, and items 3 and 4 re-ordered on the strength of it with the
+  reasoning stated (§46, §47).
+- **Item 1 — in full.** `RootSeparation`, the resumed-dominance proposition,
+  convergence recorded, (PACK) re-derived and repaired by certified scaling on
+  every extraction, three new gates (§48).
+- **Item 2 — in full.** The frontier-rate predicate with its two propositions and
+  its stall clause, `MAX_PACKING_LAYERS` raised to 4 with a stated cost model and
+  a typed refusal, and `branch_and_cut_works` turned from an activity flag into a
+  rate comparison (§49).
+- **Item 3 — in part, and the part is the reduction.** The dense group's
+  reduction was diagnosed as *starved rather than weak* and repaired (§50), which
+  is a real gain and not the new reduction the item asked for: no implied-SD,
+  walk-based, or NTDk-style rule was added, and no implied-profit elimination.
+  The dual half produced one derived strengthening that measured out in both of
+  its compositions (§51) and two further directions rejected with proofs (§54).
+  The
+  matroid-corrected packing the item asks for is **not** delivered, and that is a
+  session-budget outcome rather than a closed direction: the derivations in §54
+  narrow where it can live — it must lower some weights to raise others, and it
+  must be checkable against (PACK) or against an explicit component
+  decomposition — but no such object was constructed.
+- **Item 4 — derivation only, deliberately.** §52 records the cut-space identity,
+  the quotient characterisation of the join, the two provable stops and the proof
+  that Lemma D makes both fire at the wrong end. Not implementing it is a
+  decision item 0's census licenses and §47 states, not a shortage of time.
+- **Item 5 — in full as an investigation, negative as a change.** The exact
+  recombination is not under-used; lifting the prefix is measurably worse; the
+  primal gap on that group lives outside every width-bounded neighbourhood of the
+  incumbent (§53).
+
+### 57. Open directions, re-ranked
+
+1. **A matroid-corrected cut packing.** Unchanged in priority and now better
+   bounded: §54 shows no ascent, from any root, in any residual layer, can beat a
+   maximal packing, and §51 shows that re-pricing the recovered family helps the
+   first layer, hurts the composition, and does not pay for its simplex either
+   way. What is left is an object that prices something other than arc capacity.
+2. **A reduction for the dense regime.** §50 removed a scheduling loss, not a
+   mathematical one: instance161 still reduces only to 32,764 of 40,857 edges
+   inside five seconds while its fixpoint is 21,426. The next question is which
+   of the fixpoint's rounds is worth its clock, measured per rule.
+3. **A primal neighbourhood not bounded by treewidth.** §53 says the missing
+   1.4–4.8 % on 171–173, 189, 195, 196 is outside every width-11 ground set
+   around the incumbent, and that `grow_and_solve` accepts zero candidates on two
+   of them. That is a statement about the neighbourhood, not about the search
+   inside it.
+4. **A deterministic `2^w poly(w)` weighted join.** Open, with §35's obstruction
+   and now §52's two closed prunes.
+5. ~~Choosing the strongest first packing layer~~ — closed, §51.
+6. ~~`k`-restricted hypergraphic relaxation~~ — closed, §54.
+7. ~~Multi-root ascent, in any composition~~ — closed, §37 and §54.
+
+## 2026-08-02 (eleventh round): the Rehfeldt–Koch implication machinery, measured
+
+Same tree, same control (`7297bb4`), same eight-way parallelism on both sides.
+This round works through the mechanisms of *Implications, conflicts, and
+reductions for Steiner trees* that the ledger had listed only as names, and the
+outcome is four negative results, one derived-and-deferred theorem, and a
+correctness diagnosis that two failed repairs paid for.
+
+### 58. The implied profit, derived rather than transcribed
+
+The paper's implied profit is a node weight that makes a Steiner vertex behave
+partly like a terminal. `src/preprocessing/implied_profit.rs` derives it and the
+reduction it licenses from scratch, because the approximation implemented here is
+not the one the paper's algorithm computes and the correctness argument has to be
+the one this code actually makes.
+
+> **Lemma (implied profit).** Let `v` be a Steiner vertex, `t` a terminal,
+> `f = {v,t} ∈ E`, and `b(f)` the bottleneck distance between `v` and `t` in
+> `G − f`. Put `p+(v,f) := max(0, b(f) − c(f))`. If a Steiner tree `S` contains
+> `v` but not `f`, there is a Steiner tree `S'` with `c(S') <= c(S) − p+(v,f)`.
+>
+> *Proof.* `t ∈ V(S)` and `v ∈ V(S)`, so `S` holds a `v`–`t` path avoiding `f`,
+> whose largest edge `h` costs at least `b(f)`. `S + f` has one cycle, `h` is on
+> it, and `S + f − h` is a spanning tree of the same vertex set. ∎
+
+and the reduction, which is the paper's Theorem 2 restated for the label this
+implementation actually maintains:
+
+> **Theorem (profit-discounted deletion).** Seed `D[z] = c({v0,z})` on `N(v0)`
+> and relax along `g = {x,y}` by
+> `D[y] <- D[x] + c(g) − min(pi(x,g), D[x], c(g))`, where `pi(x,g)` is the best
+> implied profit at `x` over edges other than the walk's two, and `+infinity` at
+> a terminal. If `D[z] < c({v0,z})`, no minimum Steiner tree contains `{v0,z}`.
+
+The proof is in the module. Two things in it are worth repeating here because
+they are what makes the rule provable at all rather than merely plausible:
+
+- The clamp `mu <= D[x]` is not numerical hygiene. The telescoping step needs
+  `D[x_b] − D[x_a] + mu_a <= D[x_b]`, and that is exactly `mu_a <= D[x_a]`. It
+  pays for the profit of the one vertex on the reconnecting sub-walk that the
+  exchange argument is *not* entitled to spend, because that vertex is in the
+  tree already.
+- The clamp `mu <= c(g)` makes `D` non-decreasing, which is what makes the
+  relaxation a Dijkstra rather than a shortest-path problem with negative
+  weights.
+
+The rule **generalises what was already here**: with every profit zero it is
+"some path is shorter than the edge", and with `pi = +infinity` at terminals and
+zero elsewhere it is `D[y] = max(D[x], c(g))`, the bottleneck Steiner distance
+test of `preprocessing::bottleneck`. Positive finite profits interpolate.
+
+Gated by four tests: the exchange chain that the plain bottleneck test cannot
+see; exhaustive optimum-preservation against brute force over 500+ sparse random
+instances; the same over 300+ *dense* ones, because a rule aimed at high-degree
+graphs is not gated by sparse ones; and a direct check that the computed profit
+never exceeds `b(f) − c(f)` for the exactly-computed `b`.
+
+### 59. Negative result: implied-profit edge deletion adds nothing to this arsenal
+
+`src/bin/profit_probe.rs` reports, per instance, how many edges carry a positive
+implied profit, how large the largest is, and how many edges one sweep deletes.
+
+**Where the profits are.** Only spanning-tree edges joining a Steiner vertex to a
+terminal can carry one — the unrestricted bottleneck distance between an edge's
+own ends is at most its cost, so `b` must be computed in `G − f`, and by the
+cycle property a non-tree edge's `M`-path already witnesses `b(f) <= c(f)`. That
+is a few dozen candidates per instance, so `b(f)` is computed exactly by a
+minimax Dijkstra per candidate. (The classical replacement-edge bound
+`repl(f) = min{c(h) : h ∉ M, the M-path of h contains f}` was implemented first,
+is a valid lower bound on `b(f)`, and is far too weak: it is the replacement
+*edge*, while `b(f)` is the maximum along the replacement *path*.)
+
+**What they buy.** Nothing.
+
+| slice | instances | with positive profit | largest profit | edges deleted |
+|---|---|---|---|---|
+| Track 1 [155..200], reduced | 46 | 38 | 290 | **0** |
+| Track 2 failures, reduced (first 30) | 30 | 25 | 561,349 | **0** |
+
+Zero deletions on 76 reduced graphs. The profits are real, large, and everywhere;
+they never bridge the gap to an edge that survived the ordinary bottleneck test.
+On the raw graphs the sweep deletes only what the degree rules delete anyway (39
+parallel edges on instance161).
+
+The reason is structural and worth stating, because it also predicts where the
+mechanism *would* pay. After the fixpoint every surviving edge `e = {v,w}`
+already has `s(v,w) >= c(e)`. The implied version lowers `s` only along walks
+that pass a profitable vertex, and profitable vertices are Steiner vertices hung
+off a terminal by a spanning-tree edge — which `nearest_vertex` contraction and
+the degree rules have already dealt with, so they sit *beside* the walks that
+would need the discount rather than *on* them. The paper's own gains come from
+using `s_p` inside the **extended reduction** framework, where the walks are
+supplied by tree enumeration rather than by a single Dijkstra fan, and that
+framework is not implemented here.
+
+The module is kept — proved, tested, and not wired into the fixpoint, because a
+Dijkstra per vertex that deletes nothing is not worth a three-second budget. Its
+profit computation is the reusable part.
+
+### 60. Negative result: the implication-biased shortest-path heuristic
+
+The paper's cheapest recipe, and the one it reports as improving solution quality
+on more than 85 % of instances: bias the growth phase's distance label by the
+credit a Steiner vertex carries for terminals it is adjacent to and the tree has
+not yet reached,
+
+```text
+ptilde(v) := max over unconnected terminal neighbours w of max(0, alt(w,a) - c(a)),
+alt(w,a)  := min { c(a') : a' enters w, a' != a },
+d[u]      <- d[v] + c(a) - min(c(a), ptilde(v), d[v]),
+```
+
+with `alt` rather than `b(a)` for the two reasons the paper gives. It was
+implemented and A/B'd on the full matrix.
+
+| slice | shipped | with the bias |
+|---|---|---|
+| PACE Track 2 [1..200] @5 s | 113 | 112 |
+| PACE Track 1 [1..140] @3 s | 140 | 140 |
+| PACE Track 1 [155..200] @5 s | 28 | **27, and one wrong answer** |
+
+Reverted. Two things are worth recording beyond the counts.
+
+The incumbent it produces is not uniformly better or worse — instance196 improves
+(103 -> 102) while instance172 (7505 -> 7575) and instance173 (72 -> 73) get
+worse — which is what one expects of a re-weighting whose only justification is
+empirical, on a solver whose reduction loop consumes the incumbent rather than
+reporting it.
+
+And it exposed a correctness failure, which is the next section.
+
+### 61. What a worse incumbent exposed, and the check that now stands in the way
+
+With the bias, PACE Track 1's instance184 reported **`Optimal 3404` against a
+reference of 3399**. That is a gate failure, and the shape of it is precise: the
+heuristic left the incumbent at 3347 where the optimum is 3342 (both on the
+reduced scale, offset 57), the goal-directed search exhausted its queue below the
+3347 cutoff, and `finish` reported `primal = dual = root_upper_bound` — the
+incumbent, announced as proved.
+
+The reduction was cleared first, because it was the obvious suspect and it is
+innocent. `src/bin/cutoff_probe.rs` runs the classical reduction, then the
+tightening under a cutoff supplied on the command line, then solves both the
+before and after graphs exactly:
+
+```text
+classical: V=5903 E=11196 R=32 offset=57
+classical optimum: Some(3342.0) (+57)
+tightened under cutoff 3347: V=39 E=63 R=3 LB=469 UB=469 offset=2873 rounds=5
+reduced optimum: Some(469.0) + offset 2873
+INVARIANT HOLDS: 469 + 2873 = 3342 against classical optimum 3342
+```
+
+and the same at every truncated tightening deadline from 0.5 s to 1.6 s. A new
+randomised gate says the same in general:
+`a_loose_cutoff_still_leaves_the_optimum_in_the_graph` runs `tighten` with the
+cutoff set to `optimum + 1`, `+2` and `+5` and brute-forces the result, checking
+`reduced optimum + offset = optimum` — 200+ cases, all holding. The *default*
+configuration never tested this, because on graphs that small the heuristics find
+the optimum and the cutoff is always tight, which is exactly the regime in which
+a bound-based rule cannot be caught being wrong.
+
+So the number that has to be checked is the incumbent itself. Two versions of
+that check were written, **and both were wrong**; the section is kept in full
+because the way they were wrong is the useful part.
+
+**Version one** re-expanded the stored incumbent arcs into edges of the reduced
+graph, re-added their cost, re-derived their connectivity, and *discarded the
+bound* when there was no usable witness. That treats an absent witness as
+evidence against the bound, and it is not: `incumbent_arcs` is cleared whenever
+the graph shrinks under it, so its absence is the normal state after a productive
+round. It announced `UB = inf` on the one-vertex graphs the reduction had already
+solved outright and took PACE Track 1's instance080 and instance157 from proved
+to unproved.
+
+**Version two** kept the bound when there was no witness, and set the bound to
+the witness's own cost when there was one — in either direction. That is worse.
+It produced **three wrong answers** (instance080 at 1574 against 1571,
+instance157 at 1102 against 1098, SteinLib e04 at 5102 against 5101), because
+`incumbent_arcs` indexes the arcs of the directed graph *as it stood when the
+incumbent was found*, and after a shrink those indices can still connect the
+terminals while naming different edges. The check then "corrects" a perfectly
+good bound upwards to a fiction and the reduction proves the fiction.
+
+Both were removed. The lesson is exact and worth more than the check would have
+been: **a witness is only a witness while the numbering it is stated in is still
+the graph's**, and `Reduced::incumbent_arcs` carries no evidence that it is —
+only the convention that a shrink clears it, which the failure shows is not
+enough to re-derive a cost from. Any future version of this check has to
+re-validate the numbering, not just the connectivity.
+
+What *is* kept from the episode is the randomised gate above, which is
+independent of any of this, and the diagnosis: the reachable failure mode is
+`finish` reporting `primal = dual = root_upper_bound` on a bound whose witness it
+never sees. Closing that needs the incumbent to be carried as edges of the
+current graph rather than as arc indices of a past one, which is a change to what
+`Reduced` stores and not a check that can be bolted on afterwards. It is the top
+correctness item for the next session, with instance184 under the reverted
+heuristic as the reproduction.
+
+### 62. Proposition 8, derived to the point where it stops being new
+
+The paper's Proposition 8 bounds the weight of any Steiner tree that *strictly
+peripherally contains* a tree `Y` with pruning set `P`, using the LP's reduced-cost
+shortest-path distances:
+
+```text
+Ltilde + min_i max over distinct t_j of { dtilde(r, p_i) + sum_{j != i} dtilde(p_j, t_j) }.
+```
+
+The mechanism is that an arborescence is acyclic, so the `r → p_i` path and the
+`p_j → t_j` paths are pairwise arc-disjoint and their reduced costs add. Written
+out for the smallest `Y` this solver can supply without an enumeration — a
+Steiner vertex `v` with one in-arc and one out-arc — it says:
+
+> Let `S` be an inclusion-minimal arborescence containing a Steiner vertex `v`.
+> `v` is not a leaf, so it has an in-arc `(u,v)` and an out-arc `(v,w)` with
+> `u != w`, and below `w` there is a terminal. The `r → u` path, the two arcs and
+> the `w → terminal` path are pairwise arc-disjoint, so
+> `c(S) >= Ltilde + dtilde(r,u) + ctilde(u,v) + ctilde(v,w) + dtilde(w,T)`.
+
+That is **already implemented**, as `reduced_cost_fixings`: minimising the two
+halves independently is the same number, because
+`dtilde(r,v) = min_a (dtilde(r,u) + ctilde(a))` and
+`dtilde(v,T) = min_b (ctilde(b) + dtilde(w,T))`. The only strengthening the pair
+form adds is the constraint `u != w`, which excludes a two-cycle and is worth
+nothing.
+
+So Proposition 8's content is entirely in `|P| >= 3`, and `|P| >= 3` is supplied
+by the extended-reduction enumeration: `Y` is a tree the search has grown, and
+its pruning points are the leaves it has to reconnect. **The distinctness of the
+terminals is where the strength lives** — `k'` pruning points need `k'` distinct
+terminals, so the bound is a *matching* and not a sum of independent minima, and
+that is the part that has no counterpart in what is implemented.
+
+Conclusion, stated as a direction rather than a result: Proposition 8 is not a
+reduction that can be bolted onto this pipeline. It is a **subroutine of
+`RuleOutStrict`**, and it is worth exactly as much as the enumeration that feeds
+it. The order of work it implies is therefore the reverse of the one the
+mechanism list suggests: the extended-reduction framework (Algorithm 1, extension
+sets, depth-first extension from the farthest leaves) has to exist first, and
+Theorem 3 / Corollary 3 — contracted-distance pruning with an MST on the
+contracted distance network — are the criteria that make it pay, with
+Proposition 8 as one more test inside it.
+
+### 63. What was delivered this round, and what was not
+
+- **Implied profit `p+` and its reduction** — delivered in full: derived, proved,
+  four gates including a dense-graph generator, and **measured to add nothing**
+  on 76 reduced PACE graphs (§58, §59). Not wired into the fixpoint.
+- **Implication-biased SPH** — delivered, measured, **reverted** as a loss and a
+  correctness failure (§60).
+- **Incumbent verification in `tighten`** — attempted twice and **removed
+  twice**, the second attempt having produced three wrong answers of its own. The
+  randomised loose-cutoff invariant gate it motivated is kept, and so is the
+  diagnosis of what a correct version needs (§61).
+- **Proposition 8** — derived to its implementable special case, shown to
+  coincide with the reduced-cost fixing already present at `|P| = 2`, and
+  re-ranked as a subroutine of an enumeration that does not exist yet (§62).
+- **Not attempted**: replacement ancestry `Pi/Lambda`, conflict propagation and
+  clique cuts, path/edge replacement, the Extended-RuledOut recursion, Theorem 3
+  / Corollary 3, Proposition 7's pruned-tree bottlenecks. These are one coherent
+  piece of machinery and are the next session's subject; §62 says why they must
+  come as a piece rather than as separate tests.
+- **`s_p`-based contraction** — not attempted, and §59 predicts it will not fire
+  either: it needs the same profits on the same walks.
