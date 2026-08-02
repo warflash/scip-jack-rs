@@ -334,6 +334,35 @@ pub struct ReduceConfig {
     /// is unwitnessed, and the loop propagates that honestly rather than
     /// inventing evidence for it.
     pub initial_witness: Option<Witness>,
+    /// A lower bound already proved for the graph handed to [`tighten`].
+    ///
+    /// # Why a pass may not re-derive one it was given
+    ///
+    /// Elimination power is exactly `UB - LB`, and the loop's own `LB` is a dual
+    /// ascent, which on near-uniform costs saturates almost everything and is
+    /// degenerate. On PACE instance083 the ascent reaches 3,100,512 while the
+    /// root cut loop proves 3,100,519 against an incumbent of 3,100,541: the
+    /// gap the fixing runs at is 29 units or 22 depending only on which of the
+    /// two numbers the round starts from, and the second was computed and thrown
+    /// away — every pass restarted at zero and re-derived the weaker one.
+    ///
+    /// This is a bound only. It never enters `reduced_cost_fixings`, which needs
+    /// a bound and *its own* reduced costs; that pairing is what
+    /// [`ReduceConfig::initial_dual`] carries.
+    pub initial_lower_bound: Cost,
+    /// A certified dual of the cut relaxation for the graph handed to
+    /// [`tighten`], with its arc prices.
+    ///
+    /// Used as one more root in the elimination, under the same union rule as
+    /// every other root: the undirected conclusion only. See
+    /// [`crate::model::ArcDual`] for the pricing proposition, and this module's
+    /// header for why the arc-level fixings of two roots may not be unioned.
+    ///
+    /// It is stated in the arc numbering of `DirectedGraph::from_undirected` on
+    /// the graph handed in, and is used only while that graph is unchanged —
+    /// the first round. Afterwards the eliminations have renumbered everything
+    /// and the vector no longer names the arcs it was computed for.
+    pub initial_dual: Option<crate::model::ArcDual>,
     pub deadline: Option<Instant>,
     pub verbose: bool,
 }
@@ -347,6 +376,8 @@ impl Default for ReduceConfig {
             ils_iterations: 400,
             initial_upper_bound: Cost::INFINITY,
             initial_witness: None,
+            initial_lower_bound: 0.0,
+            initial_dual: None,
             deadline: None,
             verbose: false,
         }
@@ -375,7 +406,9 @@ pub fn tighten(
 ) -> Reduced {
     let mut graph = graph;
     let mut terminals = terminals;
-    let mut lower_bound: Cost = 0.0;
+    // A bound the caller has already proved for this graph. A pass that inherits
+    // one must not re-derive a weaker one; see [`ReduceConfig::initial_lower_bound`].
+    let mut lower_bound: Cost = config.initial_lower_bound.max(0.0);
     let mut upper_bound = config.initial_upper_bound;
     let mut certificate: Option<DualAscentResult> = None;
     let mut incumbent_arcs: Option<Vec<u32>> = None;
@@ -433,7 +466,16 @@ pub fn tighten(
             break;
         }
 
-        let outcome = round(&graph, &terminals, config, upper_bound, lower_bound);
+        // The supplied dual names the arcs of the graph handed in, so it applies
+        // to the first round and to no later one: by the second round the
+        // eliminations have deleted and renumbered, and a vector indexed by the
+        // old arc ids would price the wrong arcs. `applies` is an equality on the
+        // arc count *and* on the round index, not a heuristic.
+        let supplied_dual = config
+            .initial_dual
+            .as_ref()
+            .filter(|d| r == 0 && d.reduced.len() == 2 * graph.edges.len());
+        let outcome = round(&graph, &terminals, config, upper_bound, lower_bound, supplied_dual);
 
         // With integral costs every tree costs an integer, so a fractional dual
         // bound can be lifted to the next one.
@@ -613,12 +655,14 @@ struct RoundOutcome {
 }
 
 /// One ascent/heuristic/elimination pass over a fixed graph.
+#[allow(clippy::too_many_arguments)]
 fn round(
     graph: &UndirectedGraph,
     terminals: &[NodeId],
     config: &ReduceConfig,
     incoming_ub: Cost,
     incoming_lb: Cost,
+    supplied_dual: Option<&crate::model::ArcDual>,
 ) -> RoundOutcome {
     let directed = DirectedGraph::from_undirected(graph);
     let idx = ArcIndex::new(&directed);
@@ -737,6 +781,42 @@ fn round(
             }
         }
         ascents.push((r, da));
+    }
+
+    // The supplied certified dual, as one more root.
+    //
+    // It is *not* an ascent and does not pretend to be: `steps` is empty, so
+    // `verify_certificate` would have nothing to replay. What the elimination
+    // needs is only what [`crate::model::ArcDual`]'s proposition delivers — a
+    // valid bound together with non-negative arc prices that any minimal
+    // arborescence pays on top of it — and that is what is packed here. The
+    // union rule is unchanged: this root contributes the undirected conclusion
+    // only, exactly like every other.
+    if let Some(d) = supplied_dual {
+        if d.reduced.len() == num_arcs {
+            let synthetic = DualAscentResult {
+                lower_bound: d.value,
+                reduced_costs: d.reduced.clone(),
+                root: d.root,
+                steps: Vec::new(),
+                cuts: Vec::new(),
+                sets: Vec::new(),
+            };
+            if config.verbose {
+                eprintln!(
+                    "[reduce] supplied dual {:.1} against the round's own ascent {:.1},                      cutoff {:.1}: gap {:.1} -> {:.1}",
+                    d.value,
+                    lower_bound,
+                    incoming_ub,
+                    incoming_ub - lower_bound,
+                    incoming_ub - d.value.max(lower_bound)
+                );
+            }
+            if d.value > lower_bound {
+                lower_bound = d.value;
+            }
+            ascents.push((d.root, synthetic));
+        }
     }
 
     // Iterated local search from the best tree anyone found, guided or not.
@@ -1304,6 +1384,122 @@ mod tests {
             }
         }
         assert!(checked > 200, "only {checked} cases were exercised");
+    }
+
+    /// The same invariant, with a **supplied lower bound and a supplied dual**.
+    ///
+    /// The dual is a real one: the root cut loop is run on the same graph and its
+    /// certified arc pricing handed to `tighten`, so the test exercises the
+    /// object the pipeline actually passes and not a hand-made stand-in. Three
+    /// things are asserted at three cutoff slacks:
+    ///
+    /// - `reduced optimum + offset == original optimum` — the eliminations the
+    ///   stronger dual licenses must still leave an optimum in the graph, and a
+    ///   *loose* cutoff is the case that can catch a bound-based rule being
+    ///   wrong, since a tight one leaves nothing to delete;
+    /// - the reported lower bound never exceeds the optimum;
+    /// - a supplied bound is never *lost*: the loop reports at least what it was
+    ///   handed, which is the defect `initial_lower_bound` exists to fix.
+    #[test]
+    fn a_supplied_dual_and_lower_bound_still_leave_the_optimum_in_the_graph() {
+        use crate::model::RootSeparation;
+        let mut seed = 0x51DE_51DE_9999_0007u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut checked = 0;
+        let mut with_dual = 0;
+        for case in 0..260 {
+            let n = 5 + (rng() % 5) as u32;
+            let mut g = UndirectedGraph::new(n);
+            let k = 2 + (rng() % 3) as u32;
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = v <= k;
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            let mut edges = Vec::new();
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 3 != 0 {
+                        let c = if case % 3 == 0 { 1.0 } else { 1.0 + (rng() % 9) as f64 };
+                        g.add_edge(u, v, c);
+                        edges.push((u, v, c));
+                    }
+                }
+            }
+            let Some(opt) = brute_force(n, &edges, &terminals) else { continue };
+
+            // A genuine certified dual for this graph, from the loop the
+            // pipeline uses.
+            let directed = DirectedGraph::from_undirected(&g);
+            let mut sep = RootSeparation::new(&directed, terminals[0], &terminals);
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            let dual = sep
+                .advance(Cost::INFINITY, deadline, 60, 1 << 20)
+                .and_then(|c| c.arc_dual);
+            if let Some(d) = &dual {
+                assert!(
+                    d.value <= opt + 1e-6,
+                    "case {case}: certified dual {} exceeds the optimum {opt}",
+                    d.value
+                );
+                assert!(
+                    d.reduced.iter().all(|&r| r >= 0.0),
+                    "case {case}: a negative arc price reached the reduction"
+                );
+                with_dual += 1;
+            }
+
+            for slack in [1.0, 2.0, 5.0] {
+                let cfg = ReduceConfig {
+                    initial_upper_bound: opt + slack,
+                    initial_lower_bound: dual.as_ref().map_or(0.0, |d| d.value),
+                    initial_dual: dual.clone(),
+                    ..ReduceConfig::default()
+                };
+                let out = tighten(g.clone(), terminals.clone(), &cfg);
+                let red_edges: Vec<(NodeId, NodeId, Cost)> =
+                    out.graph.edges.iter().map(|e| (e.src, e.dst, e.cost)).collect();
+                let max_id = out.graph.nodes.iter().map(|x| x.id).max().unwrap_or(0);
+                let Some(red_opt) = brute_force(max_id, &red_edges, &out.terminals) else {
+                    continue;
+                };
+                assert!(
+                    (red_opt + out.offset - opt).abs() < 1e-6,
+                    "case {case}: reduced optimum {red_opt} + offset {} != optimum {opt} \
+                     at cutoff {} under a supplied dual",
+                    out.offset,
+                    opt + slack
+                );
+                assert!(
+                    out.lower_bound <= opt + 1e-6,
+                    "case {case}: LB {} > optimum {opt}",
+                    out.lower_bound
+                );
+                if let Some(d) = &dual {
+                    // The bound handed in must never be thrown away. `tighten`
+                    // restates its bound for the graph it ends on, so the
+                    // comparison is against `lower_bound + offset`.
+                    assert!(
+                        out.lower_bound + out.offset >= d.value - 1e-6,
+                        "case {case}: supplied bound {} lost, loop reports {} + {}",
+                        d.value,
+                        out.lower_bound,
+                        out.offset
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 150, "only {checked} cases were exercised");
+        assert!(with_dual > 40, "only {with_dual} cases actually carried a dual");
     }
 
     /// A bound with no tree behind it is never announced as achieved.

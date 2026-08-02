@@ -1384,9 +1384,11 @@ impl BranchAndCutSolver {
 /// Hand the LP the time it actually has left, so one hard solve cannot overrun
 /// the whole budget while the cut loop waits to check the clock between solves.
 fn arm(lp: &mut LpRelaxation, deadline: Option<Instant>) {
-    lp.time_limit_secs = deadline
-        .map(|d| d.saturating_duration_since(Instant::now()).as_secs_f64())
-        .unwrap_or(f64::INFINITY);
+    lp.arm_time_limit(
+        deadline
+            .map(|d| d.saturating_duration_since(Instant::now()).as_secs_f64())
+            .unwrap_or(f64::INFINITY),
+    );
 }
 
 enum NodeResult {

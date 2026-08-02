@@ -3801,3 +3801,433 @@ reflects the source before drawing a conclusion from it — particularly when th
 conclusion is "the mathematics is wrong". An hour of this round went into
 bisecting a fault that had already been fixed, against a copy that predated the
 fix.
+
+## 2026-08-03 (thirteenth round): the relaxation already knows the answer
+
+### 74. The control, and a harness that stopped lying about noise
+
+`tmp/r13/control.exe` is HEAD (`f8f191f`), built `--release --all-targets` before
+any algorithmic change and never rebuilt. 178 library tests at the start, 182 at
+the end; `cargo check --all-targets` clean; every binary builds — ten probes in
+`src/bin` plus `scip-jack` itself, the new one being `src/bin/lpstar_probe.rs`.
+
+**The first measurement of the round was about the measurement.** Three
+whole-matrix control passes on this machine gave PACE Track 2 **112, 115, 115**
+and Track 1's tail **26, 27, 28**. That spread is larger than the "about two
+proofs a slice" the notes have carried, and it is not a property of the code:
+Track 2 has a cluster of instances that finish between 3.2 s and 4.0 s of a 5 s
+budget — 058 at 3.3, 059 at 3.2, 075 at 2.7, 129 at 3.5, 194 at 3.7 — and which
+of them crosses the line is decided by machine state. An unpaired A/B of two
+builds four proofs apart is therefore not evidence of anything.
+
+`tmp/r13/ab.sh` is the repair: **both binaries run back to back inside the same
+worker slot**, so the two sides see the same contention on the same instance.
+Every A/B below is reported both ways — unpaired ranges over whole matrix passes,
+and the paired difference — and where they disagree the paired one is the one
+that means something. Two separate efforts this round went into chasing
+regressions that the paired harness shows do not exist.
+
+### 75. Item 0's question, answered: `LP*` is the optimum on almost all of the group the search can address
+
+`lpstar_probe` runs the root separation loop to **convergence** with no clock
+limit and reports the value. Convergence is not a heuristic stopping point:
+
+> Let `z` be the optimum over the rows in the model, attained at `y*`. The model
+> is a relaxation of the full cut formulation, so `z <= LP*`. If no separator
+> finds a violated row then `y*` is feasible for the full formulation, so
+> `z >= LP*`. Hence `z = LP*`. ∎
+
+The connectivity separator is a max flow per terminal, so it is exact, and a
+converged connectivity-only loop has solved the model's own relaxation. The probe
+reports that value and, separately, the value after the cycle, partition and
+terminal-free families are also exhausted — a strictly stronger relaxation and
+therefore a different number.
+
+Run on the **37** instances of the failure set that the goal-directed search can
+address (reduced `|R| <= 64`; the notes' 41 on a machine where the control proved
+fewer), at a 100 s cap each:
+
+| | count | reading |
+|---|---|---|
+| converged, `LP* = OPT` | **12** | exactly, to the last unit |
+| converged, `LP* < OPT` | **2** | instance070 at 0.863, instance195 at 0.970 |
+| not converged, bound already `>= 0.999997 * OPT` | **13** | `LP*` is boxed within a few units of `OPT` |
+| not converged, bound below that | **10** | nothing is known; all are Track 1's dense tail |
+
+Split by track, which is where the conclusion lives:
+
+- **Track 2, 22 instances: 21 of 22 have `LP* = OPT`** to within a few units on a
+  base of several million, and every converged one is *exactly* `OPT` —
+  083 `3,200,554`, 130 `3,600,596`, 142 `3,000,526`, 143 `4,500,728`,
+  146 `4,100,695`, 149 `5,301,351`, 164 `3,100,526`, 170 `6,102,210`,
+  172 `6,900,841`, 181 `5,801,466`, 182 `5,602,299`, 188 `3,600,610`. The one
+  exception is **instance070**, unit costs throughout, `LP* = 63` against
+  `OPT = 73` — a 15.9 % integrality gap, above the bidirected cut relaxation's
+  known `8/7` lower bound and consistent with it.
+- **Track 1's tail, 15 instances:** mixed. 188 and 190 reach `OPT`; 195 converges
+  at `52.4` against `54`, a genuine 3 % ceiling; 161–165, 171–173, 189 and 196
+  manage 3 to 148 solves in 100 s and are not converged, so their `LP*` is
+  unknown and only bracketed below by 0.960–0.997 of `OPT`.
+
+**This decides the round's weighting and it was re-ordered on it, as item 0
+instructed.** On the group the search can address, the remaining gap is an
+*extraction* problem: the relaxation holds the answer and the solver cannot get
+it out inside five seconds. Items 1–3 are the round. Item 4 keeps its place for
+the instances the search cannot address at all, and the two unit-cost exceptions
+(070, 195) are the only members of the group for which a *stronger relaxation* is
+the answer.
+
+### 76. Item 1, part one: the cut LP was not being solved because the simplex stalls
+
+The trace `lpstar_probe` emits splits a round into simplex, connectivity
+separation, the other three separators, the dual harvest, and the residue. On
+instance083 at a 30 s cap the answer was blunt: 65 rounds costing 16.5 s in
+total, then **one solve that consumed every remaining second**. At a 120 s cap
+the same solve consumed 105. It is not a slow round; it is a single dual simplex
+re-solve on a 1,248-column, 3,600-row model that does not terminate.
+
+**Why.** instance142 has 118 edges of cost 100,000 among 724, the rest costing 1
+to 47, and its optimum is `30 * 100,000 + 526`. The relaxation has to resolve a
+526-unit structure inside a 3,000,000-unit objective and is massively degenerate
+at that scale. A sweep of HiGHS settings on it — primal simplex, two scaling
+strategies, Dantzig pricing on either side — moved nothing: 25 to 47 solves in
+20 s, no convergence, in every variant. **Interior point without crossover
+converged**, in 82 solves, at `3,000,526.0`, which is exactly the optimum.
+
+| instance | simplex | interior point |
+|---|---|---|
+| 083 | 66 solves, stalls, 3,200,553.1 | 93 solves, **converged**, 3,200,554.0 |
+| 130 | 28 solves, stalls, 3,600,591.9 | 79 solves, **converged**, 3,600,596.0 |
+| 142 | 45 solves, stalls, 3,000,522.2 | 82 solves, 3,000,526.0 |
+| 164 | 39 solves, stalls, 3,100,524.3 | 83 solves, **converged**, 3,100,526.0 |
+| 070 | 139 solves, converged, 63.0 | 63 solves, converged, 63.0 |
+
+`LpMethod` makes the algorithm a per-model choice. The branch-and-cut keeps the
+simplex, whose warm start is worth more when the model changes by a handful of
+rows per node.
+
+### 77. Item 1, part two: a bound nothing has to be trusted for
+
+Interior point without crossover returns a non-basic point whose duals are
+approximately optimal, and the loop was reporting HiGHS's own objective as a dual
+bound and using its reduced costs to delete arcs. Neither is acceptable on a
+number that becomes a claim of optimality. `LpRelaxation::certified_dual_bound`
+replaces both:
+
+> **Proposition (certified dual bound).** For `min { c'x : lo <= Ax <= hi,
+> l <= x <= u }` and an arbitrary `lambda` with `lambda_r = 0` wherever the bound
+> it would be priced against is infinite, put `d = c - A' lambda` and
+> `L(lambda) = sum_r [lambda_r > 0 ? lambda_r lo_r : lambda_r hi_r]
+> + sum_j [d_j > 0 ? d_j l_j : d_j u_j]`. Then `L(lambda) <= c'x` for every
+> feasible `x`.
+>
+> *Proof.* `c'x = d'x + lambda'(Ax)`; term by term
+> `d_j x_j >= min(d_j l_j, d_j u_j)` and
+> `lambda_r (Ax)_r >= min(lambda_r lo_r, lambda_r hi_r)`. ∎
+
+The hypotheses are discharged by construction, not assumed: a multiplier that
+would be priced against an infinite bound is **clamped to zero** and `d` is
+recomputed from the clamped vector, so `c = d + A'lambda` holds exactly as
+computed. Both sign conventions are evaluated and the larger kept, which removes
+the last thing that had to be believed about the backend. At an optimal basis
+`L(lambda)` *is* the LP optimum — measured: on instance117 the certified value
+and HiGHS's objective agree to the digit, `3,901,299.5`.
+
+The elimination rule is restated over the same pair, and the pair is matched by
+construction rather than by convention: `L(lambda) + d_a > UB` deletes `a`, with
+`L` and `d` from one `lambda`.
+
+**The assertion item 1 asked for, and what it caught.** The loop reported
+`3,100,510` on instance083 while the reduction held `3,100,512` — a dual ascent
+from a *different root*. The model is built at `terminals[0]` and its ascent is
+weaker than the best root's. The repair is a floor:
+
+> **Proposition (root-free floor).** A dual ascent from any root `r` is a feasible
+> cut packing for `r`, and the packing bound does not mention which terminal was
+> called the root, so `max_r asc(r)` is a valid lower bound on the instance.
+
+The floor enters `best_bound` and **never** the fixing rule, where `obj` must be
+a bound for the model the reduced costs came from.
+`the_reported_bound_never_falls_below_an_ascent_the_loop_holds` gates it.
+
+### 78. Item 1, part three: the clock that strangled its own loop
+
+Two bugs in one place, both found by measurement rather than by reading.
+
+- HiGHS's `time_limit` is compared against a clock that **accumulates over every
+  `run()` on one model**, and the loop was stating it against its *global* solve
+  time. A pruning rebuild creates a new model whose clock restarts at zero, so
+  every model built after a rebuild was over-granted by exactly what the previous
+  models had spent. `model_solve_secs` is now per model and reset by `rebuild`.
+- The arming rule only ever *lowered* the limit. With the loop granting a
+  doubling sequence of batches (§79), an option armed at 0.26 s during the first
+  batch left the third batch's solves 0.06 s on a model that had already consumed
+  0.20 s. Every one of them returned non-optimal, the loop read that as "this
+  algorithm cannot solve this model", switched, and instance083's packing stopped
+  improving after four solves. `LpRelaxation::arm_time_limit` states the limit
+  once per *call*, which is also what keeps the warm start: HiGHS treats an
+  option assignment as a model event and drops the simplex state.
+
+A solve that returns an unusable status now causes the other algorithm to be
+tried, once, before the round is abandoned — a measured event, not a label. A
+refused solve yields no multipliers, contributes nothing to the bound and
+installs no rows, so refusing can never change an answer.
+
+**And the method is chosen by measurement, not by fiat.** Shipping interior point
+unconditionally was implemented and A/B'd and is **worse**: Track 2 falls to 107
+and 109 against a control of 115, because on instance117 the simplex gets six
+solves and `floor + 8.5` in the budget where the interior point gets three and
+lands *below* the floor. Neither algorithm dominates, so the loop asks the model:
+
+> A call that solved LPs and still reports exactly the ascent floor has produced
+> nothing the loop did not already have for free. Switch algorithms — at most
+> once, so the two cannot alternate.
+
+| instance | simplex, first increment | interior point, same budget |
+|---|---|---|
+| 083 | 4 solves, 3,100,510 — **below** the floor | 3 solves, 3,100,515.5, 788 sets |
+| 144 | 2 solves, 3,400,369.5 — **below** the floor | 2 solves, 3,400,372.0, 744 sets |
+| 117 | 6 solves, floor + 8.5 | 3 solves, below the floor |
+
+One property is given up and is recorded rather than glossed: §48's resumed loop
+still installs the *same rows* and reaches the *same converged value* as a fresh
+one, but no longer necessarily the same number of LPs, because the switch is an
+end-of-call decision and a loop resumed a round at a time reaches that test more
+often. `a_resumed_loop_matches_a_fresh_loop_at_convergence` asserts the value and
+the row set, and states why the count was dropped.
+
+### 79. Item 2: funding the sequence, not the step
+
+Two things were wrong with the old rule and both are corrected by stating an
+existing test over the right quantity.
+
+**The horizon.** The repayment test charged an increment against what was left of
+the current *window*. The investment is a packing, and a packing outlives the
+window that bought it — it stays installed for the rest of the call, the pass and
+every later pass, because the search and the separation loop are both resumed
+rather than rebuilt. That is charging a durable good at the rental price, and it
+is what refused the increment that opens instance083: three tenths of a second of
+separation **doubled** the frontier's rate, 24.3 to 45.3 units a second, and the
+test declined it because 0.19 s remained in the window while 1.9 s remained in
+the solve. The horizon is now the solver's own remaining budget. This removes a
+fraction; it does not add one.
+
+**The sequence.** The measured curve is superlinear at its start — each LP second
+roughly halves the search's labels — so no single step ever looks worthwhile and
+the fifth closes the instance. The batch therefore **doubles**: the first is
+unchanged from the control, deliberately, so that what is measured is the
+sequence and not a resizing of its first term. Two properties make that a
+schedule rather than a dial: it reaches any budget in a logarithmic number of
+fundings, so the superlinear part is actually visited, and the total spent when a
+batch is refused is at most twice the useful part, the batches being a geometric
+series.
+
+**And a projection that can see the end of the sequence.**
+`separation_route_is_worth_continuing` calibrates two things on the batches this
+call has already funded — the separation's rate `dp/ds`, and the search's
+response, modelled as `rate(p) = rate_0 e^{beta (p - p_0)}` because a constant
+*factor* per unit of packing is the shape the measured table has — and then walks
+the batches the doubling schedule would buy, asking whether any of them leaves
+enough time for the search the projection implies. It refuses only, it returns
+"keep funding" whenever it cannot see far enough to refuse, and by the
+proposition on `potential_will_not_close` the search's completed answer does not
+depend on which packings it was given.
+
+On instance083 the loop now climbs `3,100,512 -> 3,100,517.9 -> 3,100,519.5` and
+the instance is proved at `3,200,554`.
+
+**Measured, paired, control against items 1+2 on Track 2: 111 -> 115, with zero
+losses.** Track 1 and all four SteinLib slices unchanged.
+
+### 80. Item 3: the strong dual reaches the reduction, and deletes nothing
+
+Delivered as a mechanism, and the mechanism is exactly what item 3 specified.
+
+> **Proposition (certified arc pricing).** Let `A` be an inclusion-minimal
+> arborescence rooted at `root` spanning the terminals, and let `(L, d)` be a
+> certified dual with `d >= 0` on the arc columns. Then
+> `c(A) >= L + sum_{a in A} d_a`.
+>
+> *Proof.* `A` is feasible for the model — the root has no in-arc and every other
+> vertex of `A` exactly one; `s` is one on `A`'s vertices and zero elsewhere,
+> which satisfies the in-degree equalities, the coupling rows and the cardinality
+> row `|A| = |V(A)| - 1`; a minimal arborescence has no Steiner leaf, so flow
+> balance holds; no edge is used in both orientations. Then `c'x - L(lambda)` is
+> a sum of non-negative brackets, and dropping all but the arc columns of `A`,
+> whose bracket is `max(d_a, 0)`, gives the claim. ∎
+
+That is precisely the hypothesis the strengthened fixing needs, so its argument
+transfers verbatim: an arborescence through `a = (u,w)` also contains a
+root-to-`u` path and a path from `w` down to a terminal, pairwise arc-disjoint
+because `w`'s only in-arc is `a`, hence
+`c(A) >= L + d_r(root,u) + d_a + d_r(w,T)`. The conclusion is root-specific
+exactly as an ascent's is, so the module header's union rule applies unchanged:
+one root's conclusions may be unioned at the arc level, two roots' may not, and an
+edge dies only when both orientations do.
+
+Three deliveries:
+
+1. `ReduceConfig::initial_lower_bound` — a pass that inherits a proved bound no
+   longer restarts at zero.
+2. `ReduceConfig::initial_dual` — the certified dual as one more root in
+   `round`'s elimination, applied only while the graph it names is unchanged
+   (the first round), because by the second the eliminations have renumbered
+   everything.
+3. The same strengthened fixing applied *where the dual is produced*, in the
+   certify step, at the cost of one arc index and two Dijkstras per certificate.
+
+**Gates.** `a_supplied_dual_and_lower_bound_still_leave_the_optimum_in_the_graph`:
+260 random graphs including a unit-cost third, each handed a **real** certified
+dual produced by `RootSeparation` on the same graph, at three cutoff slacks,
+asserting `reduced optimum + offset == original optimum`, that the reported bound
+never exceeds the optimum, and that a supplied bound is never lost. The loose
+cutoff is the case that can catch a bound-based rule being wrong; a tight one
+leaves nothing to delete.
+`the_certified_dual_bounds_the_optimum_and_never_fixes_it_away` adds the direct
+test of the strict inequality: 220 graphs with Dreyfus-Wagner as the oracle, `UB`
+set to `OPT`, asserting that **no arc of an optimal tree is ever eliminated**, and
+failing if the fixing rule was never reached at all.
+
+**And it deletes nothing on this benchmark.** Measured on every unproved Track 2
+instance and on Track 1's tail: `edges N -> N` in every certify line, on 083,
+130, 142, 148, 164, 070, 171, 172, 195, 196. The reason is §50's and it is
+arithmetic. On the large-cost family the gap `UB - LB` is twenty to forty units
+on a base of three million while arc costs are 100,000, and the certified arc
+prices are near zero because the dual is nearly degenerate; on Track 1's 172 the
+LP improves the bound hugely — 6,681 to 7,054 — and the gap is still 450 against
+edge costs of a few units. The strengthened form adds path distances which are
+also near zero for the same reason.
+
+The second route — a whole extra tightening pass fed the dual — fires **zero**
+times on forty unproved Track 2 instances, and the trace says why: the fixpoint
+is reused unless the dual is *stronger* than the bound it converged under, and at
+the end of pass 0 the LP dual is at or below the reduction's best-root ascent on
+every instance that did not already prove. Relaxing the reuse test to fire on an
+equal-valued dual was not measured, because §50 and §68 both say `tighten` deletes
+nothing on that set and the pass costs 35 % of the remaining budget.
+
+Paired A/B, items 1+2 against items 1+2+3 on Track 2: **115 against 115**. The
+mechanism is proved, gated, cheap and inert on this benchmark. It is shipped
+anyway, because it is correct, costs nothing measurable, and the failure mode it
+addresses — a large gap with informative arc prices — is a property of an instance
+and not of a benchmark family.
+
+### 81. Item 4: the measurement that was supposed to size it cannot
+
+Item 4 asks first for the distribution of (our width − best known width) on the
+refused set. Run on the 63 Track 2 instances with more than 64 terminals that the
+control does not prove, with the four-ordering portfolio as the upper bound and
+`treewidth_lower_bound` — the MMD+ contraction bound already in the repository —
+as the lower:
+
+| gap | 0 | 2 | 3 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 15 | 16 | 17 | 19 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| count | 1 | 1 | 1 | 3 | 9 | 7 | 5 | 3 | 7 | 5 | 1 | 6 | 2 | 1 | 2 | 1 |
+
+Mean bracket **9.16**, from 0 to 19, with 55 of 58 completed instances yielding a
+heuristic width at all (three exceed the probe's cap of 24).
+
+**That is a negative result about the instrument, and it is the honest reading.**
+A bracket of nine says nothing about how far our heuristic is from the truth: the
+true treewidth is somewhere inside it, and `3^b` over nine is a factor of twenty
+thousand, so the bracket spans the entire question. MMD+ is a weak lower bound —
+a single contraction sequence — and the portfolio is a greedy elimination
+heuristic. Sizing item 4 needs one of the two ends tightened: an LBN/LBP-style
+contraction bound with neighbourhood improvement, or a genuinely strong upper
+bound (simulated annealing over eliminations, or one of the exact PACE-2017
+treewidth solvers as an oracle on the small end). Building either is the next step
+and it was not taken this round.
+
+Nothing was built for the safe-separator decomposition or the output-sensitive
+join. That is a **session-budget decision and not a closed direction**: §52's
+derivation stands, §65–§66's arithmetic stands, and the width census above says
+only that the first question item 4 poses is still open, not that it is answered.
+
+### 82. The final matrix
+
+Three control passes and two shipped passes, eight-way parallel, plus the paired
+harness of §74 which is the comparison that carries the signal.
+
+| slice | control (`f8f191f`) | shipped |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 140, 140, 140 | 140, 140 |
+| PACE Track 1 [155..200] @5 s | 26, 27, 28 | 26, 28 |
+| PACE Track 2 [1..200] @5 s | 112, 115, 115 | 113, 113 |
+| SteinLib B @5 s | 18/18 | 18/18 |
+| SteinLib C @5 s | 20/20 | 20/20 |
+| SteinLib D @5 s | 20/20 | 20/20 |
+| SteinLib E @20 s | 19/20 | 19/20 |
+
+Paired, both binaries in the same worker slot on the same instance:
+
+| slice | control | shipped | only control | only shipped |
+|---|---|---|---|---|
+| Track 2, run 1 | 112 | **116** | — | 083, 120, 129, 144 |
+| Track 2, run 2 | 113 | **117** | — | 075, 083, 120, 144 |
+| Track 1 [1..140], run 1 | 140 | 139 | 086 | — |
+| Track 1 [1..140], run 2 | 140 | 140 | — | — |
+| Track 1 [155..200] | 27 | 28 | — | 188 |
+| SteinLib B/C/D/E | 18/20/20/19 | 18/20/20/19 | — | — |
+
+**+4 on Track 2 in both paired runs, with zero losses in either.** instance086 is
+the one instance that ever appears on the control's side and it finishes in 2.42 s
+against a 3 s limit under both binaries when run alone; the second paired pass has
+it on neither side.
+
+**No instance reports a value differing from its reference under an `Optimal`
+status, in any slice of any run, on either side.**
+
+### 83. What was delivered, and what was not
+
+**Item 0 — delivered in full.** The control was frozen before any algorithmic
+change. Three control passes and two shipped passes of the whole matrix, plus a
+new paired harness that removes the between-run component of a noise band the
+notes had been under-reporting by a factor of two. `cargo check --all-targets`
+clean, every binary builds (ten probes plus the solver), 182 library tests. The decisive question is
+answered with a per-instance table (§75) and the items were re-ordered on it.
+
+**Item 1 — delivered in full.** The loop was not being solved and the cause was
+found by instrumenting rather than guessing: one dual simplex re-solve consuming
+105 seconds on a 1,248-column model, on the wide-cost-range instances this
+benchmark is full of. Interior point solves them and reaches exactly `OPT`. The
+method is chosen per model by a measured test rather than assumed, because the
+unconditional version is a six-proof loss. Two real bugs in the LP clock are
+fixed. The reported bound is certified from its own multipliers and repaired by
+clamping, the elimination rule is restated over the matched pair, and the loop can
+no longer report below a dual it holds.
+
+**Item 2 — delivered in full.** The horizon corrected to the investment's actual
+lifetime, the batch made a doubling sequence with the first term unchanged, and a
+projection that calibrates the search's response to the packing on this instance
+in this pass. Paired, +4 on Track 2 with no losses.
+
+**Item 3 — delivered in full as a mechanism, measured as inert.** The pricing
+proposition is proved and the strengthened fixing transfers to it verbatim.
+`initial_lower_bound` and `initial_dual` exist, the certificate carries an
+`ArcDual`, and the fixing runs where the dual is produced. Two exhaustive gates,
+one of them handing the reduction a *real* certified dual and checking that the
+optimum survives at three cutoff slacks. It deletes nothing on any instance of
+this benchmark, for the arithmetic reason §50 gives, and that is reported as a
+measurement and not as a defect.
+
+**Item 4 — attempted, and the first question is now known to be unanswerable with
+the instrument in the repository.** The width bracket is 9.16 wide on average.
+Building a stronger lower bound or a stronger heuristic is the next step and was
+not taken: a session-budget decision, and the mathematics of §52 and §65–§66 is
+unrevised.
+
+**Item 5 — not attempted.** A session-budget decision. The extended reduction's
+dispatch and Track 1's primal both stand exactly where §72 and §53 left them, and
+§75 adds one relevant fact to the second: instance195's relaxation converges at
+`52.4` against an optimum of `54`, so on that instance the missing three per cent
+is a genuine integrality gap and not a neighbourhood the recombination failed to
+reach.
+
+**One thing worth carrying forward.** The interior point's dual is a *better
+packing source* than a basic one, independently of its value: on instance083 it
+yields 788 sets against the simplex's 263 at a similar root value, and on
+instance144 744 against 308. A basic optimal dual concentrates its weight on a
+basis; an interior one spreads it over the optimal face. The A* potential is a
+pointwise maximum over sets, so more sets is a stronger potential *at every
+state* even when the root value is the same. That is a property of the algorithm
+rather than of the instance and nothing in the notes had noticed it.

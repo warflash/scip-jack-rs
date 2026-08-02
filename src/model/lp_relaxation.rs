@@ -39,6 +39,22 @@ struct CutRow {
 /// A cut is considered slack when its activity is this far from the binding side.
 const SLACK_EPS: f64 = 1e-6;
 
+/// A lower bound on an LP's optimum together with the reduced costs it was
+/// derived from. See [`LpRelaxation::certified_dual_bound`] for the proposition
+/// that makes both usable without trusting the backend.
+///
+/// The pair is produced together and must be used together: `value` and
+/// `reduced` come from the same multiplier vector, and the elimination rule
+/// `value + reduced[a] > UB` is sound only for a matched pair.
+#[derive(Debug, Clone)]
+pub struct CertifiedDual {
+    /// `L(lambda)`, a valid lower bound on the LP optimum for any feasible
+    /// point, whatever the solver reported.
+    pub value: f64,
+    /// `d = c - A' lambda`, one entry per column of the model.
+    pub reduced: Vec<f64>,
+}
+
 pub struct LpRelaxation {
     pub num_vars: u32,
     pub objective: Vec<Cost>,
@@ -53,6 +69,10 @@ pub struct LpRelaxation {
     pub solve_count: u64,
     pub base_constraint_count: usize,
     pub solve_time_secs: f64,
+    /// Seconds spent inside `run()` on the *current* HiGHS model. Reset by
+    /// [`LpRelaxation::rebuild`], because a fresh model restarts HiGHS's own
+    /// accumulated clock and the time limit is stated against that.
+    model_solve_secs: f64,
     /// Number of model rebuilds triggered by cut-pool pruning.
     pub rebuilds: u64,
     /// Column index of the activation variable of each vertex id, when the
@@ -98,10 +118,17 @@ pub struct LpRelaxation {
     /// valid bound, and the search stops. On SteinLib e18 that ended the run with
     /// ten of its twenty-two seconds unspent and the dual bound four percent
     /// short of where the previous solve had already been heading.
-    pub time_limit_secs: f64,
+    time_limit_secs: f64,
     /// Last values actually pushed to HiGHS.
     presolve_on: bool,
     armed_limit: f64,
+    /// A clock the next solve must push before running. See
+    /// [`LpRelaxation::arm_time_limit`].
+    pending_limit: Option<f64>,
+    /// The algorithm the next solve will use. See [`LpMethod`].
+    pub method: LpMethod,
+    /// The algorithm HiGHS has actually been told about.
+    armed_method: Option<LpMethod>,
 
     model: Option<HModel>,
     cols: Vec<Col>,
@@ -109,6 +136,52 @@ pub struct LpRelaxation {
     base_var_ub: Vec<f64>,
     pub var_lb: Vec<f64>,
     pub var_ub: Vec<f64>,
+}
+
+/// Which algorithm HiGHS is asked to use.
+///
+/// # Why this is a choice and not a constant
+///
+/// The dual simplex is the right algorithm for an incremental cut loop: rows are
+/// appended, the basis stays feasible for the dual, and a re-solve costs a
+/// handful of pivots. That is what the branch-and-cut wants and it keeps it.
+///
+/// It is the wrong algorithm for the models this benchmark's larger instances
+/// present, and the reason is visible in their costs. PACE Track 2's
+/// instance142 has 118 edges of cost 100,000 among 724, the rest costing 1 to
+/// 47; its optimum is `30 * 100,000 + 526`. The relaxation must resolve a
+/// 526-unit structure inside a 3,000,000-unit objective, and it is massively
+/// degenerate at that scale — many bases of all but identical value. Measured on
+/// the root loop with nothing else changed:
+///
+/// | instance | simplex | interior point |
+/// |---|---|---|
+/// | 083 | 66 solves, stalls, 3,200,553.1 | 93 solves, **converged**, 3,200,554.0 |
+/// | 130 | 28 solves, stalls, 3,600,591.9 | 79 solves, **converged**, 3,600,596.0 |
+/// | 142 | 45 solves, stalls, 3,000,522.2 | 82 solves, 3,000,526.0 |
+/// | 164 | 39 solves, stalls, 3,100,524.3 | 83 solves, **converged**, 3,100,526.0 |
+/// | 070 | 139 solves, converged, 63.0 | 63 solves, converged, 63.0 |
+///
+/// "Stalls" is literal: a single solve on a 1,248-column model runs for 105
+/// seconds without terminating, having been preceded by sixty-five solves
+/// averaging a quarter of a second. Every converged interior-point value in that
+/// table is *exactly the instance's optimum*.
+///
+/// # Why the choice is safe whichever way it goes
+///
+/// Interior point without crossover returns a non-basic point, and its duals are
+/// approximately rather than exactly optimal. Nothing here needs them to be
+/// either: the bound that gets reported is
+/// [`LpRelaxation::certified_dual_bound`], which is a valid lower bound for an
+/// *arbitrary* multiplier vector, and the packing extracted from those
+/// multipliers is repaired to feasibility by scaling. A worse dual costs
+/// strength and never validity, which is the same contract the separators have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LpMethod {
+    /// HiGHS's default: dual simplex, warm-started from the previous basis.
+    Simplex,
+    /// Interior point with crossover off.
+    InteriorPoint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,6 +442,7 @@ impl LpRelaxation {
             solve_count: 0,
             base_constraint_count: structural_count,
             solve_time_secs: 0.0,
+            model_solve_secs: 0.0,
             rebuilds: 0,
             col_cost: b.col_cost,
             col_lb_base: b.col_lb,
@@ -382,6 +456,9 @@ impl LpRelaxation {
             time_limit_secs: f64::INFINITY,
             presolve_on: false,
             armed_limit: f64::INFINITY,
+            pending_limit: None,
+            method: LpMethod::Simplex,
+            armed_method: None,
             model: None,
             cols: Vec::new(),
             base_var_lb: var_lb.clone(),
@@ -415,6 +492,13 @@ impl LpRelaxation {
         self.model = Some(model);
         self.rebuilds += 1;
         self.cold = true;
+        // A fresh HiGHS model carries none of the previous one's options, and its
+        // own accumulated clock restarts at zero.
+        self.armed_method = None;
+        self.armed_limit = f64::INFINITY;
+        self.pending_limit = None;
+        self.model_solve_secs = 0.0;
+        self.presolve_on = false;
     }
 
     /// Bounds currently in force for a column, honouring branching fixings.
@@ -635,10 +719,46 @@ impl LpRelaxation {
         drop_count
     }
 
+    /// Give the model `secs` more seconds of solving from now.
+    ///
+    /// # Why this is a method and not a field
+    ///
+    /// HiGHS's `time_limit` is compared against a clock that **accumulates over
+    /// every `run()` on one model**, so the option's value is an absolute
+    /// deadline for the model, not a length for the next solve. Two things follow
+    /// and both have cost a measurement:
+    ///
+    /// - it must be re-stated as `already spent + allowance`, and the "already
+    ///   spent" is per model, so a pruning rebuild resets it;
+    /// - a rule that only ever *lowers* it silently strangles every later solve.
+    ///   With the loop granting a doubling sequence of batches, an option armed
+    ///   at 0.26 s during the first batch left the third batch's solves 0.06 s
+    ///   on a model that had already consumed 0.20 s — every one of them
+    ///   returned non-optimal, the loop read that as "this algorithm cannot
+    ///   solve this model", and instance083's packing stopped improving after
+    ///   four solves.
+    ///
+    /// So the caller arms it explicitly, once per call, and the option reaches
+    /// HiGHS exactly once for that call — which is what keeps the warm start.
+    pub fn arm_time_limit(&mut self, secs: f64) {
+        if !secs.is_finite() {
+            self.pending_limit = None;
+            self.time_limit_secs = f64::INFINITY;
+            return;
+        }
+        self.time_limit_secs = secs;
+        let limit = self.model_solve_secs + secs.max(0.01);
+        if (limit - self.armed_limit).abs() > 1e-9 {
+            self.pending_limit = Some(limit);
+        }
+    }
+
     pub fn solve(&mut self) -> f64 {
         let timer = std::time::Instant::now();
         let value = self.solve_inner();
-        self.solve_time_secs += timer.elapsed().as_secs_f64();
+        let secs = timer.elapsed().as_secs_f64();
+        self.solve_time_secs += secs;
+        self.model_solve_secs += secs;
         value
     }
 
@@ -661,16 +781,30 @@ impl LpRelaxation {
             model.set_option("presolve", if self.cold { "on" } else { "off" });
             self.presolve_on = self.cold;
         }
-        // Re-pushed only when the budget genuinely tightens. HiGHS treats an
-        // option assignment as a model event and drops the simplex state, so
-        // re-asserting a clock that has barely moved costs the warm start that
-        // makes an incremental cut loop affordable at all.
-        if self.time_limit_secs.is_finite() {
-            let budget = self.solve_time_secs + self.time_limit_secs.max(0.01);
-            if budget < self.armed_limit - 1.0 {
-                model.set_option("time_limit", budget);
-                self.armed_limit = budget;
+        // The algorithm, pushed only when it changes. A rebuild loses the setting
+        // along with the model, which `rebuild` records by clearing `armed_method`.
+        if self.armed_method != Some(self.method) {
+            match self.method {
+                LpMethod::Simplex => {
+                    model.set_option("solver", "simplex");
+                    model.set_option("run_crossover", "on");
+                }
+                LpMethod::InteriorPoint => {
+                    model.set_option("solver", "ipm");
+                    // Crossover would hand the point back to the simplex that
+                    // could not solve the model in the first place.
+                    model.set_option("run_crossover", "off");
+                }
             }
+            self.armed_method = Some(self.method);
+        }
+        // The clock, pushed when the caller has armed a new one. HiGHS treats an
+        // option assignment as a model event and drops the simplex state, so the
+        // limit is stated once per *call* of the loop above rather than once per
+        // solve; see [`LpRelaxation::arm_time_limit`].
+        if let Some(limit) = self.pending_limit.take() {
+            model.set_option("time_limit", limit);
+            self.armed_limit = limit;
         }
         self.cold = false;
 
@@ -754,6 +888,119 @@ impl LpRelaxation {
 
     pub fn num_cuts(&self) -> usize {
         self.cuts.len()
+    }
+
+    /// A lower bound on this LP's optimum, re-derived from the row multipliers
+    /// alone, together with the reduced costs that go with it.
+    ///
+    /// # Why the solver's own objective is not enough
+    ///
+    /// `get_dual_bound` returns `c'y` at the primal point HiGHS handed back. That
+    /// is a lower bound on the *integer* optimum only if the point is optimal for
+    /// the LP, which is a claim about the solver's termination and its
+    /// tolerances, not about anything this program can check. Worse, the number
+    /// is then used twice in ways that must not be wrong: as a reported dual
+    /// bound, and inside `obj + rc_a > UB` as the basis of an arc elimination.
+    /// A tolerance-sized overshoot in the first is a wrong answer, and in the
+    /// second it deletes an arc some optimum needs.
+    ///
+    /// This computes instead a number that is a lower bound for *any* multiplier
+    /// vector whatsoever, so nothing about the solve has to be believed.
+    ///
+    /// > **Proposition (certified dual bound).** Let the LP be
+    /// > `min { c'x : lo <= Ax <= hi, l <= x <= u }` and let `lambda` be an
+    /// > arbitrary vector with one entry per row, subject to `lambda_r = 0`
+    /// > whenever the bound it would be priced against is infinite. Put
+    /// > `d = c - A' lambda` and
+    /// >
+    /// > ```text
+    /// > L(lambda) = sum_r [ lambda_r > 0 ? lambda_r lo_r : lambda_r hi_r ]
+    /// >           + sum_j [ d_j     > 0 ? d_j l_j        : d_j u_j        ].
+    /// > ```
+    /// >
+    /// > Then `L(lambda) <= c'x` for every feasible `x`.
+    /// >
+    /// > *Proof.* `c'x = (d + A'lambda)'x = d'x + lambda'(Ax)`. Term by term,
+    /// > `d_j x_j >= min{d_j l_j, d_j u_j}`, which is the bracketed column term
+    /// > because `l_j <= x_j <= u_j`; and with `s = Ax` satisfying
+    /// > `lo <= s <= hi`, `lambda_r s_r >= min{lambda_r lo_r, lambda_r hi_r}`,
+    /// > which is the bracketed row term. Summing gives `c'x >= L(lambda)`. ∎
+    ///
+    /// The hypotheses are discharged by construction rather than assumed:
+    /// a multiplier that would be priced against an infinite bound is **clamped
+    /// to zero** — which is the repair the round-off could otherwise hide — and
+    /// `d` is recomputed from the clamped vector, so the identity
+    /// `c = d + A'lambda` holds exactly as computed.
+    ///
+    /// Both sign conventions are evaluated and the larger kept. The formula is
+    /// valid for any `lambda`, so trying `-lambda` as well costs one pass and
+    /// removes the last thing that had to be assumed about the backend: which way
+    /// round it signs the duals of a minimisation.
+    ///
+    /// At an optimal basis `L(lambda)` is the LP optimum by strong duality, so
+    /// nothing is given up in exchange for the guarantee. Returns `None` only
+    /// when the multiplier vector does not have one entry per row, in which case
+    /// there is nothing to certify.
+    pub fn certified_dual_bound(&self) -> Option<CertifiedDual> {
+        let num_rows = self.structural.len() + self.cuts.len();
+        if self.row_duals.len() != num_rows {
+            return None;
+        }
+        let a = self.certified_dual_for_sign(1.0);
+        let b = self.certified_dual_for_sign(-1.0);
+        match (a, b) {
+            (Some(x), Some(y)) => Some(if x.value >= y.value { x } else { y }),
+            (Some(x), None) => Some(x),
+            (None, Some(y)) => Some(y),
+            (None, None) => None,
+        }
+    }
+
+    fn certified_dual_for_sign(&self, sign: f64) -> Option<CertifiedDual> {
+        let rows = || self.structural.iter().chain(self.cuts.iter().map(|c| &c.row));
+        let mut lambda: Vec<f64> = self.row_duals.iter().map(|&d| sign * d).collect();
+        for (r, row) in rows().enumerate() {
+            // A multiplier priced against an infinite bound contributes minus
+            // infinity; the repair is to drop the row, which only weakens `L`.
+            if (lambda[r] > 0.0 && !row.lo.is_finite()) || (lambda[r] < 0.0 && !row.hi.is_finite()) {
+                lambda[r] = 0.0;
+            }
+        }
+        let mut reduced = self.col_cost.clone();
+        for (r, row) in rows().enumerate() {
+            if lambda[r] == 0.0 {
+                continue;
+            }
+            for &(c, v) in &row.entries {
+                reduced[c as usize] -= lambda[r] * v;
+            }
+        }
+        let mut value = 0.0;
+        for (r, row) in rows().enumerate() {
+            if lambda[r] > 0.0 {
+                value += lambda[r] * row.lo;
+            } else if lambda[r] < 0.0 {
+                value += lambda[r] * row.hi;
+            }
+        }
+        for (j, &d) in reduced.iter().enumerate() {
+            let (lb, ub) = self.current_col_bounds(j);
+            let bound = if d > 0.0 { lb } else { ub };
+            if !bound.is_finite() {
+                // Only possible on a column with an infinite bound, which this
+                // formulation does not have; refuse rather than return a number
+                // whose provenance is not the proposition above.
+                if d != 0.0 {
+                    return None;
+                }
+                continue;
+            }
+            value += d * bound;
+        }
+        if !value.is_finite() {
+            return None;
+        }
+        Some(CertifiedDual { value, reduced })
     }
 
     /// Every row of the shape `sum_{a in A} y_a >= 1` over arc columns only,

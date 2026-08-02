@@ -89,7 +89,7 @@ use std::time::Instant;
 
 use crate::graph::algorithms::{dual_ascent_cuts, dual_ascent_packing, dual_ascent_packing_residual, ArcIndex};
 use crate::graph::{ArcId, Cost, DirectedGraph, NodeId};
-use crate::model::LpRelaxation;
+use crate::model::{LpMethod, LpRelaxation};
 use crate::separation::{CycleCutSeparator, FlowCutSeparator, PartitionSeparator, TfCutSeparator};
 
 /// Arc entries the ascent may record while producing the LP's seed rows. Same
@@ -511,6 +511,63 @@ pub struct RoundStat {
     /// Rows in the model *after* this round's additions and pruning.
     pub rows: usize,
     pub secs: f64,
+    /// Seconds inside the simplex, inside the max-flow connectivity separator,
+    /// inside the three extra separators, and inside the dual harvest. These
+    /// four plus the model surgery are the round; splitting them is how "the LP
+    /// is slow" was turned from an opinion into a measurement.
+    pub lp_secs: f64,
+    pub flow_secs: f64,
+    pub extra_secs: f64,
+    pub harvest_secs: f64,
+    /// Model rebuilds so far. A rebuild throws the simplex basis away.
+    pub rebuilds: u64,
+}
+
+/// A certified dual of the cut formulation, expressed on the arc columns.
+///
+/// # What it licenses, and why it is not an ascent
+///
+/// `value` is a valid lower bound and `reduced[a] >= 0` are the matching arc
+/// reduced costs, both derived from one multiplier vector by
+/// [`crate::model::LpRelaxation::certified_dual_bound`] and clamped to the
+/// non-negative orthant. The one property everything downstream needs is:
+///
+/// > **Proposition (certified arc pricing).** Let `A` be an inclusion-minimal
+/// > arborescence rooted at `root` spanning the terminals. Then
+/// > `c(A) >= value + sum_{a in A} reduced[a]`.
+/// >
+/// > *Proof.* `A` is feasible for the model: the root has no in-arc, every other
+/// > vertex of `A` exactly one; `s_v` is one on `A`'s vertices and zero
+/// > elsewhere, which satisfies the in-degree equalities, the coupling rows and
+/// > the cardinality row `|A| = |V(A)| - 1`; a minimal arborescence has no
+/// > Steiner leaf, so flow balance holds; and no edge is used in both
+/// > orientations. Now with `d = c - A'lambda` and `x` the incidence vector of
+/// > `A`,
+/// >
+/// > ```text
+/// > c'x - L(lambda) = sum_j [ d_j x_j - min(d_j l_j, d_j u_j) ]
+/// >                 + sum_r [ lambda_r (Ax)_r - min(lambda_r lo_r, lambda_r hi_r) ]
+/// > ```
+/// >
+/// > and every bracket is non-negative because `x` is feasible. Dropping all but
+/// > the arc columns of `A`, whose bracket is `d_a - min(0, d_a) = max(d_a, 0)`,
+/// > gives the claim. ∎
+///
+/// So it plugs into exactly the places a [`crate::graph::algorithms::DualAscentResult`]
+/// does — the strengthened fixing argument only ever uses "a valid bound plus
+/// non-negative arc prices whose sum over any solution is charged on top of it"
+/// — and it is far stronger, because the LP can lower one multiplier to raise
+/// another and an ascent cannot.
+///
+/// It is **root-specific**, exactly as an ascent is, so the union rule in
+/// `root_reduce`'s module header applies to it unchanged: only the undirected
+/// conclusion drawn from this one root may be unioned with another root's.
+#[derive(Debug, Clone)]
+pub struct ArcDual {
+    pub root: NodeId,
+    pub value: Cost,
+    /// One entry per arc, non-negative.
+    pub reduced: Vec<Cost>,
 }
 
 pub struct RootCertificate {
@@ -543,6 +600,9 @@ pub struct RootCertificate {
     pub lp_solves: u64,
     /// One entry per round; see [`RoundStat`].
     pub rounds: Vec<RoundStat>,
+    /// The certified dual on the arc columns, when a solve produced one. See
+    /// [`ArcDual`].
+    pub arc_dual: Option<ArcDual>,
 }
 
 /// Solve a bounded root cut loop and read a certified packing off its dual.
@@ -700,6 +760,22 @@ pub struct RootSeparation {
     eliminated_arcs: Vec<ArcId>,
     /// A round separated nothing. See the type's documentation.
     converged: bool,
+    /// Algorithms that have already returned a status this loop cannot use on
+    /// this model. A refused method is never made current again.
+    refused: Vec<LpMethod>,
+    /// The floor `best_bound` started at: the strongest dual ascent this model's
+    /// construction found, over its root and the alternate seed roots. It is
+    /// what "the method got nothing out of this model" is measured against.
+    ascent_floor: Cost,
+    /// Whether the measured method switch below has already been taken. Bounding
+    /// it at one is what stops the two algorithms alternating.
+    switched: bool,
+    /// Separate the cycle, partition and terminal-free families as well as the
+    /// connectivity family. On by default; a probe measuring the *bidirected cut
+    /// relaxation's own* optimum turns it off, because with it on the converged
+    /// value is the optimum of a strictly stronger relaxation and answers a
+    /// different question.
+    pub extra_families: bool,
 }
 
 impl RootSeparation {
@@ -711,6 +787,18 @@ impl RootSeparation {
         graph.nodes.iter().map(|n| n.id).filter(|v| !terminal_set.contains(v)).collect();
 
     let mut lp = LpRelaxation::from_formulation(graph, root, terminals, &steiner_nodes);
+    // The root loop starts at the interior point and falls back to the simplex on
+    // a refusal; the branch-and-cut keeps the simplex, whose warm start is worth
+    // more when the model changes by a handful of rows per node. See [`LpMethod`]
+    // for the measurement, and §74 of the notes for the census it produced: with
+    // the simplex a single solve on instance083's 1,248-column model runs for
+    // 105 seconds and the loop never converges; with the interior point it
+    // converges in 93 solves at exactly the instance's optimum.
+    // The loop starts at the dual simplex, which is what an incremental cut loop
+    // wants, and moves to the interior point when it has measured that the
+    // simplex is getting nothing out of *this* model. See `advance`'s
+    // end-of-call test and [`LpMethod`].
+    lp.method = LpMethod::Simplex;
     let seed = dual_ascent_cuts(&idx, root, terminals, &active, ASCENT_CUT_NNZ);
     for cut in &seed.cuts {
         lp.add_lazy_steiner_cut(cut);
@@ -729,6 +817,25 @@ impl RootSeparation {
     // arborescence has no arc entering `W` — and the rest are dropped rather than
     // repaired. Nothing else is needed: a valid inequality is valid whatever
     // produced it, and the ascents are microseconds next to a single solve.
+    // The strongest dual this constructor computes, over every root it ascends
+    // from. It is the floor the loop's reported bound may never fall below.
+    //
+    // > **Proposition (root-free floor).** A dual ascent from any root `r` is a
+    // > feasible cut packing for `r`, so its value is a lower bound on the cost
+    // > of any tree spanning the terminals — the packing bound does not mention
+    // > which terminal was called the root. Hence `max_r asc(r)` is a valid lower
+    // > bound on the instance's optimum, and reporting it costs nothing.
+    //
+    // What it may **not** be used for is elimination: `obj + rc_a > UB` needs
+    // `obj` to be a bound for *the model the reduced costs came from*, and mixing
+    // a foreign dual into that position is exactly the mistake `RootCertificate`
+    // documents. So this floor enters `best_bound` and never the fixing rule.
+    //
+    // Without it the loop could report a value below a dual it already held: on
+    // PACE Track 2's instance083 the reduction's ascent reaches 3,100,512 from
+    // its best root while the model's own root ascends to 3,100,510, and the
+    // separation loop announced the smaller number for eleven rounds.
+    let mut ascent_floor = seed.lower_bound;
     {
         let mut in_w = vec![false; idx.num_nodes()];
         let mut boundary: Vec<ArcId> = Vec::new();
@@ -737,6 +844,7 @@ impl RootSeparation {
                 continue;
             }
             let alt = dual_ascent_packing(&idx, r, terminals, &active, ASCENT_CUT_NNZ);
+            ascent_floor = ascent_floor.max(alt.lower_bound);
             for (_, members) in &alt.sets {
                 if members.contains(&root) || members.is_empty() {
                     continue;
@@ -785,7 +893,7 @@ impl RootSeparation {
             // lemma in `advance`.
             partitions: HashMap::new(),
             batch,
-            best_bound: seed.lower_bound,
+            best_bound: ascent_floor,
             lp_solves: 0,
             rounds: Vec::new(),
             // The duals are harvested after *every* optimal solve rather than
@@ -800,6 +908,10 @@ impl RootSeparation {
             last_obj: None,
             eliminated_arcs: Vec::new(),
             converged: false,
+            refused: Vec::new(),
+            ascent_floor,
+            switched: false,
+            extra_families: true,
         }
     }
 
@@ -813,6 +925,53 @@ impl RootSeparation {
                 .iter()
                 .zip(graph.arcs.iter())
                 .all(|(f, a)| f.0 == a.tail && f.1 == a.head && f.2 == a.cost)
+    }
+
+    /// Choose the algorithm the first solve uses. Either choice is safe; see
+    /// [`LpMethod`] for the measurement behind the default and for why an
+    /// approximate dual costs strength and never validity.
+    pub fn set_method(&mut self, method: LpMethod) {
+        self.lp.method = method;
+    }
+
+    /// The algorithm in force now, which is not necessarily the one asked for:
+    /// a method that returns an unusable status is replaced by the other.
+    pub fn method(&self) -> LpMethod {
+        self.lp.method
+    }
+
+    /// Re-solve the model as it stands and re-derive its certified bound.
+    ///
+    /// A converged loop has proved a number; this is the statement that the
+    /// number is a property of the model and not of one solve's path through it.
+    /// The gate `a_converged_loop_reproduces_its_value_on_a_resolve` uses it, and
+    /// so does anything that wants the bound checked after the model was carried
+    /// across a solver pass.
+    pub fn recertify(&mut self) -> Option<Cost> {
+        self.lp.arm_time_limit(f64::INFINITY);
+        self.lp.solve();
+        if !self.lp.is_optimal() {
+            return None;
+        }
+        self.lp.certified_dual_bound().map(|c| c.value)
+    }
+
+    /// The certified dual on the arc columns, as the last optimal solve left it.
+    ///
+    /// See [`ArcDual`] for what it licenses. `None` when no solve has produced
+    /// multipliers, or when the recomputation disagrees with the value the loop
+    /// recorded — which would mean the two had come from different solves, and
+    /// is refused rather than reconciled.
+    pub fn arc_dual(&self) -> Option<ArcDual> {
+        let value = self.last_obj?;
+        let certified = self.lp.certified_dual_bound()?;
+        (certified.value >= value - 1e-6 * value.abs().max(1.0)).then(|| ArcDual {
+            root: self.root,
+            value: certified.value,
+            reduced: (0..self.fingerprint.len())
+                .map(|a| certified.reduced.get(a).copied().unwrap_or(0.0).max(0.0))
+                .collect(),
+        })
     }
 
     /// The best LP bound proved so far, without running anything.
@@ -864,7 +1023,14 @@ impl RootSeparation {
             last_obj,
             eliminated_arcs,
             converged,
+            refused,
+            ascent_floor,
+            switched,
+            extra_families,
         } = self;
+        let ascent_floor: Cost = *ascent_floor;
+        let solves_at_entry = *lp_solves;
+        let extra_families: bool = *extra_families;
         let idx: &ArcIndex = idx;
         let root: NodeId = *root;
         let num_arcs = fingerprint.len();
@@ -873,19 +1039,73 @@ impl RootSeparation {
         let mut partition_sep = PartitionSeparator::new(graph, root, terminals);
         let mut tf_sep = TfCutSeparator::new(graph, terminals);
 
+    // One clock for the whole call. HiGHS drops the simplex state when an option
+    // is assigned, so the limit is stated once here rather than once per round;
+    // see [`crate::model::LpRelaxation::arm_time_limit`] for the accumulation
+    // semantics that make "once per round" both expensive and wrong.
+    if !*converged {
+        lp.arm_time_limit(deadline.saturating_duration_since(Instant::now()).as_secs_f64());
+    }
+
     for _ in 0..(if *converged { 0 } else { max_rounds }) {
         let remaining = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
         if remaining <= 0.0 {
             break;
         }
-        lp.time_limit_secs = remaining;
         let round_started = Instant::now();
-        let obj = lp.solve();
+        let t_lp = Instant::now();
+        // A solve that does not reach optimality is evidence about *this model*,
+        // not about the loop, so the other algorithm is tried before the round is
+        // abandoned. Each method is tried at most once per round and a method
+        // that has been refused is not made current again, so the retry cannot
+        // loop: at most two solves happen here and the second only after the
+        // first returned a status this code cannot use.
+        //
+        // Refusing an attempt never changes an answer. A refused solve yields no
+        // multipliers, contributes nothing to `best_bound` and installs no rows;
+        // the loop either continues from the state it already had or stops.
+        let mut raw_obj = lp.solve();
         *lp_solves += 1;
+        if !lp.is_optimal() && Instant::now() < deadline {
+            let fallback = match lp.method {
+                LpMethod::Simplex => LpMethod::InteriorPoint,
+                LpMethod::InteriorPoint => LpMethod::Simplex,
+            };
+            if !refused.contains(&fallback) {
+                refused.push(lp.method);
+                lp.method = fallback;
+                lp.arm_time_limit(
+                    deadline.saturating_duration_since(Instant::now()).as_secs_f64(),
+                );
+                raw_obj = lp.solve();
+                *lp_solves += 1;
+            }
+        }
+        let lp_secs = t_lp.elapsed().as_secs_f64();
         if !lp.is_optimal() {
             break;
         }
+        // The number this round is entitled to claim, and the reduced costs that
+        // go with it, both re-derived from the multipliers. See
+        // [`crate::model::LpRelaxation::certified_dual_bound`]: `obj` is a lower
+        // bound on the LP optimum for *any* multiplier vector, so nothing about
+        // the solve is assumed, and at an optimal basis it is the LP optimum.
+        //
+        // Falling back to the backend's own objective when the certification
+        // cannot be formed would defeat the point, so it is not done: an
+        // uncertifiable solve contributes nothing to the bound and the loop keeps
+        // going. `raw_obj` is kept only to check the two agree.
+        let certified = lp.certified_dual_bound();
+        let Some(certified) = certified else {
+            continue;
+        };
+        let obj = certified.value;
+        debug_assert!(
+            obj <= raw_obj + 1e-6 * raw_obj.abs().max(1.0),
+            "certified dual {obj} exceeds the reported objective {raw_obj}"
+        );
         *best_bound = best_bound.max(obj);
+        let t_harvest = Instant::now();
         let mut harvest: Vec<Candidate> = lp
             .unit_arc_rows()
             .into_iter()
@@ -929,14 +1149,22 @@ impl RootSeparation {
         }
         *candidates = Some(harvest);
         *last_obj = Some(obj);
+        let harvest_secs = t_harvest.elapsed().as_secs_f64();
         if upper_bound.is_finite() {
             // The bound grows monotonically over the loop and the reduced costs
-            // are read from the same solve as `obj`, so recomputing the set each
-            // round and keeping the largest is exactly the strongest licensed
-            // elimination and never mixes a bound with another solve's vector.
+            // are read from the same multiplier vector as `obj`, so recomputing
+            // the set each round and keeping the largest is exactly the strongest
+            // licensed elimination and never mixes a bound with another solve's
+            // vector.
+            //
+            // Both halves are now certified: `obj = L(lambda)` and
+            // `rc = (c - A'lambda)_a` come from the same `lambda`, so
+            // `c'x >= L(lambda) + rc_a` for any feasible `x` with `x_a = 1` — the
+            // column term for `a` is forced to its upper end instead of its
+            // minimum, and every other term is unchanged.
             let fixed: Vec<ArcId> = (0..num_arcs)
                 .filter(|&a| {
-                    let rc = lp.reduced_costs.get(a).copied().unwrap_or(0.0);
+                    let rc = certified.reduced.get(a).copied().unwrap_or(0.0);
                     rc > 0.0 && obj + rc > upper_bound
                 })
                 .map(|a| a as ArcId)
@@ -952,7 +1180,9 @@ impl RootSeparation {
         let structural = lp.separate_structural(*batch);
         *batch = batch.saturating_mul(4);
         let solution = lp.get_solution().to_vec();
+        let t_flow = Instant::now();
         let cuts = separator.separate_cuts(&solution);
+        let flow_secs = t_flow.elapsed().as_secs_f64();
         // The three families the branch-and-cut already had and the root loop
         // did not ask for. See the header: all are valid for the formulation and
         // all are safe for the packing extraction.
@@ -1000,7 +1230,8 @@ impl RootSeparation {
         // asks for help when, and only when, it has stopped separating.
         let mut family = [(0usize, 0.0); 3];
         let mut extra = 0usize;
-        {
+        let mut extra_secs = 0.0;
+        if extra_families {
             let _ = new_flow;
             let t0 = Instant::now();
             let cycle_cuts = cycle_sep.find_violated_cuts(&solution);
@@ -1103,6 +1334,7 @@ impl RootSeparation {
                 extra += 1;
             }
             family[0].1 = separation_secs;
+            extra_secs = t0.elapsed().as_secs_f64();
         }
 
         if structural == 0 && installed == 0 && extra == 0 {
@@ -1125,7 +1357,44 @@ impl RootSeparation {
             family,
             rows: lp.num_constraints(),
             secs: round_started.elapsed().as_secs_f64(),
+            lp_secs,
+            flow_secs,
+            extra_secs,
+            harvest_secs,
+            rebuilds: lp.rebuilds,
         });
+    }
+
+    // Did this call's algorithm get anything out of this model?
+    //
+    // The loop enters holding `ascent_floor`, a bound proved combinatorially
+    // before any LP was solved. A call that solved LPs and still reports exactly
+    // that floor has produced nothing the loop did not already have — every
+    // certified value it computed was at or below a number obtained for free.
+    // That is a measured statement about this model in this pass, and it is the
+    // one that separates the two regimes:
+    //
+    // | instance | simplex, first increment | interior point, same budget |
+    // |---|---|---|
+    // | 083 | 4 solves, 3,100,510 — **below** the floor 3,100,512 | 3 solves, 3,100,515.5, 788 sets |
+    // | 144 | 2 solves, 3,400,369.5 — **below** the floor 3,400,372 | 2 solves, 3,400,372.0, 744 sets |
+    // | 117 | 6 solves, 3,901,299.5 — floor + 8.5 | 3 solves, 3,901,285.0, below the floor |
+    //
+    // Switching on that test moves 083 and 144, which the simplex cannot open,
+    // and leaves 117 alone, which the interior point would have lost. Neither
+    // algorithm dominates and the loop does not have to guess which is which:
+    // it asks the model.
+    //
+    // The switch happens at most once, so the two cannot alternate, and it is a
+    // refusal to continue with an algorithm rather than a change to anything
+    // already computed: every bound proved so far is kept, the model is kept,
+    // and the rows are kept.
+    if !*switched && *lp_solves > solves_at_entry && *best_bound <= ascent_floor + 1e-9 {
+        lp.method = match lp.method {
+            LpMethod::Simplex => LpMethod::InteriorPoint,
+            LpMethod::InteriorPoint => LpMethod::Simplex,
+        };
+        *switched = true;
     }
 
     // A converged loop still owes the caller the strongest elimination its own
@@ -1133,10 +1402,15 @@ impl RootSeparation {
     // have improved since. `last_obj` and `lp.reduced_costs` come from the same
     // solve; nothing here pairs a bound with another solve's vector.
     if *converged && upper_bound.is_finite() {
-        if let Some(obj) = *last_obj {
+        // The multipliers still in `lp` are the ones `last_obj` was certified
+        // from, so re-deriving the pair here reproduces it exactly; the
+        // recomputation is what keeps value and reduced costs matched rather than
+        // read from two different places.
+        if let (Some(obj), Some(certified)) = (*last_obj, lp.certified_dual_bound()) {
+            debug_assert!((certified.value - obj).abs() <= 1e-6 * obj.abs().max(1.0));
             let fixed: Vec<ArcId> = (0..num_arcs)
                 .filter(|&a| {
-                    let rc = lp.reduced_costs.get(a).copied().unwrap_or(0.0);
+                    let rc = certified.reduced.get(a).copied().unwrap_or(0.0);
                     rc > 0.0 && obj + rc > upper_bound
                 })
                 .map(|a| a as ArcId)
@@ -1163,12 +1437,27 @@ impl RootSeparation {
         "extracted packing violated (PACK) and was scaled by {scale}"
     );
 
+    // The arc-priced dual, for the reduction. `last_obj` and the multipliers in
+    // `lp` belong to the same solve; nothing here pairs a bound with another
+    // solve's vector.
+    let arc_dual = last_obj.and_then(|value| {
+        let certified = lp.certified_dual_bound()?;
+        (certified.value >= value - 1e-6 * value.abs().max(1.0)).then(|| ArcDual {
+            root,
+            value: certified.value,
+            reduced: (0..num_arcs)
+                .map(|a| certified.reduced.get(a).copied().unwrap_or(0.0).max(0.0))
+                .collect(),
+        })
+    });
+
     Some(RootCertificate {
         lp_bound: *best_bound,
         packing,
         eliminated_arcs: eliminated_arcs.clone(),
         lp_solves: *lp_solves,
         rounds: rounds.clone(),
+        arc_dual,
     })
     }
 }
@@ -1592,9 +1881,17 @@ mod tests {
                 inc.lp_bound,
                 one_shot.lp_bound
             );
-            assert_eq!(
-                inc.lp_solves, one_shot.lp_solves,
-                "the same round sequence must solve the same number of LPs"
+            // The solve *counts* are no longer required to agree, and the reason
+            // is recorded rather than relaxed away. The measured method switch
+            // of §74 is an end-of-call decision — "this call solved LPs and
+            // reported nothing above the ascent floor" — so a loop resumed a
+            // round at a time reaches the test more often than a one-shot loop
+            // does, and may pay one extra solve at the switch. What resumption
+            // still guarantees, and what this asserts, is the part the
+            // proposition was for: the same rows, and the same converged value.
+            assert!(
+                inc.lp_solves >= one_shot.lp_solves,
+                "a resumed loop should never solve fewer LPs than a fresh one"
             );
             let idx = ArcIndex::new(&g);
             assert!(inc.packing.verify(&idx, root, 1e-6));
@@ -1655,5 +1952,217 @@ mod tests {
 
         let shorter: Vec<NodeId> = terminals[..2].to_vec();
         assert!(!sep.applies_to(&g, terminals[0], &shorter));
+    }
+
+    /// Random weighted graphs with a terminal subset, an exact optimum from
+    /// Dreyfus-Wagner, and both halves of the certified dual checked against it.
+    ///
+    /// Two claims are gated, and the second is the one that can delete the
+    /// optimum if it is wrong:
+    ///
+    /// 1. `L(lambda) <= OPT` at every round of the loop. The proposition says
+    ///    `L(lambda)` bounds every *LP*-feasible point, and an optimal tree is
+    ///    one of them, so a violation is a proof that the arithmetic is wrong.
+    /// 2. **No arc of an optimal tree is ever eliminated at `UB = OPT`.** The
+    ///    rule is stated with a strict inequality precisely so that solutions of
+    ///    cost exactly `UB` survive, and this is the direct test of that: the
+    ///    optimum's own arcs must be present after fixing.
+    #[test]
+    fn the_certified_dual_bounds_the_optimum_and_never_fixes_it_away() {
+        use crate::graph::algorithms::dreyfus_wagner;
+        let mut seed = 0x0BAD_C0DE_1234_9999u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let far = || Instant::now() + std::time::Duration::from_secs(30);
+        let mut checked = 0usize;
+        let mut fixings = 0usize;
+        for case in 0..220usize {
+            let n = 5 + (rng() % 8) as u32;
+            let k = 2 + (rng() % (n as u64 - 2).max(1)) as usize;
+            let unit = case % 3 == 0;
+            let mut ug = crate::graph::UndirectedGraph::new(n);
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = (v as usize) <= k;
+                ug.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 4 != 0 {
+                        let c = if unit { 1.0 } else { 1.0 + (rng() % 17) as Cost };
+                        ug.add_edge(u, v, c);
+                    }
+                }
+            }
+            let Some(dw) = dreyfus_wagner(&ug, &terminals) else { continue };
+            let opt = dw.optimal_cost;
+            if !opt.is_finite() || opt <= 0.0 {
+                continue;
+            }
+            let g = DirectedGraph::from_undirected(&ug);
+            let root = terminals[0];
+            let mut sep = RootSeparation::new(&g, root, &terminals);
+            // `UB = OPT` is the tightest legal cutoff and the one the strict
+            // inequality is stated for.
+            let Some(cert) = sep.advance(opt, far(), 60, 1 << 20) else { continue };
+            checked += 1;
+            assert!(
+                cert.lp_bound <= opt + 1e-6,
+                "case {case}: certified {} exceeds the optimum {opt}",
+                cert.lp_bound
+            );
+            // The optimum's own edges, as arcs. An edge survives the fixing when
+            // at least one of its two orientations does, so the assertion is
+            // stated over the pair and not over a single arc.
+            let dead: std::collections::HashSet<ArcId> =
+                cert.eliminated_arcs.iter().copied().collect();
+            fixings += dead.len();
+            for &(u, v, _) in &dw.tree_edges {
+                let orientations: Vec<ArcId> = (0..g.arcs.len() as ArcId)
+                    .filter(|&a| {
+                        let arc = &g.arcs[a as usize];
+                        (arc.tail == u && arc.head == v) || (arc.tail == v && arc.head == u)
+                    })
+                    .collect();
+                assert!(
+                    orientations.iter().any(|a| !dead.contains(a)),
+                    "case {case}: every orientation of an optimal edge ({u},{v}) was \
+                     eliminated at UB = OPT"
+                );
+            }
+            // And the packing the same dual produced is feasible for the costs.
+            let idx = ArcIndex::new(&g);
+            assert!(cert.packing.verify(&idx, root, 1e-6), "case {case}: (PACK) violated");
+            assert!(
+                cert.packing.value <= opt + 1e-6,
+                "case {case}: packing {} exceeds the optimum {opt}",
+                cert.packing.value
+            );
+        }
+        assert!(checked >= 100, "only {checked} cases ran; the test proves nothing");
+        assert!(fixings > 0, "no arc was ever eliminated; the fixing rule was never reached");
+    }
+
+    /// The bound the loop reports may never sit below a dual it has itself
+    /// computed.
+    ///
+    /// This fired on PACE instance083 before the floor of §74 existed: the model
+    /// is built at `terminals[0]`, whose ascent reaches 3,100,510, while the
+    /// reduction's best root reaches 3,100,512, and the loop announced the
+    /// smaller number for eleven rounds while calling it an LP bound.
+    #[test]
+    fn the_reported_bound_never_falls_below_an_ascent_the_loop_holds() {
+        let mut seed = 0xFEED_FACE_5555_0001u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let far = || Instant::now() + std::time::Duration::from_secs(30);
+        let mut checked = 0usize;
+        for _ in 0..60usize {
+            let n = 6 + (rng() % 10) as u32;
+            let k = 2 + (rng() % 4) as usize;
+            let mut ug = crate::graph::UndirectedGraph::new(n);
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = (v as usize) <= k;
+                ug.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 3 != 0 {
+                        ug.add_edge(u, v, 1.0 + (rng() % 13) as Cost);
+                    }
+                }
+            }
+            let g = DirectedGraph::from_undirected(&ug);
+            let idx = ArcIndex::new(&g);
+            let active = vec![true; idx.num_arcs()];
+            let mut floor = Cost::NEG_INFINITY;
+            for &r in &terminals {
+                floor = floor.max(
+                    crate::graph::algorithms::dual_ascent_masked(&idx, r, &terminals, &active)
+                        .lower_bound,
+                );
+            }
+            let root = terminals[0];
+            let mut sep = RootSeparation::new(&g, root, &terminals);
+            for rounds in [1usize, 2, 5, 40] {
+                let Some(cert) = sep.advance(Cost::INFINITY, far(), rounds, 1 << 20) else {
+                    continue;
+                };
+                // The loop ascends from `root` and from `ALT_SEED_ROOTS` others,
+                // so its floor is at least the root's own ascent; on these sizes
+                // the stride visits every terminal, so the whole max applies.
+                assert!(
+                    cert.lp_bound >= floor - 1e-9,
+                    "reported {} below an ascent worth {floor}",
+                    cert.lp_bound
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 100, "only {checked} comparisons ran");
+    }
+
+    /// A converged loop's value is a property of its model, not of one solve.
+    #[test]
+    fn a_converged_loop_reproduces_its_value_on_a_resolve() {
+        let mut seed = 0x1357_9BDF_2468_ACE0u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let far = || Instant::now() + std::time::Duration::from_secs(30);
+        let mut compared = 0usize;
+        for _ in 0..40usize {
+            let n = 6 + (rng() % 8) as u32;
+            let k = 2 + (rng() % 4) as usize;
+            let mut ug = crate::graph::UndirectedGraph::new(n);
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = (v as usize) <= k;
+                ug.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 3 != 0 {
+                        ug.add_edge(u, v, 1.0 + (rng() % 11) as Cost);
+                    }
+                }
+            }
+            let g = DirectedGraph::from_undirected(&ug);
+            let root = terminals[0];
+            let mut sep = RootSeparation::new(&g, root, &terminals);
+            let Some(cert) = sep.advance(Cost::INFINITY, far(), 300, 1 << 20) else { continue };
+            if !sep.is_converged() {
+                continue;
+            }
+            let again = sep.recertify().expect("a converged model still solves");
+            assert!(
+                (again - cert.lp_bound).abs() <= 1e-6 * cert.lp_bound.abs().max(1.0),
+                "re-solve gave {again} against {}",
+                cert.lp_bound
+            );
+            compared += 1;
+        }
+        assert!(compared >= 20, "only {compared} loops converged; the test is vacuous");
     }
 }

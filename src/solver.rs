@@ -212,6 +212,9 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
 
     // A converged tightening carried into the next pass; see below.
     let mut reuse: Option<crate::root_reduce::Reduced> = None;
+    // The root cut loop's certified dual, restated for the graph the next pass
+    // will tighten. See [`ReduceConfig::initial_dual`].
+    let mut carried_dual: Option<crate::model::ArcDual> = None;
     for pass in 0..2 {
         // Split the remaining budget explicitly. Tightening will happily use
         // every second it is given — on SteinLib e13 two rounds of it consumed a
@@ -223,6 +226,11 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             deadline: Some(reduce_deadline),
             verbose: config.verbose,
             initial_upper_bound: incoming_ub,
+            // What the previous pass proved, handed forward instead of being
+            // re-derived. `carried_lower_bound` is already restated for this
+            // pass's graph; `carried_dual` is checked against it below.
+            initial_lower_bound: carried_lower_bound,
+            initial_dual: carried_dual.take(),
             ..ReduceConfig::default()
         };
         let tighten_start = Instant::now();
@@ -244,7 +252,11 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         // Reusable next time when it converged and nothing downstream can have
         // strengthened its hypotheses. The upper-bound test is made below, once
         // the pass has reported what it found.
-        let reusable = reduced.converged.then(|| (reduced.clone(), reduced.upper_bound));
+        let reusable =
+            reduced.converged.then(|| (reduced.clone(), reduced.upper_bound, reduced.lower_bound));
+        // The bound the fixpoint converged under, on its own reduced graph — the
+        // scale the next pass's dual is stated in.
+        let reused_lower_bound = reduced.lower_bound;
         // Whether this pass can exhibit a tree for the bound it will report.
         let witnessed_here = reduced.upper_bound_is_witnessed() || carried_primal_witnessed;
         // What the next pass will start from, before `finish` consumes `reduced`.
@@ -310,12 +322,40 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         carried_offset += next_offset;
         // Restated for the graph the next pass will run on.
         incoming_ub = b.primal_bound - carried_offset;
+        // The separation's certified dual, if the model it came from is the
+        // graph the next pass will actually run on. The test is `applies_to`'s —
+        // same arcs, same costs, same root, same terminals — an equality and not
+        // a hash, because a false positive would price the wrong arcs.
+        //
+        // It is stated on the reduced graph's scale, which is the scale the next
+        // pass tightens in, so no rebasing is needed or applied.
+        carried_dual = sep_cache.as_ref().and_then(|s| {
+            let directed = DirectedGraph::from_undirected(&pass_graph);
+            let root = *pass_terminals.first()?;
+            s.applies_to(&directed, root, &pass_terminals).then(|| s.arc_dual()).flatten()
+        });
         // The fixpoint survives into the next pass exactly when that pass would
-        // start it from the same graph with an upper bound no better than the
-        // one it converged under. A strictly better incumbent is new
-        // information: the bound-based reductions can kill more with it, so the
-        // fixpoint has to be recomputed.
-        reuse = reusable.filter(|(_, ub)| incoming_ub >= ub - 1e-9).map(|(r, _)| r);
+        // start it from the same graph with an upper bound no better than the one
+        // it converged under — and now, with a **dual** no stronger than the one
+        // it converged under either.
+        //
+        // The second half is the same argument as the first. Elimination power is
+        // `UB - LB`, so a pass handed a better `LB` and its arc prices is handed
+        // new information exactly as a pass handed a better `UB` is, and reusing
+        // the old fixpoint discards it: on instance083 the second pass reported
+        // the ascent's 3,100,512 while the cut loop was holding 3,100,519 for the
+        // same graph, because `tighten` never ran.
+        //
+        // The test is on the dual's own value against the fixpoint's, both stated
+        // on the reduced graph. A dual no stronger buys nothing that would restart
+        // the fixpoint, and §39's saving is kept in that case.
+        let dual_is_stronger = carried_dual
+            .as_ref()
+            .is_some_and(|d| d.value > reused_lower_bound + 1e-9);
+        reuse = reusable
+            .filter(|(_, ub, _)| incoming_ub >= ub - 1e-9)
+            .filter(|_| !dual_is_stronger)
+            .map(|(r, _, _)| r);
         carried_lower_bound = (carried_lower_bound - next_offset).max(0.0);
         if pass_terminals.len() < 2 {
             break;
@@ -884,6 +924,125 @@ const SEARCH_SLICE_LABELS: u64 = 4096;
 /// has spent more labels failing to move the frontier than it has left to spend
 /// at all. The doubling schedule makes that condition arrive on a stalled run
 /// and never on a run that is about to finish.
+/// Is another batch of separation on course to close this instance in time?
+///
+/// # The question the one-step test could not ask
+///
+/// The repayment test above asks whether the *last* batch paid for itself. That
+/// is the right question for a linear return and the wrong one for this curve:
+/// the measured investment on PACE instance083 is
+///
+/// ```text
+///   0.25 s   4 solves   packing 3,100,514.3   search fails
+///   0.5  s   6 solves   packing 3,100,516.8   search 2.72 s
+///   1    s   8 solves   packing 3,100,518.1   search 1.79 s
+///   2    s  14 solves   packing 3,100,519.3   search 0.75 s
+///   4    s  26 solves   packing 3,100,526.7   search 0.12 s
+/// ```
+///
+/// Every LP second roughly halves the search, so each *individual* step looks
+/// marginal while the sequence closes the instance. What has to be projected is
+/// the end of the sequence, and both halves of the projection are observable.
+///
+/// # The projection
+///
+/// Two quantities are measured on this instance in this pass, over the batches
+/// this call has already funded:
+///
+/// - **the separation's rate**, `dp/ds`, the packing value gained per second of
+///   separation, taken over all batches so far;
+/// - **the search's response**, how its frontier rate answers a change in the
+///   packing value.
+///
+/// The response is modelled as *log-linear*, `rate(p) = rate_0 e^{beta (p-p_0)}`,
+/// because that is the shape the table above has — a constant factor per unit of
+/// packing rather than a constant increment — and `beta` is estimated from the
+/// observed pairs by the total change across the batches. With `beta` in hand,
+/// the frontier rate needed to close the remaining gap `U - f` in the time left
+/// after `s` further seconds of separation is `(U - f)/(T - s)`, and the packing
+/// value that delivers it is
+///
+/// ```text
+///   p_needed = p + ln( (U - f) / ((T - s) * rate) ) / beta,
+/// ```
+///
+/// which costs `s = (p_needed - p) / (dp/ds)` seconds to reach. The two are
+/// coupled, so the predicate simply *scans* the batches the doubling schedule
+/// would actually buy — `s`, `2s`, `4s`, ... within `T` — and asks whether any
+/// of them leaves enough time for the search the projection implies. That is a
+/// handful of arithmetic operations over a sequence with at most `log2(T/s)`
+/// terms.
+///
+/// # What it may do
+///
+/// Only refuse. It gates whether a further batch of separation is funded, and by
+/// the proposition on [`potential_will_not_close`] the search's completed answer
+/// does not depend on which packings it was given. A wrong projection costs time
+/// and can never produce a wrong bound: every packing offered is verified against
+/// (PACK) first, and every bound the loop reports is certified from its own
+/// multipliers.
+///
+/// It returns `true` — keep funding — whenever it cannot see far enough to
+/// refuse: fewer than two batches (nothing to fit), a degenerate estimate, or a
+/// response that is flat but positive. Refusal is the exception and has to be
+/// earned.
+fn separation_route_is_worth_continuing(
+    batches: &[(Cost, f64, f64, f64)],
+    packing_value: Cost,
+    frontier: Cost,
+    upper_bound: Cost,
+    rate_now: f64,
+    horizon_secs: f64,
+) -> bool {
+    if batches.len() < 2 || horizon_secs <= 0.0 || !upper_bound.is_finite() {
+        return true;
+    }
+    let gap = upper_bound - frontier;
+    if gap <= 0.0 {
+        return true;
+    }
+    // The separation's own rate, over everything this call has funded.
+    let gained: Cost = batches.iter().map(|b| b.0).sum();
+    let spent: f64 = batches.iter().map(|b| b.1).sum();
+    if spent <= 0.0 || gained <= 0.0 {
+        // No packing gain at any price: there is nothing for the projection to
+        // extrapolate, and the repayment test above owns that case.
+        return true;
+    }
+    let dp_ds = gained / spent;
+
+    // The search's response to it. `beta` is the log-rate change per unit of
+    // packing, taken across the whole sequence so that one noisy slice cannot
+    // set it.
+    let first_rate = batches.first().map_or(0.0, |b| b.2);
+    if !(first_rate > 0.0) || !(rate_now > 0.0) {
+        // Without two positive rates there is no ratio to fit.
+        return true;
+    }
+    let beta = (rate_now / first_rate).ln() / gained;
+    if !(beta > 0.0) || !beta.is_finite() {
+        // A response that is flat or negative gives the projection nothing; the
+        // repayment test is then the only judge, and it has already run.
+        return true;
+    }
+
+    // Walk the batches the doubling schedule would buy and ask whether any of
+    // them leaves a search that fits.
+    let mut s = batches.last().map_or(0.0, |b| b.1) * 2.0;
+    let mut total = 0.0;
+    while total + s <= horizon_secs {
+        total += s;
+        let p = packing_value + dp_ds * total;
+        let rate = rate_now * (beta * (p - packing_value)).exp();
+        let search_secs = gap / rate;
+        if total + search_secs <= horizon_secs {
+            return true;
+        }
+        s *= 2.0;
+    }
+    false
+}
+
 fn potential_will_not_close(
     frontier_before: Cost,
     frontier_after: Cost,
@@ -1042,7 +1201,13 @@ fn run_search(
     // The frontier's rate of advance in the slice *before* the last increment,
     // and what that increment cost, so the slice after it can be asked whether
     // the investment repaid. See the repayment test below.
-    let mut pre_increment: Option<(f64, f64)> = None;
+    let mut pre_increment: Option<(f64, f64, Cost)> = None;
+    // The separation batches this call has funded: `(packing gain, seconds,
+    // frontier rate before, frontier rate after)`. The projection below is
+    // calibrated on them and on nothing else.
+    let mut batches: Vec<(Cost, f64, f64, f64)> = Vec::new();
+    // The length of the next batch; see the doubling schedule below.
+    let mut cert_batch: Option<std::time::Duration> = None;
     loop {
         if Instant::now() >= window || search.labels_settled() >= DS_LABEL_BUDGET {
             break;
@@ -1096,17 +1261,50 @@ fn run_search(
         // wiring is starved of exactly the time they took. The first increment
         // is never refused by this: there is no "before" until one has been
         // taken, which is the only way to find out what one buys.
-        if let Some((rate_before, spent)) = pre_increment.take() {
+        if let Some((rate_before, spent, packing_before)) = pre_increment.take() {
             let rate_after = if slice_secs > 1e-9 {
                 (r.lower_bound - before_frontier).max(0.0) / slice_secs
             } else {
                 0.0
             };
-            let seconds_left = window.saturating_duration_since(Instant::now()).as_secs_f64();
-            if (rate_after - rate_before) * seconds_left < rate_before * spent {
+            // The horizon is the solver's own remaining budget, not what is left
+            // of this window.
+            //
+            // The investment is a *packing*, and a packing outlives the window
+            // that bought it: it stays installed for the rest of this call, for
+            // the rest of this pass, and for every later pass, because both the
+            // search and the separation loop are resumed rather than rebuilt.
+            // Charging it against the window is charging a durable good at the
+            // rental price, and it is what refused the increment that opens
+            // instance083: three tenths of a second of separation doubled the
+            // frontier's rate, from 24.3 to 45.3 units a second, and the test
+            // declined it because 0.19 s remained *in the window* while 1.9 s
+            // remained in the solve.
+            let horizon = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+            let gain = (potential_value - packing_before).max(0.0);
+            batches.push((gain, spent, rate_before, rate_after));
+            if (rate_after - rate_before) * horizon < rate_before * spent {
                 if config.verbose {
                     eprintln!(
-                        "[certify] the last increment cost {spent:.2}s and moved the frontier's                          rate {rate_before:.1}/s -> {rate_after:.1}/s: it does not repay inside                          {seconds_left:.2}s, so no more this pass"
+                        "[certify] the last batch cost {spent:.2}s and moved the frontier's \
+                         rate {rate_before:.1}/s -> {rate_after:.1}/s: it does not repay inside \
+                         {horizon:.2}s, so no more this pass"
+                    );
+                }
+                stalled = true;
+            } else if !separation_route_is_worth_continuing(
+                &batches,
+                potential_value,
+                r.lower_bound,
+                root_upper_bound,
+                rate_after,
+                horizon,
+            ) {
+                if config.verbose {
+                    eprintln!(
+                        "[certify] the projection over {} batches does not reach the incumbent \
+                         {root_upper_bound:.1} inside {horizon:.2}s, so no more this pass",
+                        batches.len()
                     );
                 }
                 stalled = true;
@@ -1144,11 +1342,43 @@ fn run_search(
         // Spend the next increment on separation instead. Both of its outputs
         // are valid bounds on the reduced instance: the LP's own optimum, and
         // the packing's value.
+        // How long this batch of separation gets.
+        //
+        // The old rule bought a quarter of what remained of the window, once,
+        // and then asked whether it had paid for itself. The measured investment
+        // curve says that question cannot be answered from one step, because the
+        // curve is superlinear at its start: on instance083 a quarter-second of
+        // separation buys four solves and a packing of 3,100,514.3 under which
+        // the search does not finish, while four seconds buys twenty-six solves,
+        // a packing of 3,100,526.7, and a search that finishes in 0.12 s. Each
+        // LP second roughly halves the labels, so the first increment looks
+        // worthless and the fifth closes the instance.
+        //
+        // So the batch **doubles**. The first is the measured cost of the search
+        // slice that asked for help — spend on the alternative what the thing it
+        // replaces just spent — and each further batch is twice its predecessor.
+        // Two properties make that safe rather than a schedule to tune:
+        //
+        // - it reaches any budget in a logarithmic number of fundings, so the
+        //   superlinear part of the curve is actually visited;
+        // - the total spent when a batch is refused is at most twice the useful
+        //   part, because the batches form a geometric series.
+        //
+        // Nothing here is a fraction of the clock: the first batch is a duration
+        // measured on this instance in this pass, and the rest are doublings of
+        // it. It is still bounded by the window, which only ever refuses.
         let budget = window.saturating_duration_since(Instant::now());
         if budget.is_zero() {
             break;
         }
-        let cert_deadline = Instant::now() + budget.mul_f64(0.25);
+        // The first batch is the control's: a quarter of what remains of the
+        // window. It is left alone deliberately, so that what is being measured
+        // here is the *sequence* and not a resizing of its first term — an
+        // instance the control opens on its first increment still opens on it.
+        let batch = cert_batch.get_or_insert_with(|| budget.mul_f64(0.25));
+        let cert_deadline = Instant::now() + (*batch).min(budget);
+        *batch = batch.saturating_mul(2);
+        let packing_before = potential_value;
         let increment_started = Instant::now();
         let rate_before = if slice_secs > 1e-9 {
             (r.lower_bound - before_frontier).max(0.0) / slice_secs
@@ -1179,6 +1409,63 @@ fn run_search(
         for &a in &cert.eliminated_arcs {
             dead[a as usize] = true;
         }
+        // The *strengthened* fixing, from the same certified dual.
+        //
+        // `cert.eliminated_arcs` is the plain rule `z + rc_a > UB`. The stronger
+        // one charges the whole of what an arborescence through `a` must pay:
+        // it also contains a root-to-tail path and, below the head, a path down
+        // to a terminal, and those three parts are pairwise arc-disjoint — the
+        // head's only in-arc is `a`. So
+        //
+        // ```text
+        //   c(A) >= L + d_r(root, u) + d_a + d_r(w, T)      for a = (u,w) in A,
+        // ```
+        //
+        // exactly the argument [`reduced_cost_fixings`] makes for a dual ascent,
+        // and it transfers verbatim because the only properties it uses are the
+        // ones [`crate::model::ArcDual`] proves: a valid bound `L`, non-negative
+        // arc prices, and `c(A) >= L + sum_{a in A} d_a` for every minimal
+        // arborescence rooted here. The LP's dual is far stronger than an
+        // ascent's — an ascent's packing is maximal and cannot trade one
+        // multiplier for another — so the same argument prices more.
+        //
+        // Both conclusions come from the *same* root, so unioning them at the
+        // arc level is sound; see `root_reduce`'s module header for why the
+        // union across *different* roots is not, and note that an edge here dies
+        // only when both orientations do.
+        if let Some(d) = &cert.arc_dual {
+            if root_upper_bound.is_finite() && d.reduced.len() == directed.num_arcs() as usize {
+                let priced = crate::graph::algorithms::DualAscentResult {
+                    lower_bound: d.value,
+                    reduced_costs: d.reduced.clone(),
+                    root: d.root,
+                    steps: Vec::new(),
+                    cuts: Vec::new(),
+                    sets: Vec::new(),
+                };
+                let idx = ArcIndex::new(&directed);
+                let active = vec![true; idx.num_arcs()];
+                let dists = crate::graph::algorithms::reduced_cost_distances(
+                    &idx,
+                    d.root,
+                    terminals,
+                    &priced.reduced_costs,
+                    &active,
+                );
+                let fix = crate::graph::algorithms::reduced_cost_fixings(
+                    &idx,
+                    d.root,
+                    terminals,
+                    &priced,
+                    &dists,
+                    &active,
+                    root_upper_bound,
+                );
+                for &a in &fix.arcs {
+                    dead[a as usize] = true;
+                }
+            }
+        }
         let before = work_graph.edges.len();
         let mut smaller = work_graph.clone();
         smaller.edges = work_graph
@@ -1190,13 +1477,14 @@ fn run_search(
             .collect();
         if config.verbose {
             eprintln!(
-                "[certify] lp bound {:.1}, packing {:.1} over {} sets, {} solves (+{}), \
+                "[certify] lp bound {:.1}, packing {:.1} over {} sets, {} solves (+{}) [{:?}], \
                  {} rows{} (ascent {:.1}), edges {} -> {}",
                 cert.lp_bound,
                 cert.packing.value,
                 cert.packing.sets.len(),
                 cert.lp_solves,
                 cert.lp_solves - solves_before,
+                sep.method(),
                 sep.num_rows(),
                 if sep.is_converged() { ", converged" } else { "" },
                 root_lower_bound,
@@ -1219,7 +1507,8 @@ fn run_search(
             stalled = true;
             continue;
         }
-        pre_increment = Some((rate_before, increment_started.elapsed().as_secs_f64()));
+        pre_increment =
+            Some((rate_before, increment_started.elapsed().as_secs_f64(), packing_before));
         match search.add_packing(&cert.packing.sets) {
             PackingAdmission::Added => potential_value = cert.packing.value,
             // Loud, because a silent one invalidated an experiment once. See
