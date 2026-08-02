@@ -110,6 +110,7 @@ fn solve_with(path: &str, time_limit: f64, preprocess_on: bool) -> BenchResult {
         partition_cuts: true,
         activation_rank_cuts: false,
         tf_cuts: true,
+        initial_upper_bound: f64::INFINITY,
     };
 
     let result = solve_file(path, config);

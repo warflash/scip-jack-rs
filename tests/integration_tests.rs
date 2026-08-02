@@ -20,6 +20,7 @@ fn quick_config(time_limit: f64) -> SolverConfig {
         partition_cuts: true,
         activation_rank_cuts: false,
         tf_cuts: true,
+        initial_upper_bound: f64::INFINITY,
     }
 }
 

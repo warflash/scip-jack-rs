@@ -3226,3 +3226,578 @@ Proposition 8 as one more test inside it.
   come as a piece rather than as separate tests.
 - **`s_p`-based contraction** — not attempted, and §59 predicts it will not fire
   either: it needs the same profits on the same walks.
+
+## 2026-08-02 (twelfth round): the table that is exactly the bound, and a bound that finally carries a tree
+
+### 64. The control, and what "the same binary" means this round
+
+`tmp/control/control.exe` is HEAD (`1e508b3`) built `--release --all-targets`
+before any algorithmic change. Every A/B below is eight-way parallel on both
+sides, at least twice per side, and reported as a range. The library suite grew
+from 166 to 178 tests; `cargo check --all-targets` is clean and the benchmark
+binaries (`td_census`, `table_census`, `extended_probe`, `certify_probe`,
+`tw_probe`, `profit_probe`, `cutoff_probe`, `ci_benchmark`) all compile.
+
+Two new probes:
+
+- `src/bin/table_census.rs` — the raw and reduced reachable table size per
+  `S`-class as a function of bag size, over the pipeline's own graph.
+- `src/bin/extended_probe.rs` — what the extended reduction deletes, and what the
+  decomposition width does afterwards.
+
+### 65. Item 0's sizing question, answered: the raw table is Bell and the reduced table *is* the bound
+
+The question was whether the rank reduction is needed at widths 14–20 or whether
+the width ceiling is an artefact of a representation nobody needs there. It is
+answered by measurement, on the 42 Track 2 instances that refuse at width 14–20,
+and the answer is the second branch of item 0's own dichotomy.
+
+**The recurrence with nothing packed and nothing reduced.**
+`steiner_td::reference` is the same dynamic programme over `Vec<u8>` signatures:
+no `MAX_BAG`, no reserved sentinel, no reduction, every reachable state kept. It
+is the definition the fast path is a compression of, it is gated against
+Dreyfus-Wagner *and* against the packed DP on the same nice decomposition
+(`reference_dp_agrees_with_the_packed_dp_and_with_dreyfus_wagner`, 400+ graphs,
+half of them unit-cost), and it is the instrument for this question.
+
+**Raw reachable class sizes**, maximum over all classes at each `|S|`, summed
+over the 42 instances at width cap 21:
+
+| \|S\| | classes seen | max raw class | Bell(s) | 2^(s-1) |
+|---|---|---|---|---|
+| 3 | 4,826,193 | 5 | 5 | 4 |
+| 4 | 4,958,393 | 15 | 15 | 8 |
+| 5 | 3,728,892 | 52 | 52 | 16 |
+| 6 | 2,139,173 | 203 | 203 | 32 |
+| 7 | 931,687 | 877 | 877 | 64 |
+| 8 | 297,651 | 4,140 | 4,140 | 128 |
+| 9 | 67,190 | 19,190 | 21,147 | 256 |
+| 10 | 10,586 | 69,548 | 115,975 | 512 |
+| 11 | 1,221 | 206,875 | 678,570 | 1,024 |
+| 12 | 107 | 552,964 | 4,213,597 | 2,048 |
+
+The raw class is **Bell-saturated up to `s = 8`** — every partition of the used
+set is reachable — and is still 13 % of Bell at `s = 12`, against a rank bound of
+2,048. It does not stay in the hundreds. So the rank reduction is not overhead at
+these widths; it is the only reason the dynamic programme runs at all, and §34's
+"15 to 39 states per class" was a measurement of the *reduced* table, not of the
+raw one.
+
+**Reduced class sizes, same runs, reduction on** (a dynamically sized basis,
+`reference::DynBasis`, gated by the same exhaustive representation-theorem test
+over every partition of every ground set up to size seven):
+
+| \|S\| | max reduced class | 2^(s-1) |
+|---|---|---|
+| 8 | 128 | 128 |
+| 10 | 512 | 512 |
+| 12 | 2,048 | 2,048 |
+| 14 | 8,192 | 8,192 |
+| 15 | 16,384 | 16,384 |
+
+**The reduced table is exactly `2^{|S|-1}` at every `|S|` from 2 to 15.** Not
+close to it — equal to it, at every level, on every instance. The reduction is
+tight and the bound it reduces to is attained.
+
+That is the fact everything else this round rests on, and it kills item 1.
+
+### 66. Item 1 is closed, and the reason is stronger than the encoding
+
+Item 0 instructed: *if it grows like Bell, item 1 is dead and item 3 is the whole
+game*. It grows like Bell. Stating the closure precisely, because the conclusion
+is not "the encoding was fine":
+
+1. **The rank reduction cannot be made optional.** The raw table is Bell and the
+   reduced table is `2^{s-1}`; at `s = 12` that is a factor of 270, at `s = 8` a
+   factor of 32. Keeping the raw table anywhere the DP currently works is an
+   exponential regression.
+2. **The rank reduction cannot be afforded at `s >= 16`.** A basis at one class
+   holds up to `2^{s-1}` rows of `2^{s-1}` bits, which is `4^{s-1}/8` bytes:
+   134 MB at `s = 16` for *one class*, against `C(21,16) = 20,349` classes at
+   that level; 34 GB at `s = 20`. And §65 says the rank is attained, so this is
+   what the reduction would actually allocate, not a worst case it avoids.
+3. **The addressable width is therefore not the binding constraint.** The total
+   reduced table at a bag of `b` positions is
+   `sum_s C(b,s) min(Bell(s), 2^{s-1})`, which is `Theta(3^b)`: 14 M at `b = 15`,
+   43 M at `b = 16`, `3.1e10` at `b = 22`. The join is `5^b/4`. Re-encoding the
+   signature to reach bag 22 would address tables that cannot be filled.
+
+**And the direct experiment agrees.** All 42 instances were run through the
+unpacked DP *with* the reduction at a 4 M live-state cap and a 120 s deadline, at
+width cap 21. **All 42 aborted.** Peak live states 3.5 M to 9.6 M; the widest
+basis 1 MB to 33 MB, at `|S| = 13` to `15`; the reduction refused a class on
+budget grounds **zero** times, so the basis was never the limit — the state count
+was.
+
+**The confirmation that settles it.** `instance100` is one of the three
+instances the extended reduction of §68 moves below the encoding's cap: its width
+goes 14 to 12 and it becomes addressable. `td_census` then reports a work
+estimate of `1.44e10` and a **timeout at 20 s**. At width *twelve* — four below
+the cap, on a graph the encoding has always been able to represent — the DP is
+already out of reach. Raising `MAX_BAG` would not have closed it.
+
+So the width ceiling of 13 is not an artefact of a `u64` with 4-bit fields. It
+sits where `3^b` states and `5^b` join pairs stop fitting in a five-second
+budget, and the two representations are sized to that point rather than causing
+it. **Item 1 is closed. Items 1 and 3 are re-ordered: item 3 is the whole game,
+exactly as item 0 said it would be if this table grew like Bell.**
+
+A by-product worth keeping. `steiner_td::table_bound` was documented as an upper
+bound "still a loose one — the reachable signatures at a bag are a small fraction
+of the representable ones". §65 shows the per-class factor is *tight*: the
+looseness is entirely in which classes are reachable, not in how big a reachable
+class is. Calibrating `work_estimate` against measured DP time on the four Track
+2 instances the DP closes:
+
+| instance | width | work estimate | DP secs | units/s |
+|---|---|---|---|---|
+| 026 | 6 | 8.63e6 | 0.11 | 7.8e7 |
+| 022 | 6 | 8.59e6 | 0.22 | 3.9e7 |
+| 051 | 9 | 1.71e8 | 1.06 | 1.6e8 |
+| 040 | 10 | 5.00e8 | 2.75 | 1.8e8 |
+
+`TD_UNITS_PER_SECOND = 2.0e7` is conservative by two to nine times, which is
+*safe* — it refuses work it could have afforded — and the spread is now under one
+order of magnitude rather than the two the notes record. The estimate has become
+usable as an absolute admission test. Recalibrating it is a change with its own
+A/B and was not made this round.
+
+### 67. Item 2: an incumbent that carries its own graph
+
+§61 left this exactly: the reachable failure is `finish` reporting
+`primal = dual = root_upper_bound` on a bound whose witness it never sees, and
+the repair needs a change to what `Reduced` stores rather than a check bolted on
+afterwards. Two bolt-ons had failed, the second producing three wrong answers.
+
+**What was wrong with re-basing alone.** The task's own formulation — carry the
+incumbent as objects of the current graph, re-based whenever the graph shrinks —
+cannot be made unconditional, and the reason is not an implementation detail. The
+eliminations preserve the trees *strictly cheaper* than the incumbent, and the
+incumbent is not cheaper than itself, so its own edges are legitimately
+deletable; the classical reductions then contract, and an edge whose endpoints
+merge has no image at all. A witness that must survive every shrink is a witness
+that will sometimes not exist.
+
+**The object that works.** `Reduced::witness` is a `Witness`: an edge set,
+**together with the graph it is an edge set of**, its terminals, its recomputed
+cost, and the tightening's accumulated offset at the moment it was taken.
+Re-basing onto the current graph is still attempted at every shrink and taken
+when it is exact — which keeps the stored graph small — but when it fails the
+snapshot stands, and the snapshot cannot fail.
+
+> **Proposition (witness invariant).** Let `(G_j, W_j, c_j, o_j)` be the graph,
+> edge set, cost and accumulated offset recorded when the incumbent was last
+> improved. Then at every later point of `tighten`,
+> `upper_bound + offset = c_j + o_j`, and `W_j` is a tree of `G_j` spanning its
+> terminals of cost `c_j`.
+>
+> *Proof.* At the improvement `upper_bound := c_j` and `offset = o_j`. Only three
+> later statements touch either side: `offset += rg.offset` paired with
+> `upper_bound -= rg.offset` preserves the sum; a further improvement
+> re-establishes the snapshot; `lower_bound := upper_bound` touches neither. A
+> re-basing replaces the snapshot only when the new `c + o` equals the old, by
+> construction. QED
+>
+> *Corollary.* `G_j` is reachable from the graph handed to `tighten` by
+> contractions charging exactly `o_j`, so by the contraction lemma there is a
+> tree of *that* graph of cost `c_j + o_j = upper_bound + offset`. A report of
+> `upper_bound + offset` rests on an exhibited object.
+
+`Reduced::verify_witness` re-derives it: edge ids bounds-checked against the
+stored graph, costs read from that graph, connectivity recomputed by union-find
+over the endpoints it reports, duplicates rejected. Nothing is taken on trust
+from the numbering the tree was found in, because keeping that numbering is the
+whole mechanism.
+
+**What the gate does and does not do.** `ub_witnessed` gates only the *claim of
+achievement*. It never changes a cutoff, never discards a bound, and never
+touches the reduction — §61's second repair did all three. Three report paths are
+affected: the ascend-and-prune exit, `exact_report` (the search's and the width
+DP's shared exit), and the `search_lower_bound >= root_upper_bound` path that §61
+names. A fourth, the branch-and-cut's `primal = root_upper_bound` seed, was
+changed too: a primal bound is a claim that some tree achieves it, so an
+unwitnessed cutoff may not start one. And the inference "the model is infeasible
+below the incumbent, therefore the incumbent is optimal" now requires the
+incumbent to exist.
+
+**The reproduction.** Two generators were written and both were useless, which is
+worth recording because *the test passed in both cases and proved nothing* —
+precisely the failure §63's closing note warns about. Small dense graphs are
+closed by `try_dreyfus_wagner` before the tightening runs; instrumenting the
+first version showed **291 of 291 cases** taking that shortcut. Near-trees are
+closed by the classical reduction, which contracts them to fewer than two
+terminals and returns `trivial_result`. The generator that works is a weighted
+grid — minimum degree two everywhere, no degree-one chains, and more than
+twenty-four terminals so `dw_is_affordable` refuses — run with
+`SolverConfig::initial_upper_bound` set *below* the optimum, which reaches the
+state §61 describes deterministically rather than by a heuristic accident.
+
+With the gate disabled, that test reports **`Optimal 82` against a true optimum
+of 83**. With it enabled it does not. That is instance184's shape, reproduced in
+a unit test, and it is the first time this failure has been caught by anything
+other than a benchmark reference.
+
+**What the invariant caught in its own author's code.** The first version
+installed an empty witness whenever the loop reached fewer than two terminals.
+PACE Track 1's instance080 then reported `Primal: inf`. The invariant was right
+and the code was wrong: instance080 reaches a one-vertex graph with
+`upper_bound = -3` and `offset = 1410`, because the incumbent was found in round
+one at 1407, the eliminations then removed the trees attaining it, and the
+contractions charged 1410. The carried arithmetic is correct —
+`-3 + 1410 = 1407`, the cost of a tree of the *round-one* graph — while the final
+graph attains only 1574. The empty tree costs 0 and witnesses 1410, a different
+and worse value. Installing it reproduces §61's version-two answer of **1574
+against a reference of 1571** exactly. The snapshot from round one is the right
+witness, and the fix is to install the empty one only when `upper_bound` is
+actually zero. All three of §61's wrong answers now come out right: instance080
+to 1571, instance157 to 1098, SteinLib e04 to 5101.
+
+**What is still not covered, stated rather than glossed.** `merge` recomputes an
+outcome's status from the merged bounds, so two passes can jointly reach
+`Optimal` at a value neither claimed. That is sound while the primal is
+exhibitable, and after this round it always is — an unwitnessed
+`root_upper_bound` never enters a primal position, so a `Feasible` report's
+primal is either a proved optimum of the reduced graph or infinity. What remains
+uncovered is the composition *in the unwitnessed regime*: if the reduction under
+an unwitnessed cutoff destroyed the optimum, the reduced graph's own optimum is
+above the instance's, and a dual that reaches it would be a dual for the wrong
+problem. That regime is unreachable from the default configuration, where
+`initial_upper_bound` is infinite and every bound comes from a tree a round
+found; it is reachable only through the new warm-start parameter, which is what
+the pipeline test exercises. Closing it properly needs the dual to carry a
+provenance the way the primal now does, and that was not attempted.
+
+**Gates.** `a_loose_cutoff_still_leaves_the_optimum_in_the_graph` now also checks
+the witness on every run, at three slack levels;
+`an_unwitnessed_incumbent_is_never_reported_as_proved` (dense graphs, 291 cases),
+`an_unwitnessed_incumbent_is_never_proved_on_the_full_pipeline` (grids, with and
+without the classical stage), and
+`a_true_incumbent_supplied_without_a_tree_is_still_proved` — the positive control
+for §61's version-one failure, which requires at least 90 % of instances handed
+their own optimum without a tree to still be proved. The last one is why `round`
+now reports its best tree on a *tie* and not only on a strict improvement: a warm
+start at the true optimum is never beaten, so nothing would ever be recorded.
+
+### 68. Item 3: the extended-reduction framework, and the first thing that deletes anything on the refused set
+
+`src/preprocessing/extended.rs`. Algorithm 1 (Extended-RuledOut) with Algorithm
+2's extension sets, depth-first from the leaf farthest from the seed; Corollary 3
+as the contracted-distance criterion; Proposition 7 as the pruned-tree bottleneck
+criterion.
+
+**The simplification that makes it affordable, stated as a proof and not as an
+approximation.** Throughout, `P = L(Y)`. For a tree, the union of the
+leaf-to-leaf paths is the whole tree, so `Y_P = Y`, every `Y_p` is the single
+vertex `p`, and the contracted graph `G_{Y,P}` of Theorem 3 **is `G`**. The
+"contracted distance network" is the ordinary special-distance network and
+nothing is contracted at all. The hypothesis `V(Y_P) ∩ T ⊆ L(Y_P)` is an
+invariant: the seed satisfies it and extension happens only at non-terminal
+leaves.
+
+**Where the error may go.** Every criterion compares a sum of special distances
+against `c(E(Y))`, so `s` may be replaced anywhere by an **over-estimate**: both
+`z'` and `z''` only grow and the criterion only becomes harder to satisfy. That
+licence is used twice, and it is what lets the distance oracle be cheap. `s` here
+is the minimum of the exact terminal-chain closure (`SdClosure`, a min over a
+*subset* of the admissible walks, hence at least `s`) and a **radius-bounded**
+shortest path from the newest leaf, radius `c(E(Y))` — one bounded Dijkstra per
+enumerated tree, stacked with the depth-first search and popped on backtrack.
+Entries the radius cut off stay at infinity, which is an over-estimate, which is
+safe.
+
+**The extension exchange argument, and where zero costs bite.** If `v` is a
+non-terminal leaf of `Y` and `Y` is peripherally contained in a leaf-pruned
+minimum tree `S`, then `deg_S(v) >= 2`, so the extra edges are non-empty, and
+`Y + γ` is peripherally contained in `S` because `Y + γ` differs from `Y` only at
+a leaf. Ruling out every `γ` in the extension set therefore rules out `Y`.
+*Leaf-pruned* is load-bearing: the step needs some minimum tree with no
+non-terminal leaf, which exists for nonnegative costs. So the conclusion
+delivered is "no leaf-pruned minimum tree contains `e`", and deleting `e`
+preserves that tree — which is exactly the invariant this pipeline is stated in
+(`reduced optimum + offset = original optimum` asks for *an* optimum to survive).
+The base criteria prove the stronger "no minimum tree at all", so mixing them
+loses nothing.
+
+**One subtlety that is easy to get wrong and was.** Algorithm 2 classifies a
+single-edge extension `Y + {e}` under the pruning set `L(Y) ∪ {w}` — the *old*
+leaf set plus the new vertex — and **not** under `L(Y + e)`. The difference
+matters: the routine must guarantee something about every superset containing
+`e`, and a pruning set for `Y + {e}` transfers to `Y + γ` only if the extra
+branches of `γ` hang off a member of it. They hang off `v`, which is in `L(Y)`
+and is *not* in `L(Y + e)` — adding `e` made it interior. Using the new leaf set
+proves a statement about `Y + {e}` alone and discards `e` on the strength of it.
+That is the gap Observation 3 closes and the first implementation had it wrong.
+
+**Gates.** Three exhaustive brute-force generators, each asserting `reduced
+optimum + offset = original optimum` and that the terminals stay connected:
+random weighted graphs with a spanning path plus chords (900 cases), **dense**
+graphs at 85 % density (500 cases, the regime where extension sets are genuine
+power sets), and **unit-cost** graphs (600 cases, where every tie the strict
+inequalities separate actually occurs). Each asserts that the rule fired at least
+once, so a test that proves nothing fails.
+
+**Measured, on the 42 Track 2 instances at width 14–20 where
+`root_reduce::tighten` deletes nothing** (median edge ratio 1.000). Enumeration
+at `max_edges = 4`, `max_nodes = 800`, with the classical fixpoint interleaved so
+the deletions cascade:
+
+- It **fires on 31 of the 42**, which is the first thing in this solver to delete
+  anything on that set.
+- Edge ratios after the cascade: median 0.988, best **0.941** (instance177),
+  against a median of 1.000 for the existing arsenal.
+- Vertices, terminals and width all move: instance098 730 to 613 vertices, 87 to
+  76 terminals; instance160 width 18 to 15; instance175 20 to 18; instance182
+  22 to 20.
+- **Three cross the encoding's cap**: instance100 14 to 12, instance123 14 to 13,
+  instance098 15 to 13.
+- Width is not monotone under edge deletion and two instances got *wider*
+  (instance177 19 to 20, instance180 19 to 21), which is expected and is why the
+  probe reports the width rather than assuming it.
+- Depth pays and costs: on instance083, `max_edges` 2/3/4/5/6 deletes 0/0/5/7/12
+  edges in 0.03/0.08/0.44/1.56/8.62 s.
+
+Corollary 3 does essentially all the work: on instance083 at depth 4 it fires
+10,225 times against Proposition 7's 8. That is worth recording as a negative on
+Proposition 7 rather than on the framework — with `P = L(Y)` the pruned-tree
+bottleneck has few admissible interior vertices to work with, because every leaf
+is in `P`.
+
+**Where it would be wired, and why there and not in `tighten`.** In
+`preprocess_bounded`, after the classical rules *and* the region bound have both
+reached their fixpoint. It is **not** wired, and §72 gives the measurement that
+decides that — but the placement is the measured one and is recorded because the
+next attempt should keep it. The measured condition is "everything single-edge has
+stopped", which is where the failing instances live and which an instance solved
+outright never reaches. Placing it in `tighten` was tried first and does not run
+at all: on instance100 the classical fixpoint converges in 0.10 s of a 1.67 s
+share while the tightening's own round *overruns* its deadline by seconds and
+deletes nothing, so the enumeration was handed an expired clock. The unused
+budget is in the classical stage. The enumeration's budget is what the
+single-edge rules themselves cost on this graph — measured, self-scaling, no new
+fraction of the clock — capped by the deadline.
+
+### 69. What the width crossing does not buy, measured
+
+Three instances cross the encoding's cap and none of them is proved by it, and
+the reason is §66's arithmetic rather than a scheduling accident. `instance100`
+at width **12** — four below the cap — has a work estimate of `1.44e10` and
+`td_census` times it out at 20 s. At the measured 1.6e8 units/s that is ninety
+seconds. The DP's cost is `3^b` per bag times the number of bags, and instance100
+has 1,052 bags.
+
+So the extended reduction demonstrably does the thing item 3 asks for — it
+shrinks the graph, the terminal set and the width simultaneously, on the set
+where nothing else deletes anything — and at a five-second budget the downstream
+cannot convert the gain into a proof. That is a negative result about the
+*integration* and not about the mechanism, and the two must not be conflated: the
+mechanism is what item 3 asked for, it is proved, gated and measured, and the
+instances it moves are moved by a real amount.
+
+### 70. The wrong answer, the two faults behind it, and the hour lost to a binary that was not the source
+
+Wired into `preprocess_bounded` and A/B'd, the framework produced **`Optimal 9187`
+on PACE Track 1's instance135 against a reference of 9143**. Two faults were
+behind it. Both are the kind that survive a brute-force gate, and the second is
+the more instructive.
+
+**Fault one: a cap that was applied as a truncation.** `extension_sets` truncated
+its extension sets to `max_extensions`. Ruling out a *subset* of the extensions
+rules out nothing — `success` at a leaf asserts that every surviving `γ` is
+impossible, and a cap that silently drops the rest turns that into a claim about
+the ones that happened to be cheap. The doc comment on `max_extensions` even said
+a capped leaf could not establish `success`; the code did not implement what the
+comment promised. It is now a *refusal* threshold: a leaf with more sets than may
+be examined is skipped entirely, which is conservative in the only direction that
+is safe.
+
+**Fault two: a special distance that was too small.**
+`ReducibleGraph::terminals` is not pruned by `remove_node`, so retired ids stay in
+it. Handing those to `SdClosure::build` gives it distance rows that are infinite
+everywhere; the metric-closure spanning tree over the terminals then becomes a
+*forest*, and the half-closure derived from a forest is not the special distance
+of anything. Every criterion in this module is licensed to use an **over**-estimate
+of `s` — that is the whole reason the oracle can be cheap — and this made it an
+under-estimate, which is the one direction the licence does not cover.
+
+**Why the gates could not see either.** All three brute-force generators build a
+`ReducibleGraph` from a *fresh* instance: nothing retired, nothing contracted, the
+live and stored terminal sets identical, and the trees small enough that
+`max_extensions` never binds. The regime that matters is the one
+`preprocess_bounded` actually presents, and no generator produced it. A fourth
+generator was added — 18 to 40 vertices, mixed densities, parallel edges,
+unit-cost rounds, Dreyfus-Wagner as the oracle, 1,500 cases — and it does not
+reach them either. **The gate that is still missing is one that runs the classical
+fixpoint first and the enumeration second**, so that the enumeration sees a graph
+with retired ids and synthetic edges in it. That is the test to write before the
+next change to this module.
+
+**The hour lost, recorded because the lesson is cheap and the mistake was not.**
+Both fixes were written correctly and both were then measured *against a binary
+that did not contain them*. `cargo build --release` followed by `cp` in one
+command line, with background jobs running, produced a copy that still returned
+9187; the bisect that followed spent an hour eliminating hypotheses against that
+stale copy and concluded — wrongly — that the fault was somewhere in Algorithm 1's
+extension step, unreachable at depths one to three. Rebuilding from the same
+source afterwards returns 9143 on three runs out of three, and the binary built at
+the time still returns 9187, which is the whole proof. The rule this earns:
+**verify that a binary reflects the source before drawing a conclusion from it**,
+particularly when the conclusion is "the mathematics is wrong".
+
+For the record, the bisect below describes the code **before** the two fixes. It
+is kept because it did its job — it eliminated Corollary 3, Proposition 7, the
+`P''` partition and Algorithm 2's classification as *individual* causes and
+pointed at the enumeration, which is exactly where fault one lives — and because
+its depth column is a real property of fault one: a cap on extension sets can only
+bind once trees are large enough to have several.
+
+| variant (pre-fix code) | instance135 |
+|---|---|
+| full | 9187 |
+| Corollary 3 disabled | 9143 |
+| Proposition 7 disabled | 9187 |
+| enumeration depth 1, 2 or 3 | 9143 |
+| enumeration depth 4 | 9187 |
+| depth 4, `P''` peeling disabled | 9187 |
+| depth 4, Algorithm 2's classification disabled | 9187 |
+| depth 4, Corollary 3 restricted to `\|P\| <= 2` | 9187 |
+| depth 4, Corollary 3 fired only at `\|E(Y)\| = 1` | 9187 |
+
+After both fixes, instance135 returns 9143 on every run, at every enumeration
+depth, and under both the full-deadline and a 50 ms enumeration budget — the
+budget was tested explicitly because it was the other candidate explanation and
+it is not the cause.
+
+### 71. The final matrix
+
+Two passes a side for the control, three for the shipped build on the two slices
+that carry the most instances, eight-way parallel, on the same tree and machine,
+interleaved rather than back to back.
+
+| slice | control (HEAD `1e508b3`) | shipped |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 139, 140 | 139, 139, 140 |
+| PACE Track 1 [155..200] @5 s | 26 | 25, 26 |
+| PACE Track 2 [1..200] @5 s | 109, 111 | 110, 111, 112 |
+| SteinLib B @5 s | 18/18 | 18/18 |
+| SteinLib C @5 s | 20/20 | 20/20 |
+| SteinLib D @5 s | 20/20 | 20/20 |
+| SteinLib E @20 s | 19/20 | 19/20 |
+
+**No instance reports a value differing from its reference under an `Optimal`
+status, in any slice of any run, on either side.** The shipped build is the
+control plus item 2 — a correctness gate, not a performance change — and the
+numbers say exactly that: every slice overlaps.
+
+The two variants measured and **not** shipped:
+
+| slice | shipped | extended reduction wired in |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 139, 139, 140 | **140** |
+| PACE Track 1 [155..200] @5 s | 25, 26 | 24 |
+| PACE Track 2 [1..200] @5 s | 110, 111, 112 | **106** |
+| SteinLib B/C/D/E | 18 / 20 / 20 / 19 | 18 / 20 / 20 / 19 |
+
+Also zero wrong answers — see §73 for why it is nonetheless off.
+
+### 72. Why the extended reduction is correct and still not shipped
+
+§68 measured what it *deletes*; this is what it *costs*, and the two are
+independent measurements that had to be made separately.
+
+Wired into `preprocess_bounded` with the classical stage's remaining deadline, it
+takes Track 2 from 110–111 to **106** and Track 1's tail from 25–26 to 24, while
+gaining one on Track 1 [1..140]. Nothing is wrong with any answer it produces.
+What changes is where the budget goes: on PACE instance100 the classical fixpoint
+stops converging in 0.10 s of its 1.67 s share and starts using all of it, and the
+instances that pay for that are the ones the width DP would have closed outright
+— 026 at width six in 0.06 s, 059, 064 — which go unproved.
+
+That is a `§50`-shaped comparison and it comes out against the enumeration: at a
+five-second budget, on Track 2 as a whole, a second spent enumerating trees is
+worth less than a second spent in the exact finish. It is *not* a statement that
+the reduction is weak. On the 42 instances it was built for it is the only thing
+that deletes anything at all, and three of them cross the width DP's cap (§68).
+The two facts are consistent: the instances it helps are a fifth of the slice, and
+the instances it costs are ones that were already being closed.
+
+**What would make it pay, stated as the next experiment rather than as a hope.**
+A dispatch that runs it only where the downstream cannot use the time — the
+refused, many-terminal regime of §47, where the goal-directed search cannot
+address the instance at all and the DP refuses the width. That needs the
+decomposition width measured *before* the reduction rather than after, which is a
+measurement `solver::solve` can make and `preprocess_bounded` cannot. It is a
+scheduling change with its own A/B and it was not made this round.
+
+Until then the module is live code with live tests and no caller, the disposition
+`implied_profit.rs` has carried since §59 — but for a different and better reason:
+`implied_profit` is not wired because it deletes nothing, and this is not wired
+because what it deletes is not, at five seconds, worth what it costs.
+
+### 73. What was delivered, and what was not
+
+**Item 0 — delivered in full.** The control was preserved before any algorithmic
+change; two new probes emit per-instance CSV; every A/B is two or three passes a
+side at the same parallelism, reported as a range; `cargo check --all-targets` is
+clean and all fourteen binaries build. The sizing question is answered with a
+growth curve (§65) and items 1 and 3 are re-ordered on the strength of it, with
+the reason stated (§66).
+
+**Item 1 — closed mathematically, not for want of budget.** The raw table is
+Bell, the reduced table is **exactly** `2^{|S|-1}` at every `|S|` from 2 to 15,
+the reduction's own footprint is `4^{s-1}/8` bytes per class, and an instance at
+width *twelve* — four below the encoding's cap — already needs ninety seconds.
+Re-encoding the signature to reach bag 22 would address tables that cannot be
+filled. The one experiment that could have contradicted this, the unpacked
+reduction run at width cap 21 on all 42 instances, aborted on all 42, with the
+state count and never the basis as the limit.
+
+**Item 2 — delivered in full.** `Reduced::witness` carries the graph its tree
+lives in; the invariant is proved and debug-asserted at every exit of `tighten`;
+four report paths are gated; the failure is reproduced in a unit test that fails
+with the gate disabled and passes with it enabled; all three of §61's wrong
+answers now come out right; and the A/B is clean across seven slices, two passes
+a side. The residual — a dual with no provenance, in the unwitnessed regime only —
+is stated in §67 rather than glossed.
+
+**Item 3 — delivered in full as a mechanism, withheld as an integration on a
+measurement.** Algorithm 1, Algorithm 2, Theorem 3 via Corollary 3 and
+Proposition 7 are implemented and proved, with the `P = L(Y)` simplification that
+makes the contracted distance network the ordinary one. Four brute-force
+generators gate it. Two real faults were found in it and fixed (§70). It is the
+first mechanism in this solver to delete anything on the 42 refused instances — 31
+of 42, median edge ratio 0.988, three crossing the width cap — and wired in it
+produces no wrong answer on any slice. It is off because it costs four Track 2
+proofs and two on Track 1's tail (§72), which is a scheduling result and names
+its own next experiment. Proposition 8 was not implemented; §62 already showed it
+is worth exactly as much as the enumeration that feeds it, and the enumeration
+now exists but does not yet have a budget it can be given.
+
+**Item 4 — not attempted.** A resource decision, not a closed direction. Item 0's
+census re-ordered the work and item 3 consumed the round. §52's derivation of what
+an output-sensitive join would have to be stands unchanged, and §47's arithmetic —
+2.5 to 4 times overall closes seven to eleven of the twenty-eight DP timeouts — is
+unrevised. The "eight that were merely starved" is now better understood from a
+different direction: §69 says the DP's cost is `3^b` per bag *times the number of
+bags*, so on a graph with a thousand bags a starved DP is a sizing problem and not
+a scheduling one, and those eight should be re-read against that before any
+scheduling predicate is written for them.
+
+**Item 5 — not attempted.** A resource decision. §54's proof that no ascent in any
+residual layer can beat a maximal packing, and §53's finding that the missing
+percent on instance196 lives outside every width-bounded neighbourhood, are
+unrevised and remain the starting points.
+
+**One thing worth carrying forward that belongs to none of the items.**
+`work_estimate`'s per-class factor is now known to be *tight* (§65), and its
+measured calibration is 4e7 to 1.8e8 units per second against a constant of
+2.0e7. The estimate has stopped being a ranking tool and become a candidate
+absolute admission test, which is what the twenty-eight DP timeouts need: an
+attempt that runs out of clock costs its whole budget and returns nothing, and
+the decision to refuse it can now be made before it starts. That is a change with
+its own A/B and was not made this round.
+
+**And one methodological rule, earned expensively (§70).** Verify that a binary
+reflects the source before drawing a conclusion from it — particularly when the
+conclusion is "the mathematics is wrong". An hour of this round went into
+bisecting a fault that had already been fixed, against a copy that predated the
+fix.

@@ -1126,17 +1126,27 @@ enum Nice {
 ///
 /// `graph` must be connected on the terminals and its costs nonnegative; both
 /// are checked rather than assumed.
-pub fn steiner_tree_over_decomposition(
+/// Everything the transition loop needs, derived once from the decomposition.
+///
+/// Factored out so the packed dynamic programme below and the unpacked
+/// [`reference`] one run over *the same* nice decomposition, the same edge
+/// assignment and the same root terminal. A differential test between two DPs
+/// that built their own scaffolding would be testing the scaffolding.
+struct Prepared {
+    nodes: Vec<Nice>,
+    node_bags: Vec<Vec<u32>>,
+    final_node: usize,
+    is_terminal: Vec<bool>,
+}
+
+/// `max_bag` is the largest bag the caller's signature encoding can address;
+/// pass `usize::MAX` for an encoding that has no such limit.
+fn prepare(
     graph: &UndirectedGraph,
     terminals: &[NodeId],
     td: &TreeDecomposition,
-    state_cap: usize,
-    want_tree: bool,
-    deadline: Option<std::time::Instant>,
-) -> Option<(Cost, Vec<EdgeId>)> {
-    if terminals.is_empty() {
-        return Some((0.0, Vec::new()));
-    }
+    max_bag: usize,
+) -> Option<Prepared> {
     if graph.edges.iter().any(|e| e.cost < 0.0) {
         // Both the cycle exclusions above use nonnegativity.
         return None;
@@ -1163,7 +1173,7 @@ pub fn steiner_tree_over_decomposition(
             bag.push(root_terminal);
             bag.sort_unstable();
         }
-        if bag.len() > MAX_BAG {
+        if bag.len() > max_bag {
             return None;
         }
     }
@@ -1189,6 +1199,22 @@ pub fn steiner_tree_over_decomposition(
     }
 
     let (nodes, node_bags, final_node) = build_nice(td, &bags, &edges_at)?;
+    Some(Prepared { nodes, node_bags, final_node, is_terminal })
+}
+
+pub fn steiner_tree_over_decomposition(
+    graph: &UndirectedGraph,
+    terminals: &[NodeId],
+    td: &TreeDecomposition,
+    state_cap: usize,
+    want_tree: bool,
+    deadline: Option<std::time::Instant>,
+) -> Option<(Cost, Vec<EdgeId>)> {
+    if terminals.is_empty() {
+        return Some((0.0, Vec::new()));
+    }
+    let Prepared { nodes, node_bags, final_node, is_terminal } =
+        prepare(graph, terminals, td, MAX_BAG)?;
 
     // The tables, one per nice node, sparse.
     //
@@ -1325,7 +1351,7 @@ pub fn steiner_tree_over_decomposition(
     }
 
     // The final bag is `{r}` and the answer is the state in which `r` is used.
-    debug_assert_eq!(node_bags[final_node].as_slice(), &[root_terminal]);
+    debug_assert_eq!(node_bags[final_node].len(), 1);
     let mut d = [OUT; MAX_BAG];
     d[0] = 0;
     let goal = encode_canonical(&mut d, 1);
@@ -1364,6 +1390,667 @@ pub fn steiner_tree_over_decomposition(
         - tree.iter().map(|&e| graph.edges[e as usize].cost).sum::<Cost>();
     debug_assert!(dropped < 1e-9, "spanning tree discarded {dropped} of cost");
     Some((cost - dropped, tree))
+}
+
+/// The dynamic programme with nothing packed and nothing reduced.
+///
+/// # Why this exists twice
+///
+/// The fast path above is two optimisations stacked on one recurrence: a
+/// signature packed into a machine word, and the rank-based reduction of §43. It
+/// is exact, but *both* optimisations are where an error would hide — §32's
+/// unsoundness was one of them — and neither can be checked against the other,
+/// because the reduced table is not the naive table and is not meant to be.
+///
+/// This module is the recurrence with neither. Signatures are `Vec<u8>` over bag
+/// positions, so there is no width ceiling and no reserved sentinel value; every
+/// reachable state is kept, so the table at a node is the *definition* the
+/// reduction is a representative subset of. It is deliberately slow.
+///
+/// It serves two purposes:
+///
+/// 1. **The differential oracle.** The packed DP must agree with it on the final
+///    value for every instance both can address, and at partition level the
+///    reduced table must answer every connectivity query at the raw table's cost.
+/// 2. **The instrument.** [`RawCensus`] records the raw reachable table size per
+///    `S`-class as a function of bag size — the measurement that decides whether
+///    the rank reduction is needed at a given width at all, since its cost is
+///    `2^{|S|-1}` bits per state whatever the table actually holds.
+pub mod reference {
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    use super::{Cost, Nice, TreeDecomposition};
+    use crate::graph::{NodeId, UndirectedGraph};
+
+    /// Block index meaning "this bag position is not in `S`".
+    const NONE: u8 = u8::MAX;
+
+    /// A signature: one block index per bag position, [`NONE`] where unused.
+    type Sig = Vec<u8>;
+
+    /// The raw reachable table sizes, aggregated by `(bag positions, |S|)`.
+    ///
+    /// The values are `(classes seen, total states, largest class)`. The largest
+    /// column is the one that matters: the rank reduction can only pay when a
+    /// class is larger than the `2^{|S|-1}` bound it reduces to, and it costs
+    /// `2^{|S|-1}` bits per state offered whether it pays or not.
+    #[derive(Debug, Clone, Default)]
+    pub struct RawCensus {
+        pub by_class: std::collections::BTreeMap<(u32, u32), (u64, u64, u32)>,
+        /// The same, after the rank reduction, when it was run and affordable.
+        pub reduced_by_class: std::collections::BTreeMap<(u32, u32), (u64, u64, u32)>,
+        pub nodes: u64,
+        pub peak_live: usize,
+        pub joins: u64,
+        pub join_pairs: f64,
+        /// Bytes the widest basis held, and the `|S|` it held them at. The
+        /// reduction's footprint at a class is `rank * 2^{|S|-1}` bits, which is
+        /// the quantity that decides whether a width is reachable at all.
+        pub basis_bytes: u64,
+        pub basis_at_s: u32,
+        /// Classes the reduction was not run on because its basis would not fit.
+        pub reduction_refused: u64,
+        /// Set when the run stopped on the state cap or the deadline; the
+        /// aggregates are then a lower bound on what a full run would have seen.
+        pub aborted: bool,
+    }
+
+    impl RawCensus {
+        fn record(&mut self, b: usize, s: usize, size: usize) {
+            let e = self.by_class.entry((b as u32, s as u32)).or_insert((0, 0, 0));
+            e.0 += 1;
+            e.1 += size as u64;
+            e.2 = e.2.max(size as u32);
+        }
+
+        fn record_reduced(&mut self, b: usize, s: usize, size: usize) {
+            let e = self.reduced_by_class.entry((b as u32, s as u32)).or_insert((0, 0, 0));
+            e.0 += 1;
+            e.1 += size as u64;
+            e.2 = e.2.max(size as u32);
+        }
+
+        /// The largest raw class observed at any bag size, and the `2^{s-1}`
+        /// bound the rank reduction would replace it by.
+        pub fn worst(&self) -> Option<(u32, u32, u32, f64)> {
+            self.by_class
+                .iter()
+                .map(|(&(b, s), &(_, _, mx))| {
+                    (b, s, mx, if s == 0 { 1.0 } else { (1u64 << (s - 1).min(62)) as f64 })
+                })
+                .max_by_key(|t| t.2)
+        }
+    }
+
+    /// The rank-based reduction of §43, restated over dynamically sized ground
+    /// sets so it can be *measured* at bag sizes the packed encoding cannot
+    /// address.
+    ///
+    /// The algorithm is exactly [`super::rankreduce::Basis`]'s and rests on the
+    /// same two statements — the inner-product identity and the representation
+    /// theorem — so nothing new is being claimed; what is new is that the cut
+    /// vector is `2^{|S|-1}` bits of *heap*, so the footprint the reduction pays
+    /// is observable rather than bounded by a compile-time constant.
+    ///
+    /// `budget_bytes` bounds the rows the basis will hold. Exhausting it is not
+    /// an error and does not cost exactness: [`DynBasis::offer`] then returns
+    /// `None`, and a caller that keeps every remaining candidate holds a
+    /// *superset* of a representative set, which answers every connectivity
+    /// query at the same cost the full table does.
+    pub struct DynBasis {
+        bits: usize,
+        words: usize,
+        rows: Vec<Vec<u64>>,
+        pivots: Vec<usize>,
+        budget_bytes: u64,
+    }
+
+    impl DynBasis {
+        pub fn new(s: usize, budget_bytes: u64) -> DynBasis {
+            let bits = if s <= 1 { 1 } else { 1usize << (s - 1) };
+            let words = bits.div_ceil(64);
+            DynBasis { bits, words, rows: Vec::new(), pivots: Vec::new(), budget_bytes }
+        }
+
+        pub fn is_full(&self) -> bool {
+            self.rows.len() >= self.bits
+        }
+
+        pub fn bytes(&self) -> u64 {
+            self.rows.len() as u64 * self.words as u64 * 8
+        }
+
+        fn would_exceed(&self) -> bool {
+            (self.rows.len() as u64 + 1) * self.words as u64 * 8 > self.budget_bytes
+        }
+
+        /// `Some(true)` to keep, `Some(false)` to drop, `None` when the basis
+        /// has run out of budget and the caller must keep everything after.
+        pub fn offer(&mut self, d: &[u8], used: &[usize]) -> Option<bool> {
+            if used.len() <= 1 {
+                // One partition exists; the first offer is it.
+                if self.rows.is_empty() {
+                    self.rows.push(vec![0u64; self.words]);
+                    self.pivots.push(0);
+                    return Some(true);
+                }
+                return Some(false);
+            }
+            let mut v = vec![0u64; self.words];
+            cut_vector(d, used, &mut v);
+            for (bi, &p) in self.pivots.iter().enumerate() {
+                if v[p >> 6] >> (p & 63) & 1 == 1 {
+                    for w in 0..self.words {
+                        v[w] ^= self.rows[bi][w];
+                    }
+                }
+            }
+            let Some(p) = (0..self.bits).find(|&c| v[c >> 6] >> (c & 63) & 1 == 1) else {
+                return Some(false);
+            };
+            if self.would_exceed() {
+                return None;
+            }
+            for bi in 0..self.rows.len() {
+                if self.rows[bi][p >> 6] >> (p & 63) & 1 == 1 {
+                    for w in 0..self.words {
+                        self.rows[bi][w] ^= v[w];
+                    }
+                }
+            }
+            self.rows.push(v);
+            self.pivots.push(p);
+            Some(true)
+        }
+    }
+
+    /// The cut vector of a signature over the positions it uses. Identical to
+    /// [`super::rankreduce`]'s, over a slice rather than a fixed array.
+    fn cut_vector(d: &[u8], used: &[usize], out: &mut [u64]) {
+        out.iter_mut().for_each(|w| *w = 0);
+        let s = used.len();
+        if s == 0 {
+            return;
+        }
+        let mut block_mask = vec![0u64; s];
+        let mut label = vec![usize::MAX; d.len() + 1];
+        let mut nblocks = 0usize;
+        let mut home = usize::MAX;
+        for (i, &pos) in used.iter().enumerate() {
+            let raw = d[pos] as usize;
+            let b = if label[raw] == usize::MAX {
+                label[raw] = nblocks;
+                nblocks += 1;
+                nblocks - 1
+            } else {
+                label[raw]
+            };
+            if i == 0 {
+                home = b;
+            } else {
+                block_mask[b] |= 1 << (i - 1);
+            }
+        }
+        let others: Vec<u64> =
+            (0..nblocks).filter(|&b| b != home).map(|b| block_mask[b]).collect();
+        let k = others.len();
+        for t in 0..(1usize << k) {
+            let mut x = block_mask[home];
+            let mut tt = t;
+            while tt != 0 {
+                let i = tt.trailing_zeros() as usize;
+                x |= others[i];
+                tt &= tt - 1;
+            }
+            let col = x as usize;
+            out[col >> 6] |= 1 << (col & 63);
+        }
+    }
+
+    /// Reduce one `S`-class, cheapest first. Returns the kept entries.
+    ///
+    /// Once the basis refuses, every remaining candidate is kept — a superset of
+    /// a representative set is still a representative set.
+    fn reduce_class(mut entries: Vec<(Sig, Cost)>, used: &[usize], budget: u64) -> (Vec<(Sig, Cost)>, u64, bool) {
+        entries.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut basis = DynBasis::new(used.len(), budget);
+        let mut out = Vec::new();
+        let mut refused = false;
+        for (sig, cost) in entries {
+            // A full basis spans the cut space, so every later candidate is a
+            // combination of kept ones of no greater cost: the theorem's own
+            // hypothesis, and the rest may be dropped. A *refused* basis proves
+            // nothing about what follows, so everything after it is kept.
+            if !refused && basis.is_full() {
+                break;
+            }
+            if refused {
+                out.push((sig, cost));
+                continue;
+            }
+            match basis.offer(&sig, used) {
+                Some(true) => out.push((sig, cost)),
+                Some(false) => {}
+                None => {
+                    refused = true;
+                    out.push((sig, cost));
+                }
+            }
+        }
+        let bytes = basis.bytes();
+        (out, bytes, refused)
+    }
+
+    fn canon(d: &mut [u8]) {
+        let n = d.len();
+        let mut map = vec![NONE; n + 1];
+        let mut next = 0u8;
+        for j in 0..n {
+            let x = d[j];
+            if x == NONE {
+                continue;
+            }
+            if map[x as usize] == NONE {
+                map[x as usize] = next;
+                next += 1;
+            }
+            d[j] = map[x as usize];
+        }
+    }
+
+    fn used_mask(d: &[u8]) -> u64 {
+        let mut m = 0u64;
+        for (j, &x) in d.iter().enumerate() {
+            if x != NONE {
+                m |= 1 << j;
+            }
+        }
+        m
+    }
+
+    fn free_block(d: &[u8]) -> u8 {
+        let mut used = vec![false; d.len() + 1];
+        for &x in d {
+            if x != NONE {
+                used[x as usize] = true;
+            }
+        }
+        (0..d.len()).find(|&k| !used[k]).unwrap_or(0) as u8
+    }
+
+    /// Re-express a signature over `from` as one over `to`, keeping each
+    /// vertex's block; positions of `to` absent from `from` become unused.
+    fn rebase(d: &[u8], from: &[u32], to: &[u32]) -> Sig {
+        let mut out = vec![NONE; to.len()];
+        let mut i = 0usize;
+        for (j, &v) in to.iter().enumerate() {
+            while i < from.len() && from[i] < v {
+                i += 1;
+            }
+            if i < from.len() && from[i] == v {
+                out[j] = d[i];
+            }
+        }
+        canon(&mut out);
+        out
+    }
+
+    fn relax(t: &mut HashMap<Sig, Cost>, k: Sig, c: Cost) {
+        match t.get_mut(&k) {
+            Some(slot) if *slot <= c + 1e-12 => {}
+            Some(slot) => *slot = c,
+            None => {
+                t.insert(k, c);
+            }
+        }
+    }
+
+    /// The join of two signatures over the same used set, by union-find.
+    fn union_partitions(l: &[u8], r: &[u8]) -> Option<Sig> {
+        let b = l.len();
+        let mut uf: Vec<u8> = (0..b as u8).collect();
+        fn find(uf: &mut [u8], mut x: u8) -> u8 {
+            while uf[x as usize] != x {
+                uf[x as usize] = uf[uf[x as usize] as usize];
+                x = uf[x as usize];
+            }
+            x
+        }
+        for j in 0..b {
+            if (l[j] == NONE) != (r[j] == NONE) {
+                return None;
+            }
+        }
+        for side in [l, r] {
+            for j in 0..b {
+                if side[j] == NONE {
+                    continue;
+                }
+                for k in j + 1..b {
+                    if side[k] == side[j] {
+                        let (a, c) = (find(&mut uf, j as u8), find(&mut uf, k as u8));
+                        uf[a as usize] = c;
+                    }
+                }
+            }
+        }
+        let mut out = vec![NONE; b];
+        for j in 0..b {
+            if l[j] != NONE {
+                out[j] = find(&mut uf, j as u8);
+            }
+        }
+        canon(&mut out);
+        Some(out)
+    }
+
+    /// Least cost of a tree spanning `terminals`, by the unreduced recurrence.
+    ///
+    /// Returns `None` exactly when the packed path would: an infeasible or
+    /// disconnected instance, a decomposition without a single root, negative
+    /// costs, or a cap hit. `census` is appended to whether or not the run
+    /// completes, with [`RawCensus::aborted`] recording which.
+    pub fn raw_dp(
+        graph: &UndirectedGraph,
+        terminals: &[NodeId],
+        td: &TreeDecomposition,
+        state_cap: usize,
+        deadline: Option<Instant>,
+        census: &mut RawCensus,
+    ) -> Option<Cost> {
+        dp(graph, terminals, td, state_cap, deadline, None, census)
+    }
+
+    /// The same recurrence with the rank reduction applied per `S`-class.
+    ///
+    /// `basis_budget` is the bytes one class's basis may hold; `None` runs the
+    /// recurrence raw. The reduction is exact either way — see [`DynBasis`] for
+    /// why exhausting the budget costs nothing but size — so this function and
+    /// [`raw_dp`] must return the same value, which is what
+    /// `the_reduction_does_not_change_the_reference_value` checks.
+    pub fn dp(
+        graph: &UndirectedGraph,
+        terminals: &[NodeId],
+        td: &TreeDecomposition,
+        state_cap: usize,
+        deadline: Option<Instant>,
+        basis_budget: Option<u64>,
+        census: &mut RawCensus,
+    ) -> Option<Cost> {
+        if terminals.is_empty() {
+            return Some(0.0);
+        }
+        let super::Prepared { nodes, node_bags, final_node, is_terminal } =
+            super::prepare(graph, terminals, td, 64)?;
+
+        let mut tables: Vec<HashMap<Sig, Cost>> = vec![HashMap::new(); nodes.len()];
+        let mut live = 0usize;
+
+        for i in 0..nodes.len() {
+            let bag = &node_bags[i];
+            let b = bag.len();
+            let mut table: HashMap<Sig, Cost> = HashMap::new();
+            match nodes[i].clone() {
+                Nice::Leaf => {
+                    table.insert(Vec::new(), 0.0);
+                }
+                Nice::Introduce { child, v } => {
+                    let cb = &node_bags[child];
+                    let vp = bag.binary_search(&v).ok()?;
+                    for (code, &cost) in &tables[child] {
+                        let base = rebase(code, cb, bag);
+                        let mut with = base.clone();
+                        with[vp] = free_block(&with);
+                        canon(&mut with);
+                        relax(&mut table, base, cost);
+                        relax(&mut table, with, cost);
+                    }
+                }
+                Nice::Forget { child, v } => {
+                    let cb = &node_bags[child];
+                    let vp = cb.binary_search(&v).ok()?;
+                    let terminal = is_terminal[v as usize];
+                    for (code, &cost) in &tables[child] {
+                        if code[vp] == NONE {
+                            if terminal {
+                                continue;
+                            }
+                        } else if (0..cb.len()).all(|j| j == vp || code[j] != code[vp]) {
+                            // Alone in its block: forgetting it orphans the
+                            // component it is the whole of.
+                            continue;
+                        }
+                        let out = rebase(code, cb, bag);
+                        relax(&mut table, out, cost);
+                    }
+                }
+                Nice::Edge { child, u, w, cost: ec, id: _ } => {
+                    let up = bag.binary_search(&u).ok()?;
+                    let wp = bag.binary_search(&w).ok()?;
+                    for (code, &cost) in &tables[child] {
+                        relax(&mut table, code.clone(), cost);
+                        if code[up] == NONE || code[wp] == NONE || code[up] == code[wp] {
+                            continue;
+                        }
+                        let mut d = code.clone();
+                        let (keep, drop) = (d[up], d[wp]);
+                        for x in d.iter_mut() {
+                            if *x == drop {
+                                *x = keep;
+                            }
+                        }
+                        canon(&mut d);
+                        relax(&mut table, d, cost + ec);
+                    }
+                }
+                Nice::Join { left, right } => {
+                    let mut by_class: HashMap<u64, (Vec<(&Sig, Cost)>, Vec<(&Sig, Cost)>)> =
+                        HashMap::new();
+                    for (code, &cost) in &tables[left] {
+                        by_class.entry(used_mask(code)).or_default().0.push((code, cost));
+                    }
+                    for (code, &cost) in &tables[right] {
+                        by_class.entry(used_mask(code)).or_default().1.push((code, cost));
+                    }
+                    census.joins += 1;
+                    for (_, (l, r)) in &by_class {
+                        census.join_pairs += l.len() as f64 * r.len() as f64;
+                        for (lp, lc) in l {
+                            for (rp, rc) in r {
+                                if let Some(j) = union_partitions(lp, rp) {
+                                    relax(&mut table, j, lc + rc);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if table.is_empty() {
+                return None;
+            }
+            census.nodes += 1;
+            // The raw class sizes, which is the whole point of the instrument.
+            let mut sizes: HashMap<u64, usize> = HashMap::new();
+            for code in table.keys() {
+                *sizes.entry(used_mask(code)).or_insert(0) += 1;
+            }
+            for (&m, &sz) in &sizes {
+                census.record(b, m.count_ones() as usize, sz);
+            }
+            if let Some(budget) = basis_budget {
+                let mut by_class: HashMap<u64, Vec<(Sig, Cost)>> = HashMap::new();
+                for (sig, cost) in table.drain() {
+                    by_class.entry(used_mask(&sig)).or_default().push((sig, cost));
+                }
+                for (m, entries) in by_class {
+                    let used: Vec<usize> = (0..b).filter(|&j| m >> j & 1 == 1).collect();
+                    let (kept, bytes, refused) = reduce_class(entries, &used, budget);
+                    if bytes > census.basis_bytes {
+                        census.basis_bytes = bytes;
+                        census.basis_at_s = used.len() as u32;
+                    }
+                    census.reduction_refused += u64::from(refused);
+                    census.record_reduced(b, used.len(), kept.len());
+                    for (sig, cost) in kept {
+                        table.insert(sig, cost);
+                    }
+                }
+            }
+            live += table.len();
+            census.peak_live = census.peak_live.max(live);
+            if live > state_cap || deadline.is_some_and(|d| Instant::now() >= d) {
+                census.aborted = true;
+                return None;
+            }
+            tables[i] = table;
+            for child in match &nodes[i] {
+                Nice::Leaf => Vec::new(),
+                Nice::Introduce { child, .. }
+                | Nice::Forget { child, .. }
+                | Nice::Edge { child, .. } => vec![*child],
+                Nice::Join { left, right } => vec![*left, *right],
+            } {
+                live -= tables[child].len();
+                tables[child] = HashMap::new();
+            }
+        }
+
+        debug_assert_eq!(node_bags[final_node].len(), 1);
+        tables[final_node].get(&vec![0u8]).copied()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn all_partitions(s: usize) -> Vec<Sig> {
+            let mut out = Vec::new();
+            fn grow(i: usize, used: u8, a: &mut Vec<u8>, s: usize, out: &mut Vec<Sig>) {
+                if i == s {
+                    out.push(a.clone());
+                    return;
+                }
+                for v in 0..=used {
+                    a[i] = v;
+                    grow(i + 1, used.max(v + 1), a, s, out);
+                }
+            }
+            let mut a = vec![0u8; s];
+            grow(0, 0, &mut a, s, &mut out);
+            out
+        }
+
+        /// Whether `p join q` is the one-block partition.
+        fn joins_connected(p: &[u8], q: &[u8]) -> bool {
+            let s = p.len();
+            let mut uf: Vec<usize> = (0..s).collect();
+            fn find(uf: &mut Vec<usize>, mut x: usize) -> usize {
+                while uf[x] != x {
+                    uf[x] = uf[uf[x]];
+                    x = uf[x];
+                }
+                x
+            }
+            for side in [p, q] {
+                for j in 0..s {
+                    for k in j + 1..s {
+                        if side[j] == side[k] {
+                            let (a, b) = (find(&mut uf, j), find(&mut uf, k));
+                            uf[a] = b;
+                        }
+                    }
+                }
+            }
+            (0..s).all(|j| find(&mut uf, j) == find(&mut uf, 0))
+        }
+
+        /// The representation theorem, over every partition of every ground set
+        /// up to size seven.
+        ///
+        /// This is the same gate `rankreduce::reduction_preserves_every_completion`
+        /// applies to the packed basis, restated for the dynamically sized one:
+        /// for **every** query `q`, the least weight among kept partitions that
+        /// join `q` to a single block equals the least weight among all of them.
+        /// It is a connectivity query and not an identity — the kept set is not
+        /// the input set and is not meant to be.
+        #[test]
+        fn the_dynamic_reduction_preserves_every_completion() {
+            let mut st = 0x1357_9BDF_2468_ACE0u64;
+            let mut rng = move || {
+                st ^= st << 13;
+                st ^= st >> 7;
+                st ^= st << 17;
+                st
+            };
+            for s in 1..=7usize {
+                let parts = all_partitions(s);
+                let used: Vec<usize> = (0..s).collect();
+                for _ in 0..60 {
+                    let mut entries: Vec<(Sig, Cost)> = Vec::new();
+                    for p in &parts {
+                        if rng() % 3 != 0 {
+                            entries.push((p.clone(), (rng() % 50) as Cost));
+                        }
+                    }
+                    if entries.is_empty() {
+                        continue;
+                    }
+                    let (kept, _, refused) = reduce_class(entries.clone(), &used, 1 << 20);
+                    assert!(!refused);
+                    assert!(
+                        kept.len() <= if s <= 1 { 1 } else { 1usize << (s - 1) },
+                        "kept {} at s={s}",
+                        kept.len()
+                    );
+                    for q in &parts {
+                        let full = entries
+                            .iter()
+                            .filter(|(p, _)| joins_connected(p, q))
+                            .map(|(_, c)| *c)
+                            .fold(Cost::INFINITY, Cost::min);
+                        let red = kept
+                            .iter()
+                            .filter(|(p, _)| joins_connected(p, q))
+                            .map(|(_, c)| *c)
+                            .fold(Cost::INFINITY, Cost::min);
+                        assert!(
+                            (full - red).abs() < 1e-9 || (full.is_infinite() && red.is_infinite()),
+                            "s={s} query {q:?}: full {full} reduced {red}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// A basis that runs out of budget keeps everything it has not decided,
+        /// which is a superset of a representative set — so the preserved
+        /// minimum is preserved a fortiori, and the value cannot move.
+        #[test]
+        fn an_exhausted_basis_keeps_the_answer() {
+            let s = 6usize;
+            let parts = all_partitions(s);
+            let used: Vec<usize> = (0..s).collect();
+            let entries: Vec<(Sig, Cost)> =
+                parts.iter().enumerate().map(|(i, p)| (p.clone(), i as Cost)).collect();
+            // One row of eight bytes: the basis refuses after the first keep.
+            let (kept, _, refused) = reduce_class(entries.clone(), &used, 8);
+            assert!(refused);
+            for q in &parts {
+                let full = entries
+                    .iter()
+                    .filter(|(p, _)| joins_connected(p, q))
+                    .map(|(_, c)| *c)
+                    .fold(Cost::INFINITY, Cost::min);
+                let red = kept
+                    .iter()
+                    .filter(|(p, _)| joins_connected(p, q))
+                    .map(|(_, c)| *c)
+                    .fold(Cost::INFINITY, Cost::min);
+                assert!((full - red).abs() < 1e-9 || (full.is_infinite() && red.is_infinite()));
+            }
+        }
+    }
 }
 
 /// A spanning forest of `used`, by union-find over the endpoints.
@@ -2098,5 +2785,138 @@ mod tests {
         let (cost, used) = solve(&g, &[1, 3, 6]).expect("solved");
         assert!((cost - 25.0).abs() < 1e-9, "got {cost}");
         check_tree(&g, &[1, 3, 6], cost, &used);
+    }
+
+    /// The unreduced recurrence is the definition; the packed one must equal it.
+    ///
+    /// Dreyfus-Wagner checks the *answer*. This checks the two dynamic
+    /// programmes against each other over the same nice decomposition, so a
+    /// disagreement localises to the packing or the reduction rather than to the
+    /// recurrence — and it is the oracle the wide encoding is gated against,
+    /// since Dreyfus-Wagner cannot reach the terminal counts the wide path is
+    /// for.
+    #[test]
+    fn reference_dp_agrees_with_the_packed_dp_and_with_dreyfus_wagner() {
+        use super::reference::{raw_dp, RawCensus};
+        let mut s = 0x0BAD_C0DE_1234_9999u64;
+        let mut rng = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let mut ran = 0;
+        for n in 3..=10u32 {
+            for round in 0..90 {
+                let k = 2 + (rng() % (n as u64 - 1).min(5)) as u32;
+                let terminals: Vec<u32> = (1..=k).collect();
+                let mut edges = Vec::new();
+                let mut perm: Vec<u32> = (1..=n).collect();
+                for i in (1..perm.len()).rev() {
+                    perm.swap(i, (rng() % (i as u64 + 1)) as usize);
+                }
+                // Half the rounds are unit-cost, so the tie regime the reduction
+                // is most exposed to is covered rather than sampled.
+                let unit = round % 2 == 0;
+                let w = |r: &mut dyn FnMut() -> u64| {
+                    if unit {
+                        1.0
+                    } else {
+                        1.0 + (r() % 9) as f64
+                    }
+                };
+                for i in 0..perm.len() - 1 {
+                    let c = w(&mut rng);
+                    edges.push((perm[i], perm[i + 1], c));
+                }
+                for u in 1..=n {
+                    for v in u + 1..=n {
+                        if rng() % 100 < 30 {
+                            let c = w(&mut rng);
+                            edges.push((u, v, c));
+                        }
+                    }
+                }
+                let g = make(n, &edges, &terminals);
+                let td = match decompose(&g, MAX_BAG - 1, None) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                let mut census = RawCensus::default();
+                let Some(raw) = raw_dp(&g, &terminals, &td, 5_000_000, None, &mut census) else {
+                    continue;
+                };
+                let packed =
+                    steiner_tree_over_decomposition(&g, &terminals, &td, 5_000_000, false, None)
+                        .expect("packed DP over a decomposition the raw one completed");
+                assert!(
+                    (raw - packed.0).abs() < 1e-6,
+                    "raw {raw} vs packed {} on n={n} edges={edges:?}",
+                    packed.0
+                );
+                if let Some(dw) = dreyfus_wagner(&g, &terminals) {
+                    assert!(
+                        (raw - dw.optimal_cost).abs() < 1e-6,
+                        "raw {raw} vs Dreyfus-Wagner {} on n={n} edges={edges:?}",
+                        dw.optimal_cost
+                    );
+                }
+                assert!(census.nodes > 0 && !census.aborted);
+                ran += 1;
+            }
+        }
+        assert!(ran > 400, "only {ran} cases ran");
+    }
+
+    /// The census records a class size for every `(bag, |S|)` it builds, and the
+    /// recorded maximum is a real table size rather than a bound.
+    #[test]
+    fn the_raw_census_counts_states_that_exist() {
+        use super::reference::{raw_dp, RawCensus};
+        let g = make(
+            8,
+            &[
+                (1, 2, 1.0),
+                (2, 3, 1.0),
+                (3, 4, 1.0),
+                (4, 5, 1.0),
+                (5, 6, 1.0),
+                (6, 7, 1.0),
+                (7, 8, 1.0),
+                (8, 1, 1.0),
+                (1, 5, 3.0),
+                (2, 6, 3.0),
+            ],
+            &[1, 3, 5, 7],
+        );
+        let td = decompose(&g, MAX_BAG - 1, None).expect("decomposition");
+        let mut census = RawCensus::default();
+        let raw = raw_dp(&g, &[1, 3, 5, 7], &td, 5_000_000, None, &mut census).expect("solved");
+        let packed = steiner_tree_over_decomposition(&g, &[1, 3, 5, 7], &td, 5_000_000, false, None)
+            .expect("solved")
+            .0;
+        assert!((raw - packed).abs() < 1e-9);
+        assert!(!census.by_class.is_empty());
+        let (_, _, mx, _) = census.worst().expect("a widest class");
+        assert!(mx >= 1);
+        // The dynamically sized reduction must not move the value.
+        let mut rc = super::reference::RawCensus::default();
+        let red = super::reference::dp(
+            &g,
+            &[1, 3, 5, 7],
+            &td,
+            5_000_000,
+            None,
+            Some(1 << 20),
+            &mut rc,
+        )
+        .expect("solved");
+        assert!((red - raw).abs() < 1e-9);
+        assert!(!rc.reduced_by_class.is_empty());
+        // Every recorded total is at least the recorded maximum, and at least
+        // one state per class exists.
+        for (_, &(classes, total, mx)) in &census.by_class {
+            assert!(total >= mx as u64 && total >= classes);
+        }
     }
 }

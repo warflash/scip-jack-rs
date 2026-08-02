@@ -45,6 +45,19 @@ pub struct SolverConfig {
     pub activation_rank_cuts: bool,
     /// Separate terminal-free boundary inequalities `x(delta(S)) >= 2 x_e`.
     pub tf_cuts: bool,
+    /// A solution value the caller already knows, used as the elimination
+    /// cutoff from the first round — **without a tree to back it**.
+    ///
+    /// This is a warm start and it is also the reproduction §61 asks for. The
+    /// failure it describes is a bound that is not the cost of any tree being
+    /// reported as proved; setting this below the optimum produces exactly that
+    /// state, deterministically, on any instance, and
+    /// `an_unwitnessed_incumbent_is_never_reported_as_proved` is the gate that
+    /// says the pipeline now refuses to claim it.
+    ///
+    /// Infinity — the default — means "no warm start", which is what every
+    /// benchmark run uses.
+    pub initial_upper_bound: f64,
 }
 
 impl Default for SolverConfig {
@@ -61,6 +74,7 @@ impl Default for SolverConfig {
             partition_cuts: true,
             activation_rank_cuts: false,
             tf_cuts: true,
+            initial_upper_bound: f64::INFINITY,
         }
     }
 }

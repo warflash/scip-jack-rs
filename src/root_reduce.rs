@@ -33,6 +33,7 @@
 //! [`round`] does exactly that, and the arc-level mask handed to branch-and-cut
 //! comes from a single root.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::graph::algorithms::{
@@ -103,6 +104,31 @@ pub struct Reduced {
     /// Arcs of the best solution, in the *final* reduced graph's arc numbering.
     /// `None` when the incumbent predates the last shrink.
     pub incumbent_arcs: Option<Vec<u32>>,
+    /// The tree `upper_bound` is the cost of, carried with the graph it is a
+    /// tree *of*.
+    ///
+    /// # Why an edge list of the current graph is not enough
+    ///
+    /// `upper_bound` is a number the loop carries across shrinks with only the
+    /// contraction offset subtracted. That is sound as a *bound* — the reduction
+    /// preserves an optimum, so the carried number still dominates the reduced
+    /// optimum — and it is not a *witness*: after a shrink there may be no tree
+    /// of the current graph attaining it. §61 is the record of two attempts to
+    /// recover the evidence after the fact from `incumbent_arcs`, and of why
+    /// both were wrong: an arc index survives a renumbering while naming a
+    /// different edge, so a cost re-derived from it is a fiction. The lesson
+    /// stated there is exact — *a witness is only a witness while the numbering
+    /// it is stated in is still the graph's* — and the repair it implies is to
+    /// **keep the numbering**, not to guess at it afterwards.
+    ///
+    /// So the witness carries its own graph. Re-basing onto the current graph is
+    /// attempted at every shrink and taken when it is exact (see
+    /// [`Witness::rebase_onto`]), which keeps the stored graph small; when it is
+    /// not exact the snapshot stands, and the snapshot cannot fail.
+    ///
+    /// See [`Reduced::verify_witness`] for the invariant that makes it a
+    /// statement about `upper_bound` and not merely about itself.
+    pub witness: Option<Witness>,
     /// Certificate backing `lower_bound`, from the best root.
     pub certificate: Option<DualAscentResult>,
     /// Cost of the edges contracted into the objective while tightening. Every
@@ -126,9 +152,165 @@ pub struct Reduced {
     pub converged: bool,
 }
 
+/// A tree, and the graph it is a tree of.
+#[derive(Clone)]
+pub struct Witness {
+    /// A graph the tightening passed through — not necessarily the final one.
+    pub graph: UndirectedGraph,
+    pub terminals: Vec<NodeId>,
+    /// Edge ids of [`Witness::graph`].
+    pub edges: Vec<u32>,
+    /// Cost recomputed from [`Witness::graph`] when the witness was taken.
+    pub cost: Cost,
+    /// The tightening's accumulated contraction offset at that moment.
+    pub offset: Cost,
+}
+
+impl Witness {
+    /// Recompute the cost from the stored graph and check the edges connect the
+    /// stored terminals. `None` when they do not.
+    ///
+    /// Everything is read back out of [`Witness::graph`]: the edge ids are
+    /// bounds-checked against it, the costs are its own, and connectivity is
+    /// recomputed by union-find over the endpoints *it* reports. Nothing is
+    /// taken on trust from the numbering the tree was found in, because keeping
+    /// that numbering is the entire mechanism.
+    pub fn verify(&self) -> Option<Cost> {
+        if self.terminals.len() < 2 {
+            return self.edges.is_empty().then_some(0.0);
+        }
+        let mut cost = 0.0;
+        let mut uf: HashMap<NodeId, NodeId> = HashMap::new();
+        fn find(uf: &mut HashMap<NodeId, NodeId>, x: NodeId) -> NodeId {
+            let mut r = x;
+            while let Some(&p) = uf.get(&r) {
+                if p == r {
+                    break;
+                }
+                r = p;
+            }
+            uf.insert(x, r);
+            r
+        }
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for &e in &self.edges {
+            if !seen.insert(e) {
+                return None;
+            }
+            let edge = self.graph.edges.get(e as usize)?;
+            cost += edge.cost;
+            uf.entry(edge.src).or_insert(edge.src);
+            uf.entry(edge.dst).or_insert(edge.dst);
+            let (a, b) = (find(&mut uf, edge.src), find(&mut uf, edge.dst));
+            uf.insert(a, b);
+        }
+        let root = *self.terminals.first()?;
+        uf.contains_key(&root).then_some(())?;
+        let rr = find(&mut uf, root);
+        for &t in &self.terminals {
+            if !uf.contains_key(&t) || find(&mut uf, t) != rr {
+                return None;
+            }
+        }
+        Some(cost)
+    }
+
+    /// Re-state the witness over `new`, given a node map. Returns `None` unless
+    /// every edge has an image of the same cost on the mapped endpoints.
+    ///
+    /// Matching on *cost as well as endpoints* is what makes this safe under
+    /// parallel edges: two edges may share endpoints, and picking one of a
+    /// different cost would change the witness's value while leaving it
+    /// connected. That is the exact shape of §61's second failure.
+    fn rebase_onto(
+        &self,
+        new: &UndirectedGraph,
+        new_terminals: &[NodeId],
+        map: &dyn Fn(NodeId) -> Option<NodeId>,
+    ) -> Option<Witness> {
+        let mut index: HashMap<(NodeId, NodeId), Vec<(u32, Cost)>> = HashMap::new();
+        for e in &new.edges {
+            let key = if e.src <= e.dst { (e.src, e.dst) } else { (e.dst, e.src) };
+            index.entry(key).or_default().push((e.id, e.cost));
+        }
+        let mut taken: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut out = Vec::with_capacity(self.edges.len());
+        let mut cost = 0.0;
+        for &e in &self.edges {
+            let edge = self.graph.edges.get(e as usize)?;
+            let (u, v) = (map(edge.src)?, map(edge.dst)?);
+            if u == v {
+                // Both endpoints were merged: the edge is inside a contraction
+                // and its cost has moved to the offset. Not representable here.
+                return None;
+            }
+            let key = if u <= v { (u, v) } else { (v, u) };
+            let pick = index
+                .get(&key)?
+                .iter()
+                .find(|(id, c)| (c - edge.cost).abs() < 1e-9 && !taken.contains(id))?;
+            taken.insert(pick.0);
+            out.push(pick.0);
+            cost += pick.1;
+        }
+        Some(Witness {
+            graph: new.clone(),
+            terminals: new_terminals.to_vec(),
+            edges: out,
+            cost,
+            offset: self.offset,
+        })
+    }
+}
+
 impl Reduced {
     pub fn proved_optimal(&self, tolerance: Cost) -> bool {
         self.upper_bound.is_finite() && self.lower_bound >= self.upper_bound - tolerance
+    }
+
+    /// The value the witness proves is attainable, **on the scale of the graph
+    /// handed to [`tighten`]** — that is, `cost + offset`.
+    ///
+    /// # The invariant that makes this a statement about `upper_bound`
+    ///
+    /// > **Proposition (witness invariant).** Let `(G_j, W_j, c_j, o_j)` be the
+    /// > graph, edge set, cost and accumulated offset recorded at the moment the
+    /// > incumbent was last improved. Then at every later point of the loop
+    /// >
+    /// > ```text
+    /// > upper_bound + offset = c_j + o_j,
+    /// > ```
+    /// >
+    /// > and `W_j` is a tree of `G_j` spanning its terminals, of cost `c_j`.
+    ///
+    /// *Proof.* At the improvement `upper_bound := c_j` and `offset = o_j`, so
+    /// the identity holds there. Only three later statements touch either side.
+    /// `offset += rg.offset` together with `upper_bound -= rg.offset` preserves
+    /// the sum. A further improvement re-establishes the snapshot and with it the
+    /// identity. `lower_bound := upper_bound` on a proof of optimality touches
+    /// neither. A re-basing replaces the snapshot only when the new `c + o`
+    /// equals the old, by construction. ∎
+    ///
+    /// *Corollary.* `upper_bound + offset` is the cost of a tree of `G_j`, and
+    /// `G_j` is reachable from the graph handed to [`tighten`] by contractions
+    /// charging exactly `o_j`, so by the contraction lemma
+    /// ([`crate::preprocessing::ReducibleGraph::contract_edge`]) there is a tree
+    /// of *that* graph of cost `c_j + o_j = upper_bound + offset`. A report of
+    /// `upper_bound + offset` therefore rests on an exhibited object.
+    ///
+    /// Returns `None` when there is no witness or it fails to verify — in which
+    /// case `upper_bound` is a number with nothing behind it, and the caller
+    /// must not report it as achieved.
+    pub fn verify_witness(&self) -> Option<Cost> {
+        let w = self.witness.as_ref()?;
+        let c = w.verify()?;
+        ((c - w.cost).abs() < 1e-6).then_some(c + w.offset)
+    }
+
+    /// Whether `upper_bound + offset` is exactly what the witness attains.
+    pub fn upper_bound_is_witnessed(&self) -> bool {
+        self.verify_witness()
+            .is_some_and(|v| (v - (self.upper_bound + self.offset)).abs() < 1e-6)
     }
 }
 
@@ -145,6 +327,13 @@ pub struct ReduceConfig {
     /// first round. Feeding back an incumbent found later by branch-and-cut lets
     /// the reduced costs eliminate far more than the heuristic's own bound would.
     pub initial_upper_bound: Cost,
+    /// A tree attaining `initial_upper_bound`, if the caller has one.
+    ///
+    /// Required to satisfy `cost + offset == initial_upper_bound`, stated on the
+    /// scale of the graph handed to [`tighten`]. Supplying `None` says the bound
+    /// is unwitnessed, and the loop propagates that honestly rather than
+    /// inventing evidence for it.
+    pub initial_witness: Option<Witness>,
     pub deadline: Option<Instant>,
     pub verbose: bool,
 }
@@ -157,6 +346,7 @@ impl Default for ReduceConfig {
             max_rounds: 8,
             ils_iterations: 400,
             initial_upper_bound: Cost::INFINITY,
+            initial_witness: None,
             deadline: None,
             verbose: false,
         }
@@ -189,6 +379,11 @@ pub fn tighten(
     let mut upper_bound = config.initial_upper_bound;
     let mut certificate: Option<DualAscentResult> = None;
     let mut incumbent_arcs: Option<Vec<u32>> = None;
+    // The tree `upper_bound` is the cost of, with the graph it lives in. Starts
+    // as whatever the caller could exhibit for `initial_upper_bound`; a caller
+    // that supplies a bound without a tree is telling this loop that the bound
+    // is unwitnessed, and the loop propagates that rather than inventing one.
+    let mut witness: Option<Witness> = config.initial_witness.clone();
     let mut offset: Cost = 0.0;
     let mut rounds = 0;
     let mut converged = false;
@@ -207,6 +402,34 @@ pub fn tighten(
             upper_bound = upper_bound.min(0.0);
             lower_bound = 0.0;
             incumbent_arcs = Some(Vec::new());
+            // Fewer than two terminals: the empty tree spans them. It witnesses
+            // the bound only when it *is* the bound — that is, when the `min`
+            // above actually took zero.
+            //
+            // PACE Track 1's instance080 is why this distinction is written out
+            // rather than assumed. There the loop reaches a one-vertex graph with
+            // `upper_bound = -3` and `offset = 1410`: the incumbent was found in
+            // round one at 1407, the eliminations then removed the trees
+            // attaining it and the contractions charged 1410, so the *carried*
+            // arithmetic is right — `-3 + 1410 = 1407`, the cost of a tree of the
+            // round-one graph — while the final graph attains only 1574. The
+            // empty tree here costs 0 and witnesses 1410, which is a **different
+            // and worse** value than the bound. Installing it produced exactly
+            // §61's version-two answer of 1574 against a reference of 1571.
+            //
+            // So the snapshot from round one stands, and it is the snapshot that
+            // is right: `upper_bound + offset` is the cost of a tree, of *that*
+            // graph, and the contraction lemma lifts it to this one.
+            if upper_bound >= -1e-9 {
+                upper_bound = 0.0;
+                witness = Some(Witness {
+                    graph: graph.clone(),
+                    terminals: terminals.clone(),
+                    edges: Vec::new(),
+                    cost: 0.0,
+                    offset,
+                });
+            }
             break;
         }
 
@@ -219,6 +442,32 @@ pub fn tighten(
         if outcome.upper_bound < upper_bound {
             upper_bound = outcome.upper_bound;
             incumbent_arcs = outcome.incumbent_arcs;
+        }
+        // A tree of this graph attaining `upper_bound` resets the snapshot: the
+        // round found it *here*, so the numbering it is stated in is the
+        // graph's. Taken on ties as well as improvements, and only when it
+        // actually attains the bound.
+        //
+        // The clone is bounded by `max_rounds` over a graph the tightening has
+        // already reduced, and it is what makes the guarantee unconditional. A
+        // witness that cannot fail is worth a few copies of a graph that no
+        // longer has to be guessed at.
+        if let Some(edges) = outcome.incumbent_edges {
+            let cost: Cost = edges
+                .iter()
+                .filter_map(|&e| graph.edges.get(e as usize))
+                .map(|e| e.cost)
+                .sum();
+            if cost <= upper_bound + 1e-9 {
+                upper_bound = upper_bound.min(cost);
+                witness = Some(Witness {
+                    graph: graph.clone(),
+                    terminals: terminals.clone(),
+                    edges,
+                    cost,
+                    offset,
+                });
+            }
         }
         if outcome.certificate.is_some() {
             certificate = outcome.certificate;
@@ -254,10 +503,24 @@ pub fn tighten(
         }
 
         // Shrink, then re-run the classical reductions on the smaller graph.
-        let Some((g2, t2)) = shrink(&graph, &terminals, &outcome.dead_nodes, &outcome.dead_edges)
+        let Some((g2, t2, shrink_map)) =
+            shrink(&graph, &terminals, &outcome.dead_nodes, &outcome.dead_edges)
         else {
             break;
         };
+        // Follow the witness across the shrink, so the snapshot it carries stays
+        // the *smallest* graph it is a tree of. `shrink_map[v] == 0` means `v`
+        // did not survive, and the elimination is entitled to remove a vertex the
+        // incumbent used — it only promises to keep the trees *cheaper* than the
+        // incumbent, and the incumbent is not cheaper than itself. So a failure
+        // here is expected rather than anomalous, and costs nothing: the previous
+        // snapshot stands.
+        let witness_in_g2 = witness.as_ref().and_then(|w| {
+            w.rebase_onto(&g2, &t2, &|v| {
+                let m = *shrink_map.get(v as usize)?;
+                (m != 0).then_some(m)
+            })
+        });
         let instance = as_instance(&g2, &t2);
         // The incumbent is a tree of `g2` of cost `upper_bound` unless an earlier
         // elimination already removed it, in which case the loop is already
@@ -275,6 +538,27 @@ pub fn tighten(
             lower_bound = (lower_bound - rg.offset).max(0.0);
             upper_bound -= rg.offset;
         }
+        // And across the classical reductions' own renumbering. A contraction
+        // merges two vertices, so an edge of the witness between them has no
+        // image; `rebase_onto` refuses rather than dropping it, because dropping
+        // it would silently change the witness's cost — which is the whole thing
+        // being protected.
+        //
+        // The replacement is taken **only when it preserves `cost + offset`**,
+        // which is the invariant [`Reduced::verify_witness`] rests on. A tree
+        // that survives a contraction it does not use keeps its cost while the
+        // offset grows, so its sum rises: it is a *worse* witness than the
+        // snapshot, and taking it would break the identity with `upper_bound`.
+        let renumber = rg.node_renumbering();
+        if let Some(rebased) =
+            witness_in_g2.and_then(|w| w.rebase_onto(&ru, &ri.terminals, &|v| renumber.get(&v).copied()))
+        {
+            let old_sum = witness.as_ref().map(|w| w.cost + w.offset);
+            let new_sum = rebased.cost + offset;
+            if old_sum.is_some_and(|s| (s - new_sum).abs() < 1e-6) {
+                witness = Some(Witness { offset, ..rebased });
+            }
+        }
         graph = ru;
         terminals = ri.terminals;
         // Node ids changed, so an incumbent recorded in the old numbering is
@@ -290,6 +574,16 @@ pub fn tighten(
         root = *terminals.first().unwrap_or(&1);
     }
 
+    // The invariant, checked rather than asserted in prose. A build that
+    // violates it is a build whose reports rest on nothing, so it is worth a
+    // debug assertion at every exit.
+    debug_assert!(
+        witness.as_ref().is_none_or(|w| {
+            !upper_bound.is_finite() || ((w.cost + w.offset) - (upper_bound + offset)).abs() < 1e-6
+        }),
+        "witness invariant broken"
+    );
+
     Reduced {
         graph,
         terminals,
@@ -297,6 +591,7 @@ pub fn tighten(
         lower_bound,
         upper_bound,
         incumbent_arcs,
+        witness,
         certificate,
         offset,
         rounds,
@@ -308,6 +603,8 @@ struct RoundOutcome {
     lower_bound: Cost,
     upper_bound: Cost,
     incumbent_arcs: Option<Vec<u32>>,
+    /// The same tree as edges of the graph the round ran on.
+    incumbent_edges: Option<Vec<u32>>,
     certificate: Option<DualAscentResult>,
     root: NodeId,
     dead_nodes: Vec<NodeId>,
@@ -697,16 +994,63 @@ fn round(
         }
     }
 
+    // A tree attaining `upper_bound`, even when the round did not *improve* it.
+    //
+    // `incumbent_arcs` is set only on a strict improvement, which is the right
+    // rule for an incumbent and the wrong one for a witness: a round that ties
+    // the bound it was handed has still constructed a tree of that cost, and
+    // that tree is exactly the evidence the bound needs. Without this a warm
+    // start at the true optimum would be unprovable — the heuristic matches it,
+    // never beats it, and nothing is ever recorded.
+    let witness_arcs = incumbent_arcs.clone().or_else(|| {
+        pool.iter()
+            .filter(|(c, _, _)| *c <= upper_bound + 1e-9)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, _, arcs)| arcs.clone())
+    });
+    // The tree as *edges of `graph`*, translated here where the arc index that
+    // names those arcs is still in scope. Doing it later — from an arc list and
+    // a graph that have drifted apart — is precisely §61's failure.
+    let incumbent_edges = witness_arcs.as_ref().and_then(|a| arcs_to_edges(graph, &idx, a));
+
     RoundOutcome {
         lower_bound,
         upper_bound,
         incumbent_arcs,
+        incumbent_edges,
         certificate,
         root: best_root,
         dead_nodes,
         dead_edges,
         ils: ils_stats,
     }
+}
+
+/// Translate an arborescence's arcs into undirected edges of `graph`.
+///
+/// Matched by endpoint pair *and* cost, and each edge is used at most once, so a
+/// graph with parallel edges cannot answer with a cheaper twin. `None` when any
+/// arc has no such edge left, which is the only honest answer: a witness that
+/// cannot be named in the current graph is not a witness.
+fn arcs_to_edges(graph: &UndirectedGraph, idx: &ArcIndex, arcs: &[u32]) -> Option<Vec<u32>> {
+    let mut index: HashMap<(NodeId, NodeId), Vec<(u32, Cost)>> = HashMap::new();
+    for e in &graph.edges {
+        let key = if e.src <= e.dst { (e.src, e.dst) } else { (e.dst, e.src) };
+        index.entry(key).or_default().push((e.id, e.cost));
+    }
+    let mut taken: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(arcs.len());
+    for &a in arcs {
+        let (t, h, c) = (idx.tail(a), idx.head(a), idx.cost(a));
+        let key = if t <= h { (t, h) } else { (h, t) };
+        let pick = index
+            .get(&key)?
+            .iter()
+            .find(|(id, ec)| (ec - c).abs() < 1e-9 && !taken.contains(id))?;
+        taken.insert(pick.0);
+        out.push(pick.0);
+    }
+    Some(out)
 }
 
 /// Vertex set touched by an arc list, always including the root.
@@ -724,12 +1068,15 @@ fn nodes_of(idx: &ArcIndex, arcs: &[u32], root: NodeId) -> Vec<NodeId> {
 
 /// Build a smaller graph without the eliminated nodes and edges.
 /// Returns `None` if nothing would change.
+/// Returns the smaller graph, its terminals, and the node renumbering — indexed
+/// by old id, zero where the vertex did not survive — so a witness can follow
+/// the shrink instead of being discarded by it.
 fn shrink(
     graph: &UndirectedGraph,
     terminals: &[NodeId],
     dead_nodes: &[NodeId],
     dead_edges: &[u32],
-) -> Option<(UndirectedGraph, Vec<NodeId>)> {
+) -> Option<(UndirectedGraph, Vec<NodeId>, Vec<u32>)> {
     if dead_nodes.is_empty() && dead_edges.is_empty() {
         return None;
     }
@@ -774,7 +1121,7 @@ fn shrink(
 
     let mut new_terminals: Vec<NodeId> = terminals.iter().map(|&t| map[t as usize]).collect();
     new_terminals.sort_unstable();
-    Some((out, new_terminals))
+    Some((out, new_terminals, map))
 }
 
 /// Wrap a graph as a `SteinerInstance` so the reduction package can consume it.
@@ -940,10 +1287,287 @@ mod tests {
                     opt + slack
                 );
                 assert!(out.lower_bound <= opt + 1e-6, "LB {} > optimum {opt}", out.lower_bound);
+                // The witness, on the same runs. Under a *loose* cutoff the loop
+                // has room to shrink under the incumbent, which is precisely the
+                // regime in which the carried bound and the graph it is stated
+                // for come apart.
+                if let Some(v) = out.verify_witness() {
+                    assert!(
+                        (v - (out.upper_bound + out.offset)).abs() < 1e-6,
+                        "witness value {v} != upper bound {} + offset {}",
+                        out.upper_bound,
+                        out.offset
+                    );
+                    assert!(v >= opt - 1e-6, "witness value {v} below the optimum {opt}");
+                }
                 checked += 1;
             }
         }
         assert!(checked > 200, "only {checked} cases were exercised");
+    }
+
+    /// A bound with no tree behind it is never announced as achieved.
+    ///
+    /// The pipeline is handed an incumbent *below the optimum* — a value no tree
+    /// attains — which is the state §61 diagnoses reached by a heuristic that
+    /// stalled above the optimum and a chain of carried bounds that lost track of
+    /// what produced them. Under it the bound-based rules delete a great deal
+    /// (correctly: nothing cheaper than the cutoff exists, so everything is
+    /// eliminable), the frontier exhausts below the cutoff, and the old code
+    /// reported `Optimal` at the fiction.
+    ///
+    /// The assertion is the whole of the correctness claim: whatever the solver
+    /// says, it never says `Optimal` at a value the instance cannot achieve.
+    #[test]
+    fn an_unwitnessed_incumbent_is_never_reported_as_proved() {
+        use crate::branch_and_bound::{SolveStatus, SolverConfig};
+        let mut seed = 0x1BAD_5EED_9876_4321u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut checked = 0;
+        for _ in 0..120 {
+            let n = 5 + (rng() % 4) as u32;
+            let mut g = UndirectedGraph::new(n);
+            let k = 2 + (rng() % 3) as u32;
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = v <= k;
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            let mut edges = Vec::new();
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 3 != 0 {
+                        let c = 1.0 + (rng() % 9) as f64;
+                        g.add_edge(u, v, c);
+                        edges.push((u, v, c));
+                    }
+                }
+            }
+            let Some(opt) = brute_force(n, &edges, &terminals) else { continue };
+            let instance = as_instance(&g, &terminals);
+            for deficit in [1.0, 2.0, 5.0] {
+                if opt - deficit <= 0.0 {
+                    continue;
+                }
+                let cfg = SolverConfig {
+                    time_limit_secs: 2.0,
+                    verbose: false,
+                    initial_upper_bound: opt - deficit,
+                    ..SolverConfig::default()
+                };
+                let r = crate::solver::solve(&instance, cfg);
+                if r.status == SolveStatus::Optimal {
+                    assert!(
+                        (r.primal_bound - opt).abs() < 1e-6,
+                        "claimed Optimal {} against a true optimum of {opt} \
+                         under a fictional incumbent of {}",
+                        r.primal_bound,
+                        opt - deficit
+                    );
+                }
+                // And whatever it claims, a finite primal must be achievable.
+                if r.primal_bound.is_finite() {
+                    assert!(
+                        r.primal_bound >= opt - 1e-6,
+                        "primal {} below the optimum {opt}",
+                        r.primal_bound
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "only {checked} cases were exercised");
+    }
+
+    /// A near-tree with more terminals than Dreyfus-Wagner can address, so the
+    /// pipeline is actually entered.
+    ///
+    /// The small dense graphs above never reach [`crate::solver::finish`]: with
+    /// three terminals on eight vertices `try_dreyfus_wagner` closes them before
+    /// the tightening runs, and the paths that report `primal = dual =
+    /// root_upper_bound` are never touched. Instrumenting the test showed 291 of
+    /// 291 cases taking that shortcut — the test passed and proved nothing, which
+    /// is exactly the sort of measurement §63's closing note warns about.
+    ///
+    /// A weighted grid: narrow enough for the reference dynamic programme to
+    /// solve exactly, dense and terminal-rich enough that neither Dreyfus-Wagner
+    /// nor the classical reduction disposes of it first.
+    ///
+    /// Both easier generators were tried and both were useless, which is worth
+    /// recording because the *test passing* said nothing in either case. Small
+    /// dense graphs are closed by `try_dreyfus_wagner` before the tightening
+    /// runs; near-trees are closed by the classical reduction, which contracts
+    /// the instance to fewer than two terminals and returns `trivial_result`. A
+    /// grid has minimum degree two everywhere, no degree-one chains to contract,
+    /// and more terminals than `dw_is_affordable` admits.
+    fn grid_instance(rng: &mut dyn FnMut() -> u64) -> Option<(SteinerInstance, Cost)> {
+        use crate::graph::algorithms::steiner_td::reference::{raw_dp, RawCensus};
+        use crate::graph::algorithms::tree_decomposition::decompose;
+        let rows = 5 + (rng() % 2) as u32;
+        let cols = 7 + (rng() % 3) as u32;
+        let n = rows * cols;
+        let id = |r: u32, c: u32| r * cols + c + 1;
+        // Enough terminals that Dreyfus-Wagner is refused, spread over the grid.
+        let mut is_t = vec![false; n as usize + 1];
+        let k = 26 + (rng() % 5) as usize;
+        let mut placed = 0;
+        let mut v = 1u32;
+        while placed < k && v <= n {
+            if rng() % 3 != 0 {
+                is_t[v as usize] = true;
+                placed += 1;
+            }
+            v += 1;
+            if v > n && placed < k {
+                v = 1;
+            }
+        }
+        let mut g = UndirectedGraph::new(n);
+        let mut terminals = Vec::new();
+        for v in 1..=n {
+            let t = is_t[v as usize];
+            g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+            if t {
+                terminals.push(v);
+            }
+        }
+        for r in 0..rows {
+            for c in 0..cols {
+                if c + 1 < cols {
+                    g.add_edge(id(r, c), id(r, c + 1), 1.0 + (rng() % 9) as f64);
+                }
+                if r + 1 < rows {
+                    g.add_edge(id(r, c), id(r + 1, c), 1.0 + (rng() % 9) as f64);
+                }
+            }
+        }
+        let td = decompose(&g, 12, None)?;
+        let mut census = RawCensus::default();
+        let opt = raw_dp(&g, &terminals, &td, 3_000_000, None, &mut census)?;
+        Some((as_instance(&g, &terminals), opt))
+    }
+
+    #[test]
+    fn an_unwitnessed_incumbent_is_never_proved_on_the_full_pipeline() {
+        use crate::branch_and_bound::{SolveStatus, SolverConfig};
+        let mut seed = 0x51DE_57ED_9E37_79B9u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut checked = 0;
+        let mut entered = 0;
+        for _ in 0..40 {
+            let Some((instance, opt)) = grid_instance(&mut rng) else { continue };
+            for deficit in [1.0, 3.0] {
+                if opt - deficit <= 0.0 {
+                    continue;
+                }
+                for preprocess in [true, false] {
+                let cfg = SolverConfig {
+                    time_limit_secs: 3.0,
+                    verbose: false,
+                    preprocess,
+                    initial_upper_bound: opt - deficit,
+                    ..SolverConfig::default()
+                };
+                let r = crate::solver::solve(&instance, cfg);
+                entered += 1;
+                if r.status == SolveStatus::Optimal {
+                    assert!(
+                        (r.primal_bound - opt).abs() < 1e-6,
+                        "claimed Optimal {} against a true optimum of {opt} \
+                         under a fictional incumbent of {}",
+                        r.primal_bound,
+                        opt - deficit
+                    );
+                }
+                if r.primal_bound.is_finite() {
+                    assert!(
+                        r.primal_bound >= opt - 1e-6,
+                        "primal {} below the optimum {opt}",
+                        r.primal_bound
+                    );
+                }
+                checked += 1;
+                }
+            }
+        }
+        assert!(checked > 30 && entered > 30, "only {checked}/{entered} cases were exercised");
+    }
+
+    /// The positive control: a *true* incumbent, supplied without a tree, must
+    /// not cost the solver its proof.
+    ///
+    /// This is the case version one of the check got wrong (§61), taking PACE
+    /// Track 1's instance080 and instance157 from proved to unproved by reading
+    /// an absent witness as evidence against a perfectly good bound. Here the
+    /// round ties the supplied value, records the tree it tied it with, and the
+    /// proof stands.
+    #[test]
+    fn a_true_incumbent_supplied_without_a_tree_is_still_proved() {
+        use crate::branch_and_bound::{SolveStatus, SolverConfig};
+        let mut seed = 0x2CAFE_1234_5678_9ABu64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut proved, mut total) = (0, 0);
+        for _ in 0..80 {
+            let n = 5 + (rng() % 4) as u32;
+            let mut g = UndirectedGraph::new(n);
+            let k = 2 + (rng() % 3) as u32;
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = v <= k;
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            let mut edges = Vec::new();
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 3 != 0 {
+                        let c = 1.0 + (rng() % 9) as f64;
+                        g.add_edge(u, v, c);
+                        edges.push((u, v, c));
+                    }
+                }
+            }
+            let Some(opt) = brute_force(n, &edges, &terminals) else { continue };
+            let instance = as_instance(&g, &terminals);
+            let cfg = SolverConfig {
+                time_limit_secs: 2.0,
+                verbose: false,
+                initial_upper_bound: opt,
+                ..SolverConfig::default()
+            };
+            let r = crate::solver::solve(&instance, cfg);
+            total += 1;
+            if r.status == SolveStatus::Optimal {
+                assert!((r.primal_bound - opt).abs() < 1e-6);
+                proved += 1;
+            }
+        }
+        assert!(total > 40, "only {total} cases ran");
+        assert!(
+            proved * 10 >= total * 9,
+            "a true incumbent cost the proof on {} of {total} instances",
+            total - proved
+        );
     }
 
     fn brute_force(n: u32, edges: &[(NodeId, NodeId, Cost)], terminals: &[NodeId]) -> Option<Cost> {

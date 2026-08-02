@@ -183,7 +183,9 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     // bound a pass reports is stated for its own graph; this is what puts them
     // back on a common scale.
     let mut carried_offset: Cost = 0.0;
-    let mut incoming_ub = Cost::INFINITY;
+    // A caller-supplied incumbent value is on the *original* instance's scale;
+    // `base_offset` has already been contracted out of `pass_graph`.
+    let mut incoming_ub = config.initial_upper_bound - base_offset;
     let mut best: Option<SolveResult> = None;
     // The goal-directed search, carried across passes. When the second pass's
     // tightening lands on the same reduced instance — which is the usual case
@@ -202,6 +204,8 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     // does; only a pass that watched it solve nothing says otherwise.
     let mut carried_lower_bound: Cost = 0.0;
     let mut branch_and_cut_works = true;
+    // No pass has run, so no bound has been exhibited yet.
+    let mut carried_primal_witnessed = false;
     // Dual bound per second, as the goal-directed search itself was observed to
     // produce it. See `finish` for what it is compared against.
     let mut search_rate: Cost = 0.0;
@@ -241,6 +245,8 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         // strengthened its hypotheses. The upper-bound test is made below, once
         // the pass has reported what it found.
         let reusable = reduced.converged.then(|| (reduced.clone(), reduced.upper_bound));
+        // Whether this pass can exhibit a tree for the bound it will report.
+        let witnessed_here = reduced.upper_bound_is_witnessed() || carried_primal_witnessed;
         // What the next pass will start from, before `finish` consumes `reduced`.
         let next_graph = reduced.graph.clone();
         let next_terminals = reduced.terminals.clone();
@@ -274,7 +280,13 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             &mut carried_lower_bound,
             &mut branch_and_cut_works,
             &mut search_rate,
+            carried_primal_witnessed,
         );
+        // What the next pass may inherit: this pass reported a primal, and it is
+        // exhibited exactly when the pass either witnessed its own bound or was
+        // handed a witnessed one. `Feasible` outcomes carry the same evidence —
+        // `exact_report` only downgrades the *proof*, not the tree.
+        carried_primal_witnessed = witnessed_here && outcome.primal_bound.is_finite();
         outcome.primal_bound += carried_offset;
         outcome.dual_bound += carried_offset;
         // Both bounds are valid for the same instance, so keep the better of
@@ -363,6 +375,54 @@ fn merge(a: SolveResult, b: SolveResult, tolerance: Cost) -> SolveResult {
 }
 
 /// Finish a tightened instance: exact DP when cheap, otherwise branch-and-cut.
+/// Report an exact value obtained on the reduced graph.
+///
+/// `value` is the proved optimum of that graph, so `value + offset` is the cost
+/// of a tree of the instance the tightening was handed — the contraction lemma
+/// lifts it. `root_upper_bound` may be lower, which happens exactly when the
+/// bound-based reductions removed the trees attaining it; that is legitimate and
+/// is why the minimum is taken.
+///
+/// It is legitimate *given a real tree for `root_upper_bound`*. Without one the
+/// two numbers disagree with no way to decide between them, so nothing is
+/// claimed proved: the primal is still the better of the two — both are upper
+/// bounds however the disagreement resolves — and the dual falls back to what
+/// was actually certified.
+#[allow(clippy::too_many_arguments)]
+fn exact_report(
+    value: Cost,
+    root_upper_bound: Cost,
+    root_lower_bound: Cost,
+    ub_witnessed: bool,
+    offset: Cost,
+    start: Instant,
+    method: SolveMethod,
+) -> SolveResult {
+    // Without a tree for `root_upper_bound` it is a cutoff and nothing more, so
+    // it may not appear in a *primal* position: a primal bound is a claim that
+    // some tree achieves it. `value` always may — every tree of the reduced
+    // graph is a tree of the original, and the contraction lemma adds `offset`.
+    let best = if ub_witnessed { value.min(root_upper_bound) } else { value };
+    let proved = ub_witnessed || value <= root_upper_bound + 1e-9;
+    let dual = if proved { best } else { root_lower_bound.min(best) };
+    SolveResult {
+        status: if proved { SolveStatus::Optimal } else { SolveStatus::Feasible },
+        primal_bound: best + offset,
+        dual_bound: dual + offset,
+        gap_pct: if proved {
+            0.0
+        } else {
+            ((best - dual) / best.abs().max(1e-10) * 100.0).max(0.0)
+        },
+        nodes_processed: 0,
+        cuts_added: 0,
+        lp_solves: 0,
+        time_secs: start.elapsed().as_secs_f64(),
+        verified: true,
+        method,
+    }
+}
+
 fn finish(
     reduced: crate::root_reduce::Reduced,
     config: &SolverConfig,
@@ -373,6 +433,11 @@ fn finish(
     carried_lower_bound: &mut Cost,
     branch_and_cut_works: &mut bool,
     search_rate: &mut Cost,
+    // Whether the bound this pass started from was itself exhibited by an
+    // earlier pass. A pass that never improves the incumbent inherits its
+    // witness from the pass that found it, and inherits nothing when there was
+    // none.
+    carried_primal_witnessed: bool,
 ) -> SolveResult {
 
     if config.verbose {
@@ -392,7 +457,35 @@ fn finish(
     // cost back on at each exit.
     let offset = reduced.offset;
 
-    if reduced.proved_optimal(config.gap_tolerance.max(1e-6)) {
+    // Can `upper_bound` be *exhibited*?
+    //
+    // This is the question §61 leaves open, and it is not rhetorical: `finish`
+    // reports `primal = dual = root_upper_bound` on several paths, and on PACE
+    // Track 1's instance184 — under a primal heuristic since reverted — it
+    // reported `Optimal 3404` against a reference of 3399. The number came from
+    // a bound the loop had carried across shrinks with nobody left holding a tree
+    // for it.
+    //
+    // [`Reduced::verify_witness`] answers it by recomputing a stored tree's cost
+    // from the graph that tree is stated in, and the invariant proved there says
+    // the answer is `upper_bound + offset` exactly when the bound is honest. A
+    // pass that inherited its bound from an earlier one inherits that pass's
+    // answer, which was gated here in the same way.
+    //
+    // What the flag gates is only the *claim of achievement*. It never changes a
+    // cutoff, never discards a bound, and never touches the reduction — the
+    // second of §61's two failed repairs did all three, and produced three wrong
+    // answers of its own.
+    let ub_witnessed = reduced.upper_bound_is_witnessed() || carried_primal_witnessed;
+    if config.verbose && reduced.upper_bound.is_finite() && !ub_witnessed {
+        eprintln!(
+            "[witness] upper bound {:.1} has no tree behind it; \
+             optimality will not be claimed on it alone",
+            reduced.upper_bound + offset
+        );
+    }
+
+    if reduced.proved_optimal(config.gap_tolerance.max(1e-6)) && ub_witnessed {
         let value = reduced.upper_bound + offset;
         return SolveResult {
             status: SolveStatus::Optimal,
@@ -447,19 +540,15 @@ fn finish(
         if let Some(value) = search_cache.as_ref().and_then(|s| s.optimum()) {
             // The search runs on a graph that keeps only trees at or below the
             // incumbent, so the incumbent still wins ties.
-            let best = value.min(root_upper_bound);
-            return SolveResult {
-                status: SolveStatus::Optimal,
-                primal_bound: best + offset,
-                dual_bound: best + offset,
-                gap_pct: 0.0,
-                nodes_processed: 0,
-                cuts_added: 0,
-                lp_solves: 0,
-                time_secs: start.elapsed().as_secs_f64(),
-                verified: true,
-                method: SolveMethod::DreyfusWagner,
-            };
+            return exact_report(
+                value,
+                root_upper_bound,
+                root_lower_bound,
+                ub_witnessed,
+                offset,
+                start,
+                SolveMethod::DreyfusWagner,
+            );
         }
     }
 
@@ -490,19 +579,15 @@ fn finish(
         if config.verbose {
             eprintln!("[td] exact by tree decomposition: {value:.1} in {secs:.2}s");
         }
-        let best = value.min(root_upper_bound);
-        return SolveResult {
-            status: SolveStatus::Optimal,
-            primal_bound: best + offset,
-            dual_bound: best + offset,
-            gap_pct: 0.0,
-            nodes_processed: 0,
-            cuts_added: 0,
-            lp_solves: 0,
-            time_secs: start.elapsed().as_secs_f64(),
-            verified: true,
-            method: SolveMethod::TreeDecomposition,
-        };
+        return exact_report(
+            value,
+            root_upper_bound,
+            root_lower_bound,
+            ub_witnessed,
+            offset,
+            start,
+            SolveMethod::TreeDecomposition,
+        );
     }
 
 
@@ -566,6 +651,11 @@ fn finish(
     }
     if search_lower_bound >= root_upper_bound - config.gap_tolerance.max(1e-6)
         && root_upper_bound.is_finite()
+        // The path §61 names: the frontier reaches the incumbent and the
+        // incumbent is announced as proved, with nothing between the claim and a
+        // number. Without a tree for that number the claim is not made, and the
+        // branch-and-cut below gets the rest of the budget instead.
+        && ub_witnessed
     {
         return SolveResult {
             status: SolveStatus::Optimal,
@@ -598,7 +688,10 @@ fn finish(
     let bnc_secs = bnc_started.elapsed().as_secs_f64();
 
     let mut verified = false;
-    let mut primal = root_upper_bound;
+    // A primal bound is a claim that some tree achieves it, so an unwitnessed
+    // `root_upper_bound` may not start one. The branch-and-cut's own solution is
+    // checked by `verify_solution` and may.
+    let mut primal = if ub_witnessed { root_upper_bound } else { Cost::INFINITY };
     if let Some(ref sol) = solution {
         let vr = verify_solution(&directed, root, &terminals, sol);
         verified = vr.is_valid;
@@ -622,7 +715,9 @@ fn finish(
     // solution *strictly cheaper than the incumbent*, so running out of feasible
     // solutions is exactly the proof that the incumbent is optimal.
     let integral = costs_are_integral(directed.arcs.iter().map(|a| a.cost));
-    let dual = if stats.status == SolveStatus::Infeasible && primal.is_finite() {
+    // "No solution cheaper than the incumbent" proves the incumbent optimal only
+    // if the incumbent exists.
+    let dual = if stats.status == SolveStatus::Infeasible && primal.is_finite() && ub_witnessed {
         primal
     } else {
         tighten_dual(stats.dual_bound.max(root_lower_bound), integral).min(primal)

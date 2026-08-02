@@ -6,6 +6,7 @@ pub mod bottleneck;
 pub mod csr;
 pub mod implied_profit;
 pub mod nearest_vertex;
+pub mod extended;
 pub mod sd_closure;
 pub mod vertex_test;
 
@@ -104,6 +105,15 @@ impl ReducibleGraph {
                     self.edge_valid[eid as usize] = false;
                 }
             }
+        }
+    }
+
+    /// Undo [`ReducibleGraph::remove_edge`]. Only sound for an edge whose
+    /// removal has not been followed by anything that depended on it; the one
+    /// caller is the extended reduction's defensive connectivity rollback.
+    pub fn restore_edge(&mut self, edge_id: EdgeId) {
+        if (edge_id as usize) < self.edge_valid.len() {
+            self.edge_valid[edge_id as usize] = true;
         }
     }
 
@@ -260,6 +270,24 @@ impl ReducibleGraph {
             .filter(|e| self.is_edge_valid(e.id))
             .map(|e| e.id)
             .collect()
+    }
+
+    /// The renumbering [`ReducibleGraph::to_instance`] applies, from this
+    /// graph's node ids to the emitted instance's.
+    ///
+    /// Exposed because a caller carrying a *witness* — an actual tree, not only
+    /// its cost — has to follow its vertices across the renumbering. §61 is the
+    /// record of what happens when a witness is trusted in a numbering that is
+    /// no longer the graph's: three wrong answers, from indices that still
+    /// connected the terminals while naming different edges.
+    pub fn node_renumbering(&self) -> HashMap<NodeId, NodeId> {
+        let mut node_map: HashMap<NodeId, NodeId> = HashMap::new();
+        let mut new_id = 1u32;
+        for &nid in &self.valid_nodes() {
+            node_map.insert(nid, new_id);
+            new_id += 1;
+        }
+        node_map
     }
 
     /// Build a new UndirectedGraph and SteinerInstance from the reduced state.
@@ -436,7 +464,6 @@ pub fn preprocess_bounded(
     // The star test's multi-hop witness forest, carried across rounds and
     // re-validated rather than rebuilt. See [`vertex_test::ChainHops::refresh`].
     let mut hops = None;
-
     loop {
         let (deg_removed, fixed, _) = degree::degree_reductions(&mut rg);
         total_fixed.extend(fixed);
@@ -486,9 +513,34 @@ pub fn preprocess_bounded(
         // Contractions have moved `rg.offset` out of the graph, so the cutoff for
         // what remains is the incoming bound less what has been paid.
         let cutoff = upper_bound - rg.offset;
-        if bound_reduce::bound_reductions(&mut rg, cutoff) == 0 || expired() {
+        if bound_reduce::bound_reductions(&mut rg, cutoff) > 0 && !expired() {
+            continue;
+        }
+        if expired() {
             break;
         }
+
+        // The extended reduction of `extended.rs` belongs exactly here — after
+        // every single-edge rule and the region bound have reached their
+        // fixpoint, which is the measured condition under which enumerating
+        // *trees* is worth its cost, and where the sixty Track 2 instances the
+        // solver fails actually live.
+        //
+        // **It is not called, and the reason is a measured trade rather than a
+        // proof gap.** Wired here with the classical stage's remaining deadline
+        // it is correct — PACE Track 1 [1..140] returns 140/140 with no wrong
+        // answer — and it costs Track 2 **106/200 against 110 to 111**. The
+        // classical fixpoint stops using 0.10 s of its 1.67 s share and starts
+        // using all of it, and on Track 2 a second spent enumerating trees is
+        // worth less than a second spent in the exact finish: instances the width
+        // DP closes in 0.06 s (026, 059, 064) go unproved. §70 and §73 record
+        // both halves of that measurement.
+        //
+        // What would make it pay is a dispatch that runs it only where the
+        // downstream cannot use the time — the refused, many-terminal regime of
+        // §47 — which needs the decomposition width measured *before* the
+        // reduction, and that measurement does not belong in this function.
+        break;
     }
 
     let result = PreprocessingResult {
@@ -504,6 +556,86 @@ pub fn preprocess_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole preprocessing pipeline, end to end, against Dreyfus-Wagner.
+    ///
+    /// Each rule has its own `never_changes_the_optimum`, and each of those
+    /// builds a `ReducibleGraph` from a *fresh* instance — nothing retired,
+    /// nothing contracted, no offset. The composition is a different object and
+    /// this is the gate for it.
+    #[test]
+    fn the_whole_pipeline_never_changes_the_optimum() {
+        use crate::graph::algorithms::dreyfus_wagner;
+        let mut seed = 0x7A5B_3C1D_9E4F_6081u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut ran = 0;
+        for round in 0..900 {
+            let n = 8 + (rng() % 9) as u32;
+            let k = 2 + (rng() % 4) as u32;
+            let terminals: Vec<NodeId> = (1..=k).collect();
+            let mut g = UndirectedGraph::new(n);
+            for v in 1..=n {
+                let t = terminals.contains(&v);
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+            }
+            let unit = round % 3 == 0;
+            let mut perm: Vec<u32> = (1..=n).collect();
+            for i in (1..perm.len()).rev() {
+                perm.swap(i, (rng() % (i as u64 + 1)) as usize);
+            }
+            let w = |r: &mut dyn FnMut() -> u64| {
+                if unit { 1.0 } else { 1.0 + (r() % 9) as f64 }
+            };
+            for i in 0..perm.len() - 1 {
+                let c = w(&mut rng);
+                g.add_edge(perm[i], perm[i + 1], c);
+            }
+            let density = 10 + (rng() % 55) as u64;
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 100 < density {
+                        let c = w(&mut rng);
+                        g.add_edge(u, v, c);
+                    }
+                }
+            }
+            let inst = SteinerInstance {
+                name: String::from("t"),
+                comment: String::new(),
+                num_nodes: n,
+                num_edges: g.edges.len() as u32,
+                num_terminals: k,
+                nodes: g.nodes.clone(),
+                edges: g.edges.clone(),
+                terminals: terminals.clone(),
+                root: None,
+            };
+            let Some(dw) = dreyfus_wagner(&g, &terminals) else { continue };
+            let (rg, _) = preprocess_until(&inst, &g, None);
+            let (ri, ru) = rg.to_instance();
+            let got = if ri.terminals.len() < 2 {
+                0.0
+            } else {
+                match dreyfus_wagner(&ru, &ri.terminals) {
+                    Some(r) => r.optimal_cost,
+                    None => panic!("terminals disconnected"),
+                }
+            };
+            assert!(
+                (got + rg.offset - dw.optimal_cost).abs() < 1e-6,
+                "reduced {got} + offset {} != {} on n={n}",
+                rg.offset,
+                dw.optimal_cost
+            );
+            ran += 1;
+        }
+        assert!(ran > 500, "only {ran} cases ran");
+    }
 
     fn build_degree1_instance() -> (SteinerInstance, UndirectedGraph) {
         // Node 4 is a degree-1 Steiner node — should be removed

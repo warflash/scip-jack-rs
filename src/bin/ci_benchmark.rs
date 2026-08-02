@@ -103,6 +103,7 @@ fn solve_case(
         partition_cuts: true,
         activation_rank_cuts: false,
         tf_cuts: true,
+        initial_upper_bound: f64::INFINITY,
     };
 
     let result = solve_file(path, config);
