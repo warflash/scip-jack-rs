@@ -184,12 +184,22 @@ fn main() {
                     multi.push(kept);
                 }
             }
+            // `MAX_PACKING_LAYERS` is 2, so handing the search a list of 26
+            // packings tests only its first two. Rank them by value and keep the
+            // best, which is the question that can actually be asked.
+            multi.sort_by(|a, b| {
+                let (x, y): (f64, f64) = (a.iter().map(|s| s.0).sum(), b.iter().map(|s| s.0).sum());
+                y.total_cmp(&x)
+            });
             println!(
-                "multi-root ascent: {} usable packings of {} terminals ({:.2}s)",
+                "multi-root ascent: {} usable packings of {} terminals, values {:.1} .. {:.1} ({:.2}s)",
                 multi.len(),
                 terminals.len(),
+                multi.first().map_or(0.0, |p| p.iter().map(|s| s.0).sum::<f64>()) + offset,
+                multi.last().map_or(0.0, |p| p.iter().map(|s| s.0).sum::<f64>()) + offset,
                 t.elapsed().as_secs_f64()
             );
+            multi.truncate(1);
 
             // How much of the separation loop the *potential* actually needs.
             // The converged LP is what closes these instances, and it is also

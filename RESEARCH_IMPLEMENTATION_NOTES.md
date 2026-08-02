@@ -2027,9 +2027,357 @@ unrepresentable.
 
 ---
 
+## 2026-08-02 (ninth round): a reduction that was not sound, and an ordering that was not min-fill
+
+Three defects found by auditing rather than by a failing benchmark, one exact
+algorithmic replacement, and a measurement that says where the remaining Track 1
+loss actually is. Control: `4093347`, A/B on the same tree, eight instances in
+parallel throughout (which costs about five Track 2 proofs against a serial run —
+the comparison is like-for-like, the absolute numbers are not serial numbers).
+
+### 31. The build had not compiled repository-wide since the tree-decomposition route landed
+
+`tests/steinlib_benchmark.rs` matched exhaustively on `SolveMethod` and never
+learned `TreeDecomposition`. `cargo test --lib` passed throughout, which is
+exactly why it went unnoticed. Every consumer of `SolveMethod` was audited;
+`src/main.rs` was already complete. `cargo check --all-targets` is clean and is
+now part of the gate.
+
+### 32. The rank-based reduction and the acyclicity filter are incompatible — a real unsoundness
+
+The width DP reduced its tables by the cut-space rank identity and *also*
+filtered its joins by the forest criterion `|P_1| + |P_2| = |S| + |P_1 join P_2|`.
+Both are individually correct. Together they are not.
+
+The representation theorem preserves, for every query partition `q`,
+
+```text
+min { w(p) : p join q = {S} },
+```
+
+the least cost among **connected** completions. The join asks a different
+question. The smallest witness is `S = {a,b,c}`, where in cut space
+
+```text
+cuts({ab|c}) + cuts({ac|b}) + cuts({bc|a}) = cuts({a|b|c}).
+```
+
+Make the three two-block partitions cheaper and the discrete partition is
+discarded as linearly dependent. Now query `q = {abc}`. Every one of the four
+connects with it, so no connectivity answer changes — but the forest criterion
+reads `|p| + 1 = 3 + 1`, satisfied only by the discrete partition. The full table
+has a forest completion of `q`; the reduced table has none.
+`rankreduce::tests::forest_completions_are_not_preserved` is that witness, kept
+as a test so the filter cannot be reintroduced.
+
+**The repair.** Drop the filter. The table then means "least-cost edge set", not
+"least-cost forest", and Lemma 2 in the module says why that is the same number:
+every state reached denotes a real edge set of its stated cost, the root state
+forces one component covering every terminal so its cost is at least `OPT`, and
+the optimal tree's restrictions survive every prune (Lemma 1 for the
+forget-drop, acyclicity for the introduce-edge skip, and the join is now
+unconditional). Reading the tree back takes a spanning tree of what the
+backpointers give; every edge that discards has cost zero, and that is asserted.
+
+**Compositionality, which the single-table theorem does not give.** The DP joins
+tables that have *already* been reduced, so the invariant needed is that
+representation survives each operation. Lemma J (join) and Lemma F (forget) are
+now in the module. Lemma F is the interesting one: the forget step's
+"`v` is not alone in its block" filter looks like a per-partition filter of the
+kind that just broke acyclicity, but it is a connectivity query in disguise —
+in the union graph of `p` and `q + {{v}}`, the vertex `v` is adjacent only to its
+`p`-blockmates, so
+
+```text
+opt(proj(A), q) = opt(A, q + {{v}}),
+```
+
+and the right-hand side is preserved by hypothesis. Introduce-vertex pulls back
+the same way, introduce-edge is `min(A, c + join(A, {uw}))`, and pointwise `min`
+of represented tables represents their `min`.
+
+**Why it had never produced a wrong answer.** Lemma D (discrete dominance): at
+any node and used set `S`, the discrete partition of `S` attains the minimum cost
+over `Pi(S)`. Given any partial solution, take a spanning tree of each component,
+assign every vertex to its nearest bag vertex in that tree (ties by index) — each
+class is a connected subtree holding exactly one bag vertex — and delete the
+`|B|-1` edges between classes. Costs are nonnegative, so this only gets cheaper,
+and it realises the discrete signature. Hence the discrete partition sorts first
+and its all-ones cut vector is never dependent on an empty basis. It can be
+dropped **only on a tie**, and the tie was broken by hash iteration order.
+
+That prediction was tested. `matches_dreyfus_wagner_with_heavy_ties` runs
+unit-cost graphs — the regime that maximises ties — against Dreyfus-Wagner, and
+the filtered join **passes it**, at `n <= 14`, several thousand cases. So the
+end-to-end reachability of the bug was not exhibited by randomised search, and
+that is recorded as a negative result rather than hidden. It is repaired anyway:
+correctness that depends on hash iteration order is not correctness.
+
+**Gate.** Exhaustive partition-level tests to `s = 7` for the identity, to
+`s = 6` for the representation theorem, plus `reduced_join_matches_naive_join`
+(reduce both sides, join, reduce, compare every query against the full pairwise
+join, with adversarial block-count distributions) and the unit-cost
+Dreyfus-Wagner comparison. 151 library tests.
+
+### 33. The min-fill ordering was never min-fill
+
+`score` returned `missing * (degree + 1) + degree`. The multiplier depends on the
+vertex being scored, so it is not the lexicographic `(fill, degree)` it was
+documented as: one missing pair at degree two scores 5, while *no* fill at degree
+one hundred scores 100, and the greedy eliminates the wrong vertex.
+
+Corrected to a genuine pair — and the old score kept, under the name
+`FillWeighted`, because it is measurably **better** on some graphs. On PACE
+Track 2 instance090 (256 vertices after reduction):
+
+| ordering | width | work estimate |
+|---|---|---|
+| min-degree | 13 | 1.7e10 |
+| min-degree, fill tie-break | 11 | 1.3e9 |
+| min-fill (corrected) | 12 | 3.7e9 |
+| fill-weighted (the old score) | **11** | **1.2e9** |
+
+The DP over the portfolio's pick runs in **6.49 s** where the old pair of
+orderings gave 18.22 s. Note the last two rows: same width, different work. The
+width is a summary; what the DP pays is the sum over every bag, so the portfolio
+scores by `work_estimate` and uses width only as a tie-break. This is a decision
+made from quantities computed on the graph in hand.
+
+The certified early stop uses `delta(G)` (Lemma A directly), not the MMD+
+contraction bound. MMD+ was wired in first and measured out: it is `O(n^2)` with
+this module's adjacency sets, cost 0.2–0.4 s per call on reduced Track 2 graphs,
+and the solver calls it once per pass. A certified stop that costs more than the
+search it saves is not a saving.
+
+### 34. The join reduces as it generates
+
+**Instrumented first.** `JoinStats` counts join nodes, classes paired, pairs
+available, pairs popped, states emitted, classes that saturated, and nanoseconds;
+`tw_probe` reports them. Measured on the reduced instances:
+
+| instance | width | DP time | join time | share | pairs available | popped |
+|---|---|---|---|---|---|---|
+| instance052 | 8 | 38.4 s | 24.7 s | 64% | 99.9 M | 90.6 M |
+| instance090 | 12 | 18.2 s | 14.3 s | 79% | 47.2 M | 36.8 M |
+| instance040 | 10 | 2.1 s | 1.2 s | 59% | 4.8 M | 3.8 M |
+
+So the join is the ceiling, as expected.
+
+**The replacement.** After the rank reduction a class of size `s` holds at most
+`2^{s-1}` states, so the naive join is `sum_s C(b,s) 4^{s-1} = 5^b / 4` — and its
+result is then reduced back to `2^{s-1}`. Almost every pair formed is discarded a
+moment later, by a **matroid greedy**: process candidates in nondecreasing cost,
+keep those independent of what is kept. A matroid greedy does not need its
+candidates in advance, only in order.
+
+> **Theorem (lazy join).** Enumerate the pairs `(p_i, q_j)` in nondecreasing
+> `A(p_i) + B(q_j)` by a heap; for each pair whose join partition is new, offer
+> it to a cut-space basis at that cost; stop at rank `2^{s-1}` or exhaustion.
+> The kept set is a representative set of `join(A,B)`.
+
+*Proof.* The first pair whose join is `r` has cost exactly
+`c(r) = min{A(p)+B(q) : p join q = r}`, so the sequence of first appearances
+lists the naive join's partitions in nondecreasing `c` — precisely the input the
+representation theorem requires. Stopping at full rank changes nothing: every
+later candidate is a combination of kept vectors of no greater cost, the case the
+theorem's proof already covers. QED
+
+Gated by `lazy_join_represents_the_naive_join`: random tables over random
+used-set classes, small integer costs so ties are frequent, checking that every
+emitted state is priced exactly as the naive join prices it, that no class keeps
+more than its cut-space dimension, that pops never exceed available pairs, and
+that every connectivity query is answered identically. Plus the whole
+Dreyfus-Wagner battery end to end.
+
+**Measured: 9–22% of pairs skipped, and 2.5% end to end.** The basis saturates on
+only about 40% of classes, because the reachable tables are far *below* the
+cut-space dimension — instance090 averages 26 states per class against a
+dimension of 128 at `s = 8`. Early termination therefore fires rarely. The
+replacement is exact and never worse; it is not the improvement the ceiling
+needs.
+
+### 35. Negative result: min-plus has no analogue of the Cut&Count linearisation
+
+The target was `4^w -> 2^w poly(w)`. The natural route is a transform in which
+the join becomes cheap, and there is one:
+
+```text
+Atilde[X] = min { A(p) : p refines the bipartition (X, S-X) }.
+```
+
+Because `p join q` refines `(X, S-X)` exactly when both `p` and `q` do,
+
+```text
+min { join(A,B)(r) : r refines X } = Atilde[X] + Btilde[X],
+```
+
+so **the join is pointwise addition** — `2^{s-1}` work instead of `4^{s-1}`.
+
+It is also degenerate. The transform is a minimum over partitions *being refined
+by* a cut, and refining is always available by deleting edges, so `Atilde[X]` is
+attained at the finest partition for every `X`: it does not depend on `X` at all,
+and the introduce-edge step becomes a no-op because using an edge only adds cost.
+The transform loses everything.
+
+This is the exact point at which Cut&Count uses *counting* mod 2 rather than
+minimisation — a connected solution has exactly `2^{c-1}` consistent cuts — and
+recovers optimisation by the isolation lemma, i.e. randomisation with one-sided
+error. There is no deterministic min-plus analogue here, and the identity
+`cuts(p join q) = cuts(p) AND cuts(q)` does not help either: pointwise AND is not
+linear over GF(2), so it does not compose with a linear-algebraic representation.
+The exact naive join is retained as the semantics and the lazy join as the
+implementation. **The `2^w poly(w)` deterministic weighted join remains open**,
+and the obstruction above is why.
+
+### 36. The work estimate was nine orders of magnitude wrong
+
+`work_estimate` counted `Bell(b+1)` signatures per bag and squared it at every
+join. That was right before the rank reduction existed. It now counts
+
+```text
+sum_{s=0}^{b} C(b,s) * min(Bell(s), 2^{max(s-1,0)}),
+```
+
+which is `O(3^b)`. On instance090 the old form predicted `2.0e18` units for a run
+that takes 6.5 s. The new form predicts `1.2e9` — still loose by about two orders
+of magnitude, because reachable signatures are a small fraction of representable
+ones, so it remains unusable as an absolute admission test and the solver still
+bounds the DP by the clock. What it is now good for is **ranking** two
+decompositions of the same graph, where the looseness is a common factor that
+cancels, and that is what the portfolio uses it for.
+
+### 37. Negative result: multi-root dual-ascent packings add nothing
+
+A packing rooted at `r'` consists of sets missing `r'`, some of which contain the
+search's root; dropping those leaves a feasible packing (removing sets only
+lowers every arc's load), so each rooted ascent is a legal extra layer of the
+pointwise maximum, and the potential lattice lemma already permits it. Ascent
+from every terminal costs 0.01–0.03 s.
+
+The first attempt was invalid, and is recorded because the invalidation is the
+lesson: `MAX_PACKING_LAYERS` is 2, so handing the search 26 packings tested its
+first two, and handing it 26 packings *plus* the LP silently dropped the LP —
+which showed up as "multi + lp" scoring *worse* than "lp only", an impossibility
+for a pointwise maximum and therefore a signal that the experiment, not the
+mathematics, was wrong.
+
+Re-run with the packings ranked by value and the best one kept, on Track 1
+instances 167, 193 and 194:
+
+- the best-rooted ascent packing produces **exactly** the same frontier, the same
+  label count and the same time as the packing rooted at `terminals[0]`;
+- `best-root + lp` is identical to `lp only`.
+
+The spread between roots is large — 2,600,411 down to 2,500,379 on instance167 —
+but the *best* root is the one already in use, and the search does not care.
+Multi-root ascent is closed as a direction for the potential.
+
+### 38. Where the Track 1 "units short" group actually loses
+
+Instances 167, 187, 190, 193, 194 have costs concentrated at 1 and at 100000, an
+optimum of the form `k * 100000 + small`, a primal already at the optimum and a
+dual short by 3 to 27 absolute units out of millions. The measurement that
+matters, from `certify_probe` (LP budget, resulting packing, then a 400k-label
+search under it alone):
+
+| instance | LP 0.25 s | LP 1 s | LP 4 s | converged LP |
+|---|---|---|---|---|
+| 167 | **optimal**, 363k labels | **optimal**, 144k | **optimal**, 55k | 31 solves / 31 s |
+| 193 | **optimal**, 171k | **optimal**, 157k | **optimal**, 122k | 19 solves / 31 s |
+| 194 | no | no | no | optimal at 311k labels |
+| 187 | no | no | no | 6 solves / 31 s |
+| 190 | no | no | no | 8 solves / 31 s |
+
+So on 167 and 193 the whole instance is a 1.3–2.7 s job: a quarter-second of
+separation, then a search under the resulting packing. The solver does not do it,
+because the same tightening fixpoint was being derived twice.
+
+### 39. A fixpoint is not worth deriving twice
+
+`tighten` is a deterministic function of graph, terminals, configuration and the
+two bounds. When its last round kills nothing it has reached a **fixpoint**, and
+re-running it on its own output with an upper bound no better than the one it
+finished with kills nothing again. `Reduced::converged` records the distinction;
+a run cut short by its deadline is *never* reused, because that one really would
+do more with more time, and a strictly better incumbent is new information for
+the bound-based reductions so it also forces a recompute.
+
+On instance167 this hands 0.71 s of five back to the search: 389,000 labels
+become 483,000 and the dual moves 2,600,440 -> 2,600,442 against an optimum of
+2,600,443. Not a proof, but the currency is now identified — the search is short
+of labels, not of bound quality.
+
+The remaining identified waste on that instance is the root certificate, rebuilt
+from scratch in the second pass. Unlike the tightening this is *not* redundant:
+the separation loop is deadline-truncated, so a second run with a different
+budget genuinely does more. The right fix is a **resumable** separation loop, in
+the same shape `SteinerSearch` already has, carrying its rows and cuts across
+passes. Not implemented; it is the top of the queue.
+
+### 40. Measurements
+
+| slice | control `4093347` | now `c77028a` |
+|---|---|---|
+| PACE Track 2 [1..200] @5 s | 104/200, 23 by the DP | **110/200, 28 by the DP** |
+| PACE Track 1 [1..140] @3 s | 138/140 | 138/140 |
+| PACE Track 1 [155..200] @5 s | 26/46 | 26/46 |
+| SteinLib B @5 s | 18/18, 4.5 s | 18/18, **2.6 s** |
+| SteinLib C @5 s | 20/20, 10.6 s | 20/20, **8.4 s** |
+| SteinLib D @5 s | 20/20, 17.5 s | 20/20, **14.2 s** |
+| SteinLib E @20 s | — | 19/20, 72.4 s |
+
+Eight-way parallel throughout, both sides. No instance reports a value differing
+from its reference under an `Optimal` status in any slice. 151 library tests,
+`cargo check --all-targets` clean.
+
+Track 2 instances gained: 051, 062, 118, 119 (the semantics repair plus the
+ordering portfolio, all four now closed by the DP), 059 and 194 (the fixpoint
+reuse).
+
+### 41. What is and is not implemented, for the hypergraphic route
+
+To keep two different things apart:
+
+- **Implemented**: the standalone hypergraphic *certificate*
+  (`model/hypergraphic.rs`), dispatched from `solver.rs` on a computed work
+  budget — `hyp_work` against `HYP_UNITS_PER_SECOND`, run after the search rather
+  than before it, taken as a maximum with the other bounds and never added. On
+  instance024 it certifies 1756, the optimum, in 0.17 s. Its subset table caps
+  near twelve terminals, which is why `certify_probe` reports "out of range" on
+  the 26-terminal Track 1 instances above — those cannot be closed this way, and
+  no amount of scheduling changes that.
+- **Not implemented**: an unrestricted, globally certified hypergraphic master.
+  Full-signature exact pricing remains a research possibility only if every
+  omitted-component constraint is certified globally; a restricted master is
+  discovery-only until then. Coarsened / bounded-signature pricing is closed —
+  the ceiling is proved in the eighth round's notes.
+
+### 42. Open directions, re-ranked
+
+1. **A resumable root separation loop.** §38 shows 167 and 193 are 1.3–2.7 s
+   instances given a quarter-second of LP; §39 shows the second pass throws its
+   first pass's LP away. This is the concrete, measured, next thing.
+2. **Matroid-corrected cut packing.** Still absent, still the right target where
+   the integrality gap is active (161–165, 197–200). Unchanged.
+3. **Exchange potentials / implied bottleneck distance.** Unchanged; the proof
+   obligation is no-double-counting.
+4. **A deterministic `2^w poly(w)` weighted join.** §35 records why the obvious
+   transform collapses. Open, with the obstruction stated.
+5. **A better primal for instance196**, whose dual is already exactly the optimum
+   (100) while the primal sits at 103. That group is not a dual problem at all.
+6. ~~Multi-root ascent packings~~ — closed, §37.
+7. ~~Treewidth DP on the full Track 1 hard block~~ — closed; 197–200 decompose at
+   width 58–66 and `MAX_BAG` stays 15.
+
+---
+
 ## Where the remaining loss is
 
-Re-measured this session, PACE Track 1 [155..200] at 5 s: 15/46 proved. The
+*(Historical. The 15/46 figure below is superseded: Track 1 [155..200] at 5 s
+has measured 26/46 since the sixth round, and still does. The shape of the
+unproved instances, which is what this section is about, has not changed.)*
+
+Re-measured at the time of writing, PACE Track 1 [155..200] at 5 s: 15/46 proved. The
 unproved instances still show the shape the previous handoff described — primal a
 few percent high, dual a few percent low, reduced-cost fixing unable to bite. The
 reduction phase is no longer a contributor to that on the large sparse instances:
