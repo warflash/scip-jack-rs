@@ -841,40 +841,37 @@ fn try_decomposition(
         return None;
     }
 
-    // Iterative deepening on the state budget.
+    // One attempt, bounded by the clock rather than by an estimate.
     //
-    // An attempt that runs out of clock costs its budget and returns nothing,
-    // and the analytic work estimate is far too loose to say in advance which
-    // attempts those are — it predicts `1.6e10` units for a run that takes
-    // 0.14 s. What *can* be controlled is how much is bet: the DP's cost is
-    // proportional to the states it is allowed to hold, so running it under a
-    // small cap first and quadrupling only while the next attempt still fits
-    // makes the bet self-calibrating against a rate measured on this instance
-    // rather than assumed.
+    // Two ways of bounding the bet were tried before this one.
     //
-    // The geometric growth is what makes it nearly free: the attempts before
-    // the last cost a third of it between them, so a graph the DP can solve
-    // pays about a third over solving it directly, and a graph it cannot pays
-    // at most one attempt's worth beyond what was affordable. Measured, this is
-    // the difference between PACE Track 2's instance051 losing its incumbent to
-    // a doomed five-second attempt and losing a fifth of a second.
-    let mut cap = 100_000usize;
-    loop {
-        let attempt = Instant::now();
-        if let Some((cost, _)) =
-            steiner_tree_over_decomposition(graph, terminals, &td, cap, Some(deadline))
-        {
-            return Some((cost, started.elapsed().as_secs_f64()));
-        }
-        let spent = attempt.elapsed();
-        let left = deadline.saturating_duration_since(Instant::now());
-        // Out of clock, out of headroom, or the next attempt would not fit:
-        // quadrupling the cap quadruples the work.
-        if left.is_zero() || cap >= TD_STATE_BUDGET || spent.mul_f64(4.0) > left {
-            return None;
-        }
-        cap = (cap * 4).min(TD_STATE_BUDGET);
-    }
+    // The analytic [`work_estimate`] is a sound upper bound and useless as an
+    // admission test: it predicts `1.6e10` units for a run that takes 0.14 s,
+    // because the reachable signatures at a bag are a minute fraction of the
+    // partitions of that bag.
+    //
+    // Iterative deepening on the state budget — run under a small cap, quadruple
+    // only while the next attempt still fits — is wrong for a subtler reason,
+    // and the trace says so plainly. On PACE Track 2's instance040 the attempts
+    // cost 0.03 s at 100k states, 0.16 s at 400k and **1.31 s** at 1.6M, and the
+    // extrapolation from those refused to go on. The full run takes 2.37 s. The
+    // DP's cost is not proportional to the states it holds: the wide bags come
+    // early and the tail is nearly free, so any extrapolation from a truncated
+    // run over-predicts what remains, and the deepening refused instances it
+    // would have solved in a third of the time it had already spent.
+    //
+    // What bounds the loss exactly is the deadline, which the DP checks at every
+    // node. So the attempt is single, the state budget is a memory guard, and an
+    // instance too big for the clock costs the clock — the same bargain the
+    // branch-and-cut it defers to makes.
+    let (cost, _) = steiner_tree_over_decomposition(
+        graph,
+        terminals,
+        &td,
+        TD_STATE_BUDGET,
+        Some(deadline),
+    )?;
+    Some((cost, started.elapsed().as_secs_f64()))
 }
 
 fn try_dreyfus_wagner(

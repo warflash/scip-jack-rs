@@ -176,6 +176,329 @@ pub fn work_estimate(td: &TreeDecomposition, num_edges: usize, extra: usize) -> 
 /// clock costs its whole budget and returns nothing.
 pub const TD_UNITS_PER_SECOND: f64 = 2.0e7;
 
+/// Rank-based reduction of a table's partitions.
+///
+/// # The complexity improvement
+///
+/// The table at a bag of size `b` holds up to `Bell(b+1)` signatures and the
+/// join step pairs two of them, so the DP is `Bell(b)^2` per join. That is what
+/// makes width ten cost 38 seconds where width six costs 0.14. The **rank-based
+/// approach** replaces `Bell` by `2^b`: at `b = 12` that is `4.2` million
+/// against `2048`, and it is a change of exponential base, not a constant.
+///
+/// # The cut vector, and the identity everything rests on
+///
+/// For a partition `p` of a set `S`, let `cuts(p)` be the `GF(2)` vector indexed
+/// by the bipartitions `(X, S - X)` of `S` — canonically, by the subsets `X`
+/// containing the least element of `S`, so there are `2^{|S|-1}` of them — with
+///
+/// ```text
+/// cuts(p)[X] = 1  iff  every block of p lies inside X or inside S - X.
+/// ```
+///
+/// > **Identity.** For partitions `p, q` of `S`, the inner product
+/// > `<cuts(p), cuts(q)>` over `GF(2)` is `1` exactly when `p ⊔ q = {S}`, i.e.
+/// > exactly when `p` and `q` together connect `S`.
+///
+/// *Proof.* A bipartition refines both `p` and `q` exactly when it refines their
+/// join `p ⊔ q`, since the blocks of the join are the connected components of
+/// the union and a bipartition refines a partition iff no block crosses it. The
+/// bipartitions refining a partition with `c` blocks are obtained by choosing,
+/// for each block other than the one holding the least element, which side it
+/// goes to — so there are `2^{c-1}` of them. Hence
+/// `<cuts(p), cuts(q)> = 2^{c-1} mod 2`, which is `1` iff `c = 1`. QED
+///
+/// # The reduction, and why it loses nothing
+///
+/// > **Theorem (representation).** Process a weighted set `A` of partitions in
+/// > nondecreasing weight, keeping `p` exactly when `cuts(p)` lies outside the
+/// > span of the vectors already kept. For the resulting `A'` and **every**
+/// > partition `q` of `S`,
+/// > ```text
+/// > min { w(p) : p in A,  p ⊔ q = {S} }  =  min { w(p) : p in A', p ⊔ q = {S} }.
+/// > ```
+///
+/// *Proof.* `A'` is a subset of `A`, so `>=` is immediate. For `<=`, let `p in A`
+/// attain the left-hand side. If `p in A'` there is nothing to prove. Otherwise
+/// `cuts(p) = sum_{i in I} cuts(p_i)` for some kept `p_i`, each with
+/// `w(p_i) <= w(p)` because `p` was processed after them. Then
+/// `1 = <cuts(p), cuts(q)> = sum_{i in I} <cuts(p_i), cuts(q)>` over `GF(2)`, so
+/// an odd number of the terms are `1` — in particular at least one — and that
+/// `p_i` satisfies `p_i ⊔ q = {S}` with `w(p_i) <= w(p)`. QED
+///
+/// `|A'| <= rank <= 2^{|S|-1}`, which is the bound advertised.
+///
+/// # Why it is sound to apply after every node
+///
+/// The quantity the whole DP eventually reports is
+/// `min { w(p) : p ⊔ q = {S} }` for the single query `q` that closes the tree at
+/// the root bag. Every operation between here and there — introducing a vertex,
+/// forgetting one, taking an edge, joining two children — extends a partial
+/// solution, and *some* extension of a partial solution completes it into a tree
+/// exactly when the partition it carries joins with the partition of that
+/// extension to the single block. So the theorem's guarantee is precisely the
+/// invariant the DP needs: replacing a table by a representative set cannot
+/// change, for any way the rest of the tree might complete, the least cost at
+/// which it can be completed. Costs are only ever added on the way up, so the
+/// minimum is preserved with its weight.
+mod rankreduce {
+    use super::{Cost, MAX_BAG, OUT};
+
+    /// Words of `u64` a cut vector needs for a bag position count of `b`.
+    /// Capped so that `MAX_BAG` positions stay addressable.
+    const MAX_WORDS: usize = 1 << (MAX_BAG - 1 - 6);
+
+    /// The cut vector of a decoded signature, over the positions it uses.
+    ///
+    /// `used` lists the bag positions in `S`, in increasing order; a bipartition
+    /// is named by which of `used[1..]` join `used[0]`, so the vector has
+    /// `2^{|S|-1}` entries.
+    fn cut_vector(d: &[u8; MAX_BAG], used: &[usize], out: &mut [u64]) {
+        out.iter_mut().for_each(|w| *w = 0);
+        let s = used.len();
+        if s == 0 {
+            return;
+        }
+        // Block masks over the compressed index space `used[1..]`, and which
+        // block holds `used[0]`.
+        let mut block_mask = [0u32; MAX_BAG];
+        let mut nblocks = 0usize;
+        let mut label = [OUT; MAX_BAG];
+        let mut home = usize::MAX;
+        for (i, &pos) in used.iter().enumerate() {
+            let raw = d[pos];
+            let b = if label[raw as usize] == OUT {
+                label[raw as usize] = nblocks as u8;
+                nblocks += 1;
+                nblocks - 1
+            } else {
+                label[raw as usize] as usize
+            };
+            if i == 0 {
+                home = b;
+            } else {
+                block_mask[b] |= 1 << (i - 1);
+            }
+        }
+        // Enumerate the subsets of the blocks other than `home`; each gives one
+        // bipartition that refines the partition.
+        let others: Vec<u32> =
+            (0..nblocks).filter(|&b| b != home).map(|b| block_mask[b]).collect();
+        let k = others.len();
+        for t in 0..(1usize << k) {
+            // `used[0]` is in `X` by convention, so the block holding it always
+            // contributes; the other blocks are chosen by `t`.
+            let mut x = block_mask[home];
+            let mut tt = t;
+            while tt != 0 {
+                let i = tt.trailing_zeros() as usize;
+                x |= others[i];
+                tt &= tt - 1;
+            }
+            let col = x as usize;
+            out[col >> 6] |= 1 << (col & 63);
+        }
+    }
+
+    /// Keep a minimum-weight representative subset of `entries`.
+    ///
+    /// `entries` is `(code, cost, payload)` and must be sorted by cost
+    /// ascending; the returned indices are those to keep.
+    pub fn reduce(
+        decoded: &[[u8; MAX_BAG]],
+        used: &[usize],
+        order: &[usize],
+    ) -> Vec<usize> {
+        let s = used.len();
+        if s <= 1 {
+            // A single element admits one partition, so nothing can be dropped
+            // and no work is needed.
+            return order.to_vec();
+        }
+        let bits = 1usize << (s - 1);
+        let words = bits.div_ceil(64).min(MAX_WORDS);
+        let mut basis: Vec<Vec<u64>> = Vec::new();
+        let mut pivots: Vec<usize> = Vec::new();
+        let mut keep = Vec::new();
+        let mut row = vec![0u64; words];
+        for &i in order {
+            cut_vector(&decoded[i], used, &mut row);
+            let mut v = row.clone();
+            for (bi, &p) in pivots.iter().enumerate() {
+                if v[p >> 6] >> (p & 63) & 1 == 1 {
+                    for w in 0..words {
+                        v[w] ^= basis[bi][w];
+                    }
+                }
+            }
+            // The leading set bit, if the vector survived reduction.
+            let Some(p) = (0..bits).find(|&c| v[c >> 6] >> (c & 63) & 1 == 1) else {
+                continue;
+            };
+            // Normalise the basis so later reductions stay a single pass.
+            for (bi, &q) in pivots.iter().enumerate() {
+                let _ = q;
+                if basis[bi][p >> 6] >> (p & 63) & 1 == 1 {
+                    for w in 0..words {
+                        basis[bi][w] ^= v[w];
+                    }
+                }
+            }
+            basis.push(v);
+            pivots.push(p);
+            keep.push(i);
+        }
+        keep
+    }
+
+    /// Weight-ordered indices, cheapest first.
+    pub fn by_cost(costs: &[Cost]) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..costs.len()).collect();
+        order.sort_by(|&a, &b| costs[a].partial_cmp(&costs[b]).unwrap_or(std::cmp::Ordering::Equal));
+        order
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// All partitions of `{0..s-1}`, as restricted growth strings padded
+        /// into a signature over bag positions `0..s-1`.
+        fn all_partitions(s: usize) -> Vec<[u8; MAX_BAG]> {
+            let mut out = Vec::new();
+            fn grow(i: usize, used: u8, a: &mut [u8; MAX_BAG], s: usize, out: &mut Vec<[u8; MAX_BAG]>) {
+                if i == s {
+                    out.push(*a);
+                    return;
+                }
+                for v in 0..=used {
+                    a[i] = v;
+                    grow(i + 1, used.max(v + 1), a, s, out);
+                }
+            }
+            let mut a = [OUT; MAX_BAG];
+            a[0] = 0;
+            grow(1, 1, &mut a, s, &mut out);
+            out
+        }
+
+        /// Whether the join of two partitions of `{0..s-1}` is the single block.
+        fn joins_connected(p: &[u8; MAX_BAG], q: &[u8; MAX_BAG], s: usize) -> bool {
+            let mut uf: Vec<usize> = (0..s).collect();
+            fn find(uf: &mut Vec<usize>, mut x: usize) -> usize {
+                while uf[x] != x {
+                    uf[x] = uf[uf[x]];
+                    x = uf[x];
+                }
+                x
+            }
+            for side in [p, q] {
+                for i in 0..s {
+                    for j in i + 1..s {
+                        if side[i] == side[j] {
+                            let (a, b) = (find(&mut uf, i), find(&mut uf, j));
+                            uf[a] = b;
+                        }
+                    }
+                }
+            }
+            (0..s).map(|i| find(&mut uf, i)).collect::<std::collections::HashSet<_>>().len() == 1
+        }
+
+        /// The identity the whole reduction rests on, by brute force over every
+        /// pair of partitions of every ground set up to size seven.
+        #[test]
+        fn inner_product_detects_connection() {
+            for s in 1..=7usize {
+                let used: Vec<usize> = (0..s).collect();
+                let parts = all_partitions(s);
+                let words = (1usize << (s - 1)).div_ceil(64);
+                let vecs: Vec<Vec<u64>> = parts
+                    .iter()
+                    .map(|p| {
+                        let mut v = vec![0u64; words];
+                        cut_vector(p, &used, &mut v);
+                        v
+                    })
+                    .collect();
+                for (i, p) in parts.iter().enumerate() {
+                    for (j, q) in parts.iter().enumerate() {
+                        let dot = (0..words)
+                            .map(|w| (vecs[i][w] & vecs[j][w]).count_ones())
+                            .sum::<u32>()
+                            % 2;
+                        assert_eq!(
+                            dot == 1,
+                            joins_connected(p, q, s),
+                            "s={s} p={:?} q={:?}",
+                            &p[..s],
+                            &q[..s]
+                        );
+                    }
+                }
+            }
+        }
+
+        /// The representation theorem, by brute force: after reduction, the
+        /// least weight completing any query partition is unchanged.
+        #[test]
+        fn reduction_preserves_every_completion() {
+            let mut seed = 0x5EED_1234_ABCD_9876u64;
+            let mut rng = move || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed
+            };
+            for s in 2..=6usize {
+                let used: Vec<usize> = (0..s).collect();
+                let parts = all_partitions(s);
+                for _ in 0..60 {
+                    // A random weighted subset of the partitions.
+                    let chosen: Vec<usize> =
+                        (0..parts.len()).filter(|_| rng() % 100 < 60).collect();
+                    if chosen.is_empty() {
+                        continue;
+                    }
+                    let decoded: Vec<[u8; MAX_BAG]> = chosen.iter().map(|&i| parts[i]).collect();
+                    let costs: Vec<Cost> =
+                        (0..decoded.len()).map(|_| (rng() % 50) as Cost).collect();
+                    let order = by_cost(&costs);
+                    let keep = reduce(&decoded, &used, &order);
+                    assert!(
+                        keep.len() <= 1usize << (s - 1),
+                        "kept {} above the 2^(s-1) bound at s={s}",
+                        keep.len()
+                    );
+                    for q in &parts {
+                        let full = (0..decoded.len())
+                            .filter(|&i| joins_connected(&decoded[i], q, s))
+                            .map(|i| costs[i])
+                            .fold(Cost::INFINITY, Cost::min);
+                        let reduced = keep
+                            .iter()
+                            .copied()
+                            .filter(|&i| joins_connected(&decoded[i], q, s))
+                            .map(|i| costs[i])
+                            .fold(Cost::INFINITY, Cost::min);
+                        assert_eq!(
+                            full.is_finite(),
+                            reduced.is_finite(),
+                            "reduction changed feasibility at s={s}"
+                        );
+                        if full.is_finite() {
+                            assert!(
+                                (full - reduced).abs() < 1e-9,
+                                "reduction changed the minimum {full} -> {reduced} at s={s}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// How a state was reached, so the tree can be read back out.
 #[derive(Debug, Clone, Copy)]
 enum Back {
@@ -364,6 +687,11 @@ pub fn steiner_tree_over_decomposition(
         if table.is_empty() {
             return None;
         }
+        // Rank-based reduction, applied per `S`-class: within a class the
+        // partitions are comparable and the theorem in `rankreduce` says a
+        // spanning subset of their cut vectors preserves the least completion
+        // cost for every way the rest of the tree might close.
+        let table = reduce_table(table, b);
         total_states += table.len();
         if total_states > state_cap {
             return None;
@@ -519,6 +847,39 @@ fn build_nice(
         }
     }
     Some((nodes, node_bags, cur))
+}
+
+/// Apply the rank-based reduction to every `S`-class of one node's table.
+///
+/// Signatures with different `S` never interact — every transition preserves or
+/// changes `S` uniformly — so each class is reduced on its own.
+fn reduce_table(
+    table: HashMap<u64, (Cost, Back)>,
+    b: usize,
+) -> HashMap<u64, (Cost, Back)> {
+    let mut classes: HashMap<u32, Vec<(u64, Cost, Back)>> = HashMap::new();
+    for (code, (cost, back)) in table {
+        classes.entry(used_mask(code, b)).or_default().push((code, cost, back));
+    }
+    let mut out = HashMap::new();
+    for (mask, entries) in classes {
+        let used: Vec<usize> = (0..b).filter(|&j| mask & (1 << j) != 0).collect();
+        // A class of one, or a ground set of one, has nothing to span.
+        if entries.len() <= 1 || used.len() <= 1 {
+            for (code, cost, back) in entries {
+                out.insert(code, (cost, back));
+            }
+            continue;
+        }
+        let decoded: Vec<[u8; MAX_BAG]> = entries.iter().map(|&(c, _, _)| decode(c, b)).collect();
+        let costs: Vec<Cost> = entries.iter().map(|&(_, c, _)| c).collect();
+        let order = rankreduce::by_cost(&costs);
+        for i in rankreduce::reduce(&decoded, &used, &order) {
+            let (code, cost, back) = entries[i];
+            out.insert(code, (cost, back));
+        }
+    }
+    out
 }
 
 /// Keep the cheaper of an existing entry and a new one.
