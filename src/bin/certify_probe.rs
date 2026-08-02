@@ -167,6 +167,70 @@ fn main() {
                 &active,
                 1 << 24,
             );
+            // Ascent from every terminal in turn. A packing rooted at `r'`
+            // consists of sets missing `r'`, which may contain the search's own
+            // root; dropping those leaves a feasible packing (removing sets only
+            // lowers every arc's load), so each is a legal extra layer of the
+            // pointwise maximum.
+            let t = Instant::now();
+            let mut multi: Vec<Vec<(f64, Vec<scip_jack::graph::NodeId>)>> = Vec::new();
+            for &r in terminals.iter() {
+                let p = scip_jack::graph::algorithms::dual_ascent_packing(
+                    &idx, r, &terminals, &active, 1 << 22,
+                );
+                let kept: Vec<(f64, Vec<scip_jack::graph::NodeId>)> =
+                    p.sets.into_iter().filter(|(_, s)| !s.contains(&root)).collect();
+                if !kept.is_empty() {
+                    multi.push(kept);
+                }
+            }
+            println!(
+                "multi-root ascent: {} usable packings of {} terminals ({:.2}s)",
+                multi.len(),
+                terminals.len(),
+                t.elapsed().as_secs_f64()
+            );
+
+            // How much of the separation loop the *potential* actually needs.
+            // The converged LP is what closes these instances, and it is also
+            // what costs twenty seconds; the question is whether a truncated
+            // loop's packing is already strong enough to guide the search home.
+            for secs in [0.25f64, 0.5, 1.0, 2.0, 4.0] {
+                let t = Instant::now();
+                let Some(c) = root_certificate(
+                    &directed,
+                    root,
+                    &terminals,
+                    ub - offset,
+                    Instant::now() + Duration::from_secs_f64(secs),
+                    100_000,
+                    1 << 24,
+                ) else {
+                    println!("  budget {secs:>4}s   unavailable");
+                    continue;
+                };
+                let built = t.elapsed().as_secs_f64();
+                let t2 = Instant::now();
+                let r = scip_jack::graph::algorithms::dijkstra_steiner_guided(
+                    &ru,
+                    &terminals,
+                    ub,
+                    400_000,
+                    None,
+                    &[&c.packing.sets],
+                );
+                println!(
+                    "  budget {secs:>4}s  {} solves  packing {:10.2}  build {:.2}s  -> {}  ({} labels, {:.2}s)",
+                    c.lp_solves,
+                    c.packing.value + offset,
+                    built,
+                    r.as_ref()
+                        .and_then(|r| r.optimal)
+                        .map_or_else(|| "no".to_string(), |v| format!("OPTIMAL {v:.0}")),
+                    r.as_ref().map_or(0, |r| r.labels_settled),
+                    t2.elapsed().as_secs_f64()
+                );
+            }
             for labels in [50_000u64, 400_000] {
                 println!("search at {labels} labels, cutoff {ub}:");
                 compare_search(
@@ -175,6 +239,7 @@ fn main() {
                     ub,
                     &ascent_pack.sets,
                     &cert.packing.sets,
+                    &multi,
                     labels,
                 );
             }
@@ -190,13 +255,20 @@ fn compare_search(
     upper_bound: f64,
     ascent: &[(f64, Vec<scip_jack::graph::NodeId>)],
     lp: &[(f64, Vec<scip_jack::graph::NodeId>)],
+    multi: &[Vec<(f64, Vec<scip_jack::graph::NodeId>)>],
     labels: u64,
 ) {
     use scip_jack::graph::algorithms::dijkstra_steiner_guided;
-    let cases: [(&str, Vec<&[(f64, Vec<scip_jack::graph::NodeId>)]>); 3] = [
+    let multi_refs: Vec<&[(f64, Vec<scip_jack::graph::NodeId>)]> =
+        multi.iter().map(|v| v.as_slice()).collect();
+    let mut multi_lp = multi_refs.clone();
+    multi_lp.push(lp);
+    let cases: Vec<(&str, Vec<&[(f64, Vec<scip_jack::graph::NodeId>)]>)> = vec![
         ("ascent only", vec![ascent]),
         ("lp only", vec![lp]),
         ("max of both", vec![ascent, lp]),
+        ("multi-root", multi_refs),
+        ("multi + lp", multi_lp),
     ];
     for (name, guides) in cases {
         let t = Instant::now();

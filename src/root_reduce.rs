@@ -71,6 +71,7 @@ const EXACT_MIN_SECS: f64 = 0.02;
 const EXACT_RECOMB_PARENTS: usize = 12;
 
 /// Outcome of the tightening loop.
+#[derive(Clone)]
 pub struct Reduced {
     pub graph: UndirectedGraph,
     pub terminals: Vec<NodeId>,
@@ -89,6 +90,20 @@ pub struct Reduced {
     /// the instance handed to [`tighten`] is `offset` plus that value.
     pub offset: Cost,
     pub rounds: u32,
+    /// Whether the loop stopped because it had nothing left to do.
+    ///
+    /// `true` means the last round killed no vertex and no edge, or optimality
+    /// was proved, or the instance became trivial — in every case a *fixpoint*
+    /// of the reduction operator was reached. `false` means the loop was cut
+    /// short by its deadline or its round cap and would have gone on.
+    ///
+    /// The distinction is what lets a later pass skip re-deriving a fixpoint it
+    /// already has. Every round is a deterministic function of the graph, the
+    /// terminals, the configuration and the two bounds, so a converged run
+    /// re-executed on its own output — with an upper bound no better than the
+    /// one it finished with — kills nothing again. A run cut off by the clock
+    /// carries no such guarantee: given more time it does more.
+    pub converged: bool,
 }
 
 impl Reduced {
@@ -156,6 +171,7 @@ pub fn tighten(
     let mut incumbent_arcs: Option<Vec<u32>> = None;
     let mut offset: Cost = 0.0;
     let mut rounds = 0;
+    let mut converged = false;
 
     let mut root = *terminals.first().unwrap_or(&1);
 
@@ -167,6 +183,7 @@ pub fn tighten(
             }
         }
         if terminals.len() < 2 {
+            converged = true;
             upper_bound = upper_bound.min(0.0);
             lower_bound = 0.0;
             incumbent_arcs = Some(Vec::new());
@@ -207,10 +224,12 @@ pub fn tighten(
         // Optimality proved: everything better than the incumbent is excluded.
         if upper_bound.is_finite() && lower_bound >= upper_bound - 1e-6 {
             lower_bound = upper_bound;
+            converged = true;
             break;
         }
 
         if outcome.dead_nodes.is_empty() && outcome.dead_edges.is_empty() {
+            converged = true;
             break;
         }
 
@@ -261,6 +280,7 @@ pub fn tighten(
         certificate,
         offset,
         rounds,
+        converged,
     }
 }
 

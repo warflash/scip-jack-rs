@@ -196,6 +196,8 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     let mut carried_lower_bound: Cost = 0.0;
     let mut branch_and_cut_works = true;
 
+    // A converged tightening carried into the next pass; see below.
+    let mut reuse: Option<crate::root_reduce::Reduced> = None;
     for pass in 0..2 {
         // Split the remaining budget explicitly. Tightening will happily use
         // every second it is given — on SteinLib e13 two rounds of it consumed a
@@ -210,8 +212,25 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             ..ReduceConfig::default()
         };
         let tighten_start = Instant::now();
-        let reduced = tighten(pass_graph.clone(), pass_terminals.clone(), &reduce_config);
+        // A tightening that reached a fixpoint, on a graph nothing has changed
+        // since, with an incumbent no better than the one it finished with, is a
+        // function whose arguments have not moved. Re-evaluating it is the one
+        // thing a three-second budget cannot afford to do twice: on PACE
+        // instance167 it cost 0.71 s of five, and the goal-directed search that
+        // spent the rest was 3 units short of a proof it reaches in 363,000
+        // labels. See [`Reduced::converged`] for why the skip preserves the
+        // answer exactly rather than approximately.
+        let reused = reuse.take();
+        let reused_here = reused.is_some();
+        let reduced = match reused {
+            Some(r) => r,
+            None => tighten(pass_graph.clone(), pass_terminals.clone(), &reduce_config),
+        };
         let tighten_secs = tighten_start.elapsed().as_secs_f64();
+        // Reusable next time when it converged and nothing downstream can have
+        // strengthened its hypotheses. The upper-bound test is made below, once
+        // the pass has reported what it found.
+        let reusable = reduced.converged.then(|| (reduced.clone(), reduced.upper_bound));
         // What the next pass will start from, before `finish` consumes `reduced`.
         let next_graph = reduced.graph.clone();
         let next_terminals = reduced.terminals.clone();
@@ -226,7 +245,8 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         };
         if config.verbose {
             eprintln!(
-                "[time] pass {pass}: tighten took {:.2}s, search gets {:.2}s, elapsed {:.2}s",
+                "[time] pass {pass}: tighten {}took {:.2}s, search gets {:.2}s, elapsed {:.2}s",
+                if reused_here { "(reused fixpoint) " } else { "" },
                 tighten_secs,
                 pass_deadline.saturating_duration_since(Instant::now()).as_secs_f64(),
                 start.elapsed().as_secs_f64(),
@@ -266,6 +286,12 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         carried_offset += next_offset;
         // Restated for the graph the next pass will run on.
         incoming_ub = b.primal_bound - carried_offset;
+        // The fixpoint survives into the next pass exactly when that pass would
+        // start it from the same graph with an upper bound no better than the
+        // one it converged under. A strictly better incumbent is new
+        // information: the bound-based reductions can kill more with it, so the
+        // fixpoint has to be recomputed.
+        reuse = reusable.filter(|(_, ub)| incoming_ub >= ub - 1e-9).map(|(r, _)| r);
         carried_lower_bound = (carried_lower_bound - next_offset).max(0.0);
         if pass_terminals.len() < 2 {
             break;
