@@ -1891,6 +1891,140 @@ topological neighbourhood inside the ILS loop, and fixed-prefix recombination.
    exact recombination improves their primal by a fraction of a percent. That
    group needs an object none of this round produced.
 
+## 2026-08-02 (eighth round): the width the solver could not use
+
+### 42. An exact finish that is exponential in the width, not the terminal count
+
+§36 measured PACE Track 1's widths at 58 to 66 and closed the treewidth DP *for
+those instances*. §37 found the width elsewhere — in the subgraph a pool of good
+trees spans — and built the DP for it. What neither did was ask what the solver
+does with an instance that is **narrow and has many terminals**, and the answer
+was: nothing it can.
+
+Every exact route here was exponential in `|R|`. Dreyfus-Wagner is `3^k`.
+Dijkstra-Steiner is `2^k` and cannot address more than 64 terminals at all — past
+that it returns without settling a label. So a graph of small treewidth carrying
+hundreds of terminals was unsolvable *in principle*, not merely in practice, and
+the branch-and-cut was left to it. That class is not exotic. Measured on the
+reduced PACE Track 2 instances:
+
+| instance | red \|V\| | \|R\| | tw <= | DP time |
+|---|---|---|---|---|
+| 026 | 1,207 | **638** | 6 | 0.06 s |
+| 022 | 433 | 206 | 6 | 0.14 s |
+| 037 | 666 | 251 | 8 | 0.55 s |
+| 051 | 828 | 319 | 9 | 3.32 s |
+| 040 | 773 | 344 | 10 | 38.8 s |
+| 052 | 3,997 | **2,284** | 8 | capped |
+
+Six of the first sixty were unproved at five seconds and *all six* are in this
+table. The DP written in §37 for the recombination was always capable of being
+the exact finish; it just had never been offered the job.
+
+**Ordering, measured rather than assumed.** After the goal-directed search, not
+before. Where both can address an instance the search wins — it prunes against
+the incumbent, so a tight upper bound collapses its state space, while the DP's
+cost is fixed by the width whatever the incumbent is — and on Track 1's
+instance158, 159 and 170 the DP is a third slower. Where the DP wins is exactly
+where the search returns without settling a label, which costs nothing, so
+putting it second loses nothing on the instances it exists for.
+
+**Refusal is cheap.** The gate is a *minimum-degree* elimination ordering at the
+encoding's width limit, which abandons at the first oversized bag. On every
+SteinLib series and all of Track 1 that takes under ten milliseconds, because
+those instances decompose at width 25 to 84. Only once the cheap ordering has
+proved the graph narrow is the dearer minimum-fill ordering run to sharpen it.
+
+### 43. `Bell(w)` becomes `2^w`: the rank-based reduction
+
+The table at a bag of size `b` holds up to `Bell(b+1)` signatures and the join
+pairs two of them, which is why width six costs 0.14 s and width ten costs 38.
+The **rank-based approach** replaces `Bell` by `2^b` — at `b = 12` that is 4.2
+million against 2,048, a change of exponential base and not a constant.
+
+Everything rests on one identity. For a partition `p` of `S`, let `cuts(p)` be
+the `GF(2)` vector indexed by the bipartitions of `S`, with `cuts(p)[X] = 1` iff
+no block of `p` crosses `(X, S - X)`.
+
+> **Identity.** `<cuts(p), cuts(q)> = 1` over `GF(2)` exactly when
+> `p ⊔ q = {S}`.
+
+*Proof.* A bipartition refines both `p` and `q` iff it refines their join, and a
+partition with `c` blocks is refined by exactly `2^{c-1}` bipartitions — choose a
+side for every block but the one holding the least element. So the product is
+`2^{c-1} mod 2`, which is `1` iff `c = 1`. QED
+
+> **Theorem (representation).** Process the partitions cheapest first and keep
+> one exactly when its cut vector leaves the span of those kept. Then for
+> **every** query `q`, the least weight among kept partitions joining `q` to a
+> single block equals the least weight among all of them.
+
+*Proof.* If `p` was dropped then `cuts(p) = sum_{i in I} cuts(p_i)` with every
+`p_i` kept and `w(p_i) <= w(p)`. For any `q` with `p ⊔ q = {S}`,
+`1 = <cuts(p), cuts(q)> = sum_i <cuts(p_i), cuts(q)>`, so an odd number of the
+terms is `1` — at least one — and that `p_i` joins `q` at no greater weight. QED
+The kept set has size at most the rank, which is at most `2^{|S|-1}`.
+
+Both statements are gated by **brute force**: the identity over every pair of
+partitions of every ground set up to size seven, and the representation theorem
+over random weighted subsets, checking the preserved minimum for every query and
+the `2^{|S|-1}` bound.
+
+**Measured:** instance040's DP goes **38.8 s -> 2.37 s**, instance051 3.32 s ->
+1.12 s, and 051 now closes inside a five-second budget.
+
+**A negative result on how to bound the bet.** Iterative deepening on the state
+budget — run under a small cap, quadruple only while the next attempt still fits
+— is wrong, and the trace says why. On instance040 the attempts cost 0.03 s at
+100k states, 0.16 s at 400k and **1.31 s** at 1.6M, and the extrapolation refused
+to continue; the full run takes 2.37 s. The DP's wide bags come early and its
+tail is nearly free, so no truncated run predicts what remains, and the deepening
+refused instances it would have solved in a third of the time it had already
+spent. What bounds the loss exactly is the deadline, checked at every node.
+
+### 44. Freeing the tables the tree is not read back from
+
+A nice decomposition is a tree, so a node's table is dead the moment its parent
+has been built. The exact finish reports a value and discards the edge set, so
+in that mode the tables are dropped as they die and the state cap becomes a
+bound on what is **live** rather than on the cumulative count. On a graph with
+four thousand bags that is the difference between bounding memory and bounding
+the size of the instance.
+
+instance052 — 3,997 vertices, **2,284 terminals**, width eight — went from
+hitting the cap to solving, returning 2,854, the reference optimum. Nothing else
+in this solver can address 2,284 terminals at all. Gated by running both modes on
+every graph in the Dreyfus-Wagner comparison and requiring the same value.
+
+### 45. Round summary
+
+| slice | control (`ef30a07`) | now |
+|---|---|---|
+| PACE Track 2 [1..60] @5 s | 54/60, 91 s | **57/60**, 91 s |
+| PACE Track 1 [1..140] @3 s | 139/140, 49.9 s | 139/140, 56.1 s |
+| PACE Track 1 [155..200] @5 s | 26/46, 141.2 s | 26/46, 146.7 s |
+| SteinLib B @5 s | 18/18, 1.5 s | 18/18, 1.3 s |
+| SteinLib C @5 s | 20/20, 5.8 s | 20/20, 5.8 s |
+| SteinLib D @5 s | 20/20, 11.6 s | 20/20, 11.6 s |
+| SteinLib E @20 s | 19/20, 68.5 s | 19/20, 68.3 s |
+
+On the full Track 2 [1..200] at five seconds the solver proves 109 and **27 of
+them are closed by the tree-decomposition DP** — a route it did not have. No
+instance reports a value differing from its reference under an `Optimal` status
+on any slice. 147 library tests.
+
+**Where the width frontier now sits.** The practical ceiling is width ten to
+eleven at a five-second budget, and it is a *join* cost: within an `S`-class the
+join still pairs two representative sets, which is `4^{|S|}` summed over classes
+even after the reduction. Track 2's remaining unproved instances decompose at
+eleven to nineteen, so the next unit of width is worth roughly four instances and
+costs a factor of four. Two things would move it: a subset-convolution join,
+which trades the `4^w` pairing for `2^w w^2`; and a better elimination ordering,
+since instance090's min-degree width of 13 is min-fill's 11 and each unit is a
+factor of four. The encoding limit of `MAX_BAG = 15` is *not* the binding
+constraint and should not be raised — width 15 is unaffordable long before it is
+unrepresentable.
+
 ---
 
 ## Where the remaining loss is
