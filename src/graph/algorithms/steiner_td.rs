@@ -530,6 +530,7 @@ pub fn steiner_tree_over_decomposition(
     terminals: &[NodeId],
     td: &TreeDecomposition,
     state_cap: usize,
+    want_tree: bool,
     deadline: Option<std::time::Instant>,
 ) -> Option<(Cost, Vec<EdgeId>)> {
     if terminals.is_empty() {
@@ -589,8 +590,16 @@ pub fn steiner_tree_over_decomposition(
     let (nodes, node_bags, final_node) = build_nice(td, &bags, &edges_at)?;
 
     // The tables, one per nice node, sparse.
+    //
+    // A node's table is dead the moment its parent has been built, because the
+    // nice decomposition is a tree and every node has exactly one parent. When
+    // the caller does not want the tree read back — the exact finish reports a
+    // value, not an edge set — the dead tables are dropped, and `state_cap`
+    // becomes a bound on what is *live* rather than on the cumulative count. On
+    // a graph with four thousand bags that is the difference between a bound on
+    // memory and a bound on the size of the instance.
     let mut tables: Vec<HashMap<u64, (Cost, Back)>> = vec![HashMap::new(); nodes.len()];
-    let mut total_states = 0usize;
+    let mut live_states = 0usize;
 
     for i in 0..nodes.len() {
         let bag = &node_bags[i];
@@ -692,8 +701,8 @@ pub fn steiner_tree_over_decomposition(
         // spanning subset of their cut vectors preserves the least completion
         // cost for every way the rest of the tree might close.
         let table = reduce_table(table, b);
-        total_states += table.len();
-        if total_states > state_cap {
+        live_states += table.len();
+        if live_states > state_cap {
             return None;
         }
         // Checked every node rather than every sixty-fourth: a single join at a
@@ -702,6 +711,18 @@ pub fn steiner_tree_over_decomposition(
             return None;
         }
         tables[i] = table;
+        if !want_tree {
+            for child in match &nodes[i] {
+                Nice::Leaf => Vec::new(),
+                Nice::Introduce { child, .. }
+                | Nice::Forget { child, .. }
+                | Nice::Edge { child, .. } => vec![*child],
+                Nice::Join { left, right } => vec![*left, *right],
+            } {
+                live_states -= tables[child].len();
+                tables[child] = HashMap::new();
+            }
+        }
     }
 
     // The final bag is `{r}` and the answer is the state in which `r` is used.
@@ -711,6 +732,9 @@ pub fn steiner_tree_over_decomposition(
     let goal = encode_canonical(&mut d, 1);
     let &(cost, _) = tables[final_node].get(&goal)?;
 
+    if !want_tree {
+        return Some((cost, Vec::new()));
+    }
     // Read the tree back by walking the backpointers.
     let mut used: Vec<EdgeId> = Vec::new();
     let mut stack = vec![(final_node, goal)];
@@ -1046,7 +1070,20 @@ mod tests {
     fn solve(g: &UndirectedGraph, terminals: &[NodeId]) -> Option<(Cost, Vec<EdgeId>)> {
         let td = decompose(g, MAX_BAG - 1, None)?;
         assert!(td.verify(g), "decomposition failed its axioms");
-        steiner_tree_over_decomposition(g, terminals, &td, 4_000_000, None)
+        let with = steiner_tree_over_decomposition(g, terminals, &td, 4_000_000, true, None);
+        // The cost-only mode frees each table once its parent is built, which
+        // must not change the value it reports -- only whether the tree can be
+        // read back.
+        let without = steiner_tree_over_decomposition(g, terminals, &td, 4_000_000, false, None);
+        match (&with, &without) {
+            (Some((a, _)), Some((b, edges))) => {
+                assert!((a - b).abs() < 1e-9, "cost-only mode reported {b} against {a}");
+                assert!(edges.is_empty(), "cost-only mode returned edges");
+            }
+            (None, None) => {}
+            _ => panic!("the two modes disagree on feasibility"),
+        }
+        with
     }
 
     /// The returned edge set really is a tree spanning the terminals, and its

@@ -73,7 +73,7 @@ fn main() {
             let work = scip_jack::graph::algorithms::steiner_td::work_estimate(&td, ru.edges.len(), 1);
             let t2 = Instant::now();
             match scip_jack::graph::algorithms::steiner_tree_over_decomposition(
-                &ru, &ri.terminals, &td, 40_000_000, None,
+                &ru, &ri.terminals, &td, 40_000_000, false, None,
             ) {
                 Some((cost, edges)) => row.push_str(&format!(
                     ",{:.0},{},{:.2},{:.1e}",

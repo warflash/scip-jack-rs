@@ -173,7 +173,7 @@ fn solve_ground_set(
     }
     let local: Vec<NodeId> = terminals.iter().map(|t| inside[t]).collect();
     // The state cap is a memory guard; the work budget above is the time gate.
-    let (cost, used) = steiner_tree_over_decomposition(&g, &local, &td, STATE_CAP, deadline)?;
+    let (cost, used) = steiner_tree_over_decomposition(&g, &local, &td, STATE_CAP, true, deadline)?;
     let arcs = orient(idx, root, &used.iter().map(|&e| back[e as usize]).collect::<Vec<_>>())?;
     let stat = ExactRecombStat {
         nodes: verts.len() as u32,

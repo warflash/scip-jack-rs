@@ -869,6 +869,9 @@ fn try_decomposition(
         terminals,
         &td,
         TD_STATE_BUDGET,
+        // The exact finish reports a value; nothing downstream wants the edge
+        // set, so the tables can be freed as they die.
+        false,
         Some(deadline),
     )?;
     Some((cost, started.elapsed().as_secs_f64()))
