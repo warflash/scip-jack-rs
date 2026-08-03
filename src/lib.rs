@@ -1,3 +1,4 @@
+pub mod deadline;
 pub mod graph;
 pub mod model;
 pub mod preprocessing;

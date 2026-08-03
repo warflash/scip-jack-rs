@@ -101,6 +101,13 @@ pub fn shortest_path_heuristic(
     let mut tree_arcs: Vec<ArcId> = Vec::new();
 
     while connected < total_terminals {
+        // One iteration is a multi-source Dijkstra, so on an instance with
+        // thousands of terminals this loop *is* the solve. Abandoning returns
+        // `None`, which the callers already handle as "this start found no
+        // tree"; see [`crate::deadline`].
+        if crate::deadline::expired() {
+            return None;
+        }
         // Multi-source Dijkstra outward from the current tree.
         ws.stamp += 1;
         let stamp = ws.stamp;

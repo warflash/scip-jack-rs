@@ -433,6 +433,18 @@ fn ascend(
     }
 
     loop {
+        // The clock, read where the work is.
+        //
+        // One iteration raises one cut and regrows one component, and on an
+        // instance with thousands of terminals this loop is the whole of the
+        // reduction's round. Stopping early is sound and needs no repair: the
+        // ascent maintains `reduced >= 0` and `c(A) >= lower_bound + sum_{a in A}
+        // reduced_a` for every root-arborescence `A` at *every* iteration, so the
+        // iterate in hand is already a certified dual and the only thing a longer
+        // run buys is a larger `lower_bound`. See [`crate::deadline`].
+        if crate::deadline::expired() {
+            break;
+        }
         // Pick the active terminal with the smallest cut. Raising a tight cut
         // concentrates the dual on few arcs and saturates them sooner, which
         // empirically yields a markedly stronger bound than round-robin.

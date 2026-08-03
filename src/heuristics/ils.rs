@@ -349,6 +349,16 @@ fn polish(
 ) -> SphResult {
     let mut cur = r;
     for _ in 0..POLISH_ROUNDS {
+        // Key-vertex elimination and vertex insertion are each a sweep over the
+        // tree's branch points with a shortest-path computation apiece, so on an
+        // instance with thousands of terminals one round of this is minutes. The
+        // seed is already a feasible tree, so stopping returns a valid answer;
+        // see [`crate::deadline`]. Measured on PACE instance079: the *initial*
+        // polish, which runs before the local search's own deadline check, took
+        // 252 s of a thirty-second budget.
+        if crate::deadline::expired() {
+            break;
+        }
         if let Some(better) =
             key_path_exchange(idx, active, root, &cur, is_terminal, POLISH_PASSES, kws, sws)
         {

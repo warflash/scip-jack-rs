@@ -127,6 +127,13 @@ fn dw_is_affordable(num_terminals: usize, num_nodes: u32, num_edges: usize) -> b
 pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     let start = Instant::now();
     let deadline = start + std::time::Duration::from_secs_f64(config.time_limit_secs.max(0.001));
+    // The solve's own wall clock, made visible to the loops whose single call
+    // costs seconds. Every stage below already takes a deadline and checks it
+    // between the things it calls; this is what lets the things it calls check it
+    // too. See [`crate::deadline`] for why a refusal there cannot change an
+    // answer, and for the instance whose overrun did not move when the budget
+    // moved.
+    let _clock = crate::deadline::install(Some(deadline));
 
     let mut graph = UndirectedGraph::new(instance.num_nodes);
     for node in &instance.nodes {

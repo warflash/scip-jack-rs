@@ -63,6 +63,8 @@
 //! restricted evaluation when they do not — a memory bound, not a quality dial,
 //! since the fallback is exactly what shipped before.
 
+use std::time::Instant;
+
 use crate::graph::{Cost, NodeId};
 
 use super::csr::Csr;
@@ -157,10 +159,56 @@ impl Default for EdgeWatch {
 
 /// One sweep with no memory of previous sweeps.
 pub fn bottleneck_reductions(graph: &mut ReducibleGraph) -> u32 {
-    bottleneck_reductions_watched(graph, &mut EdgeWatch::new())
+    bottleneck_reductions_watched(graph, &mut EdgeWatch::new(), None)
 }
 
-pub fn bottleneck_reductions_watched(graph: &mut ReducibleGraph, watch: &mut EdgeWatch) -> u32 {
+/// How many terminals are processed between clock reads while the distance
+/// table is being built.
+///
+/// One Dijkstra is the granularity below which the check cannot go, and reading
+/// the clock once per terminal on a graph with a hundred terminals would be
+/// noise; thirty-two is the smallest power of two at which the read is free
+/// relative to the work it guards. Nothing about the answer depends on it: the
+/// deadline may only make this function return zero.
+const CLOCK_EVERY: usize = 32;
+
+/// The special-distance test, bounded by a deadline.
+///
+/// # Why this function needs one, and what happens without it
+///
+/// Every test below is a comparison against the special distance, and the
+/// special distance is read off **one full Dijkstra per terminal**. So before a
+/// single edge can be judged, this function does `|R|` shortest-path
+/// computations and holds an `|R| x n` table of the results — and neither the
+/// time nor the memory of that is visible to the caller, which sees one function
+/// call.
+///
+/// On PACE Track 2's instance079 — 36,415 vertices, 145,635 edges and **16,808
+/// terminals** after the classical reduction, which deletes nothing there — that
+/// is 612 million table entries and it measured at **55.6 seconds inside a single
+/// call**, against a reduction deadline of 0.33 s. The consequence is the shape a
+/// missing deadline always has: the instance took 93.0 s under a one-second
+/// limit, 97.4 s under five and 98.2 s under thirty. The overrun is a *constant*,
+/// not a fraction — which is exactly the signature of a stage that never asks
+/// what time it is.
+///
+/// # What the deadline may do
+///
+/// > **Proposition (refusing cannot change an answer).** Returning `0` early is
+/// > equivalent to the sweep finding no candidate, which is a state the sweep
+/// > reaches on its own on most graphs. The reductions this function performs are
+/// > deletions justified independently of one another, so any prefix of them is
+/// > valid and *none* of them is a prefix that has to be completed. ∎
+///
+/// The check is therefore placed where the work is: before the table is built at
+/// all, and every [`CLOCK_EVERY`] terminals while it is being built. It abandons
+/// before the allocation grows rather than after — thirty-two rows of the table
+/// on instance079 is 9 MB, where the full table is 4.9 GB.
+pub fn bottleneck_reductions_watched(
+    graph: &mut ReducibleGraph,
+    watch: &mut EdgeWatch,
+    deadline: Option<Instant>,
+) -> u32 {
     let terminals: Vec<NodeId> = graph
         .terminals
         .iter()
@@ -189,8 +237,23 @@ pub fn bottleneck_reductions_watched(graph: &mut ReducibleGraph, watch: &mut Edg
         return 0;
     }
 
+    let expired = || deadline.is_some_and(|d| Instant::now() >= d);
+    if expired() {
+        return 0;
+    }
+
     let csr = Csr::build(graph);
-    let dist: Vec<Vec<Cost>> = terminals.iter().map(|&t| csr.dijkstra(t)).collect();
+    // `|R|` Dijkstras, and the clock is read while they run rather than after.
+    let mut dist: Vec<Vec<Cost>> = Vec::with_capacity(terminals.len());
+    for (i, &t) in terminals.iter().enumerate() {
+        if i % CLOCK_EVERY == 0 && expired() {
+            return 0;
+        }
+        dist.push(csr.dijkstra(t));
+    }
+    if expired() {
+        return 0;
+    }
 
     // The exact closure when it fits, the nearest-terminal restriction when it
     // does not. Both are upper bounds on `s`, which is all the proof needs.

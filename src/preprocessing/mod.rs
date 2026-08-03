@@ -488,7 +488,7 @@ pub fn preprocess_bounded(
             watch.invalidate_all();
             edge_watch.invalidate_all();
         }
-        let bn_removed = bottleneck::bottleneck_reductions_watched(&mut rg, &mut edge_watch);
+        let bn_removed = bottleneck::bottleneck_reductions_watched(&mut rg, &mut edge_watch, deadline);
         if expired() {
             break;
         }

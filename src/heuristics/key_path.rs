@@ -106,6 +106,13 @@ pub fn key_path_exchange(
     let mut improved = false;
 
     for _pass in 0..max_passes {
+        // One pass re-optimises every key path of the tree, which on an instance
+        // with thousands of terminals is thousands of shortest-path computations.
+        // Stopping returns the best tree found so far, which is what the caller
+        // already does with a pass that improves nothing. See [`crate::deadline`].
+        if crate::deadline::expired() {
+            break;
+        }
         let Some(next) = one_pass(idx, active, root, &edges, is_terminal, kws) else {
             break;
         };
@@ -156,6 +163,14 @@ fn one_pass(
         paths.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal));
 
         for path in &paths {
+            // Each key path is a bounded Dijkstra, and a tree with thousands of
+            // terminals has thousands of key paths, so the clock is read here and
+            // not only once per pass: on PACE instance079 a *single* pass measured
+            // 75.65 s. Stopping mid-pass keeps every exchange already applied, each
+            // of which strictly lowered the tree's cost on its own.
+            if crate::deadline::expired() {
+                break;
+            }
             if path.cost <= 1e-9 {
                 continue;
             }
