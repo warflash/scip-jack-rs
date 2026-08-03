@@ -5277,9 +5277,23 @@ What ships is §102 alone: the feedback and the scale discipline, plus the harne
 the honest headline and it is stated as such: the round's shipped delta on proved-count
 is zero, and what it ships is a correctness repair, a harness, and four gates.
 
+Unpaired, whole-slice, for continuity with earlier rounds:
+
+| slice | control | shipped |
+|---|---|---|
+| Track 2 @1 s | 80/200, 0 wrong | 81/200, 0 wrong |
+| Track 2 @5 s | 114/200, 0 wrong | 114/200, 0 wrong |
+| Track 2 @30 s | 146/200, **1 wrong** (§100) | see below |
+
 **No instance reports a value differing from its reference under an `Optimal` status in
-any slice of any run of the shipped binary.** 196 library tests (was 189),
-`cargo check --all-targets` clean, every binary builds.
+the shipped binary at 1 s or at 5 s**, over 400 solves. The shipped binary's *unpaired*
+30 s matrix was not completed inside the session: instance198 alone consumed 2,335
+seconds of a 30-second budget on the control side (§101) and the slice does not finish
+in the time left. What is measured at 30 s is the control, and that is where the wrong
+answer of §100 lives. Saying which of these is measured and which is not is the point;
+the §100 defect is in code this round did not touch, so it is present in both binaries.
+
+196 library tests (was 189), `cargo check --all-targets` clean, every binary builds.
 
 The one number that is *not* zero is the one §100 records: the control has a wrong
 answer at thirty seconds that no five-second matrix in this repository would ever have
