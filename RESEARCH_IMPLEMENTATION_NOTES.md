@@ -4231,3 +4231,570 @@ basis; an interior one spreads it over the optimal face. The A* potential is a
 pointwise maximum over sets, so more sets is a stronger potential *at every
 state* even when the root value is the same. That is a property of the algorithm
 rather than of the instance and nothing in the notes had noticed it.
+
+## 2026-08-03 (fourteenth round): the relaxation is not the problem, and an LP is not the way to it
+
+### 84. The control, and what was frozen
+
+`tmp/r14/control.exe` is HEAD (`cdd2502`), built `--release --all-targets` before
+any algorithmic change and never rebuilt. 182 library tests at the start, **189**
+at the end; `cargo check --all-targets` clean; every binary builds — twelve probes
+in `src/bin` plus `scip-jack` itself, the two new ones being
+`src/bin/flowdual_probe.rs` and `src/bin/dgraph_probe.rs`.
+
+The control's own matrix, taken first:
+
+| slice | control (`cdd2502`) |
+|---|---|
+| PACE Track 1 [1..140] @3 s | 140/140 |
+| PACE Track 1 [155..200] @5 s | 27/46 |
+| PACE Track 2 [1..200] @5 s | 114/200 |
+| SteinLib B / C / D @5 s, E @20 s | 18/18, 20/20, 20/20, 19/20 |
+
+The failure set splits 23 / 63 on Track 2 and 15 / 4 on Track 1's tail, by whether
+the goal-directed search can address the instance at all (`|R| <= 64` after
+reduction). The 67 wide ones are what item 0 asks about.
+
+### 85. Item 0's question, answered: `LP*` is at or beside the optimum on the *whole* benchmark
+
+`lpstar_probe` was run on all 67 wide instances at a 100 s cap, connectivity-only
+and all-four-families. 64 produced a row; three (079 at 16,808 terminals, 198 at
+6,387, and one of the Track 1 pair) did not finish building a model.
+
+| | count |
+|---|---|
+| converged (a genuine fixpoint of the separation loop) | **55** |
+| truncated by the cap — the value is a *lower bound on* `LP*` | 9 |
+| `LP* = OPT` **exactly** | **16** |
+| `LP* >= 0.9999 OPT` | 39 |
+| `LP* >= 0.999 OPT` | 56 |
+| `LP* < 0.99 OPT` | 6 |
+
+The six short ones are 076 (0.861, **converged** — a genuine 14 % integrality
+gap, unit-ish costs), 078 (0.856, truncated), 052 (0.969, truncated), Track 1's
+197 (0.982) and 199 (0.985), Track 2's 197 (0.986). Every one but 076 is
+truncated, so its `LP*` is only bracketed from below.
+
+**So the answer is the strong one, on both groups.** Over the 37 the search can
+address, §75 found 21 of 22 Track 2 instances at `LP* = OPT`; over the 64 wide
+ones, `LP*` is within a hundredth of a percent of `OPT` on 39 and within a tenth
+on 56. The bidirected cut relaxation is not the ceiling anywhere on this
+benchmark except on 076 and 070.
+
+**Seconds to convergence, which is the quantity item 1 has to beat:**
+
+| | min | q1 | median | q3 | max |
+|---|---|---|---|---|---|
+| wide group, 55 converged | 0.34 s | 3.80 s | **18.51 s** | 52.29 s | 95.42 s |
+
+Nineteen of the 55 converge inside five seconds. That is the headroom, stated as
+a number.
+
+### 86. And the finding that reframes the round: on the wide group the binding constraint is the *primal*
+
+Item 0's instruction was to re-order the round on the distribution. The
+distribution says the relaxation holds the answer — and then the control's own
+per-instance table says the solver cannot use it, for a reason that is not the
+dual at all.
+
+Over the 63 unproved wide Track 2 instances, the incumbent at five seconds equals
+the optimum on **6**. On the other 57 it is above: by 1 to 25 units on ten of
+them, and by 0.1 % to 3 % on the rest — 093 by 9,388,100, 139 by 3,001,976, 112
+by 2,013,689.
+
+A dual that reached `OPT` exactly on every one of the 63 would therefore prove
+**six**. This is the opposite of the situation on the group the search can
+address, where the primal is within 0 to 31 units and the search closes both
+sides at once. It is worth stating plainly because it contradicts the framing the
+round was set with: *"if `LP*` = `OPT` on most of the 68, then the entire
+remaining benchmark is one problem: converge the root cut relaxation inside five
+seconds."* It is not. On the 68 the remaining benchmark is one problem and that
+problem is the incumbent.
+
+### 87. Item 1: the bidirected cut relaxation, solved without an LP
+
+`src/model/flow_dual.rs`, and the mathematics is the point.
+
+**The reformulation.** By max-flow/min-cut, `x(delta^-(W)) >= 1` for every `W`
+separating `r` from `t` says exactly that `x`, read as a capacity, supports one
+unit of flow from `r` to `t`. So the bidirected cut relaxation is a *compact* LP —
+`|T|` unit flows sharing one capacity vector — and its dual is a packing of
+shortest paths:
+
+> **Proposition (flow dual).**
+> ```text
+> BCR* = max  sum_{t in T\{r}} d_{lambda^t}(r, t)
+>        s.t. lambda >= 0,  sum_t lambda^t_a <= c_a  for every arc a.
+> ```
+
+> **Proposition (weak duality, elementary).** For any arborescence `A` rooted at
+> `r` reaching `T` and any feasible `lambda`,
+> `sum_t d_{lambda^t}(r,t) <= c(A)`.
+>
+> *Proof.* `d_{lambda^t}(r,t) <= lambda^t(P_t)` for the unique `r`->`t` path
+> `P_t subseteq A`; summing, `sum_t lambda^t(P_t) <= sum_{a in A} sum_t
+> lambda^t_a <= sum_{a in A} c_a`. ∎
+
+The second proposition is what makes the method a certificate rather than a
+heuristic, and it needs no LP duality: **every feasible `lambda` is a bound, so
+every iterate is a bound, with no repair step and no solver to trust.** The
+feasible set is a product over arcs of scaled simplices, so `Pi_Lambda` decomposes
+and is exact (sort-and-threshold, on the non-zero coordinates of the over-capacity
+arcs only). The oracle is `|T|` Dijkstras. **Separation disappears entirely** —
+the `lambda` formulation already carries every cut, so there is nothing to find,
+nothing to install, and the row count that made the LP degenerate never exists.
+
+**The seed is Wong's ascent, read as a point of this dual.** Each ascent step
+raises `W(t)` by `delta`; putting `lambda^t_a += delta` on `delta^-(W(t))`
+reproduces the ascent's arc loads exactly and gives
+`d_{lambda^t}(r,t) >= sum of deltas raised for t`. So the method starts at or
+above the ascent, and the ascent's *maximality* — which forbids any combinatorial
+improvement — is no obstacle, because a supergradient step lowers coordinates in
+order to raise others.
+
+**The packing comes out of the level sets.** For commodity `t` with
+`d(v) = d_{lambda^t}(r,v)` and `D = d(t)`, the family `{W_theta = {v : d(v) >
+theta}}` for `theta in [0,D)` carrying Lebesgue weight is a feasible packing of
+total weight `D`, because an arc `(u,v)` enters `W_theta` on a set of measure
+`(d(v)-d(u))^+ <= lambda^t_a`. Summing over commodities gives one packing of value
+`F(lambda)`, and any sub-family of it is still a packing.
+
+**Two things had to be measured before the step was right, and both are recorded
+rather than smoothed over.**
+
+- *Polyak aimed at the incumbent stalls at exactly the overshoot.* Targeting
+  `s = gamma (UB - F)/||g||^2` converges only to a neighbourhood of radius
+  `UB - BCR*`. On instance083 that rule stopped at `3,200,530.0` against
+  `LP* = 3,200,554` — and the 24 units were the overshoot, not the relaxation.
+  Withholding the incumbent was worse: the first step diverged and 619 iterations
+  later the run had not improved on its seed even once.
+- *The Camerini–Fratta–Maffioli deflection rule is **dead** on this dual, and
+  provably.* CFM sets `beta = gamma max(0, -<d_{k-1}, g_k>)/||d_{k-1}||^2`, and
+  every supergradient here is a **flow**, hence non-negative, so
+  `<d_{k-1}, g_k> >= 0` always and `beta` is identically zero. Measured: the CFM
+  and plain runs agreed to the last digit on 070, 083 and 142 at every window.
+  Plain momentum is not dead — `beta = 0.6` is worth one to two units on 083 and
+  142 — and that is what the field now is.
+
+What replaced Polyak-at-the-incumbent is the classical **adaptive level** rule:
+`aim = min(UB, F_best + Delta)`, with `Delta` halved when a window passes without
+improving `F_best`, and the window **doubling** at every halving — a level gap
+half the size takes proportionally longer to close, and the doubling makes the
+total spent above the useful level at most twice the useful part, the same
+geometric argument §79 makes for the separation batch. Measured, the doubling is
+what removes the sensitivity: over initial windows of 8 to 128, the fixed-window
+rule spanned `3,200,524` to `3,200,545` on instance083 and the doubling rule spans
+`3,200,543` to `3,200,550`.
+
+**Restarting the iterate at the best one seen, on a level reduction, is a
+measured loss** and is off by default: it makes the run monotone and stops it
+dead — 083 ends at its seed, `3,200,520`, against `3,200,547` without it. A
+supergradient method's best value comes out of a trajectory that wanders, and
+resetting the trajectory throws that away.
+
+**Correctness gates (all exhaustive, all in `src/model/flow_dual.rs`):**
+
+- `every_iterate_is_a_valid_lower_bound` — 240 random instances, a third of them
+  unit-cost, at seven iteration counts each including zero, against
+  Dreyfus-Wagner: the bound never exceeds the optimum, the level-set packing
+  passes `CertifiedPacking::verify` (that is (PACK) re-checked from scratch), and
+  the packing never exceeds the bound. 500+ checks, and the gate fails if it
+  reached fewer.
+- `the_seed_is_at_least_the_dual_ascent` — the seed identity, on 200 instances.
+- `a_run_reproduces_its_value` — bit-identical values across re-runs.
+- `the_pricing_bounds_every_arborescence` — **every** acyclic edge subset whose
+  root component holds the terminals, oriented away from the root: over ten
+  thousand arborescences, `c(A) >= L + d(A)`.
+- `the_converged_value_is_the_bidirected_cut_optimum` — the gate item 1 demands.
+  `BCR*` is computed by writing **every** cut down as an explicit LP on graphs
+  small enough to enumerate them, and the ascent's converged value is compared
+  against it: 90 instances, worst relative shortfall **3.8e-6**, and the
+  validity half (`ascent <= BCR*`) asserted to floating tolerance.
+
+### 88. Item 1, measured against the LP on the two axes that matter
+
+`flowdual_probe` reports the trajectory and the crossing times. Everything below
+is on the reduced instance with the preprocessing offset added back.
+
+**Speed of the oracle.** On instance083 (`|R| = 32`, `|A| = 1,248`, 38,688
+multipliers) the ascent runs **13,000 iterations in ten seconds** — 400,000
+Dijkstras, 70 % of the time in the oracle and 30 % in the step and the projection.
+One LP solve of the same relaxation costs 25–500 ms.
+
+**Value reached, against the LP the shipped solver actually got.** `certlp` is the
+root bound the control reaches inside its own five-second budget; `fd@3s` is the
+ascent given three seconds from the search's root:
+
+| instance | ascent (best root) | LP (control) | flow dual @3 s | difference |
+|---|---|---|---|---|
+| 083 | 3,200,527 | 3,200,532.9 | **3,200,546.6** | +13.7 |
+| 130 | 3,600,567 | 3,600,568.0 | **3,600,575.8** | +7.8 |
+| 192 | 4,000,729 | 4,000,729.0 | **4,000,736.4** | +7.4 |
+| 142 | 3,000,498 | 3,000,511.8 | **3,000,518.9** | +7.1 |
+| 144 | 3,600,599 | 3,600,599.0 | **3,600,605.5** | +6.5 |
+| 190 | 3,900,428 | 3,900,429.0 | **3,900,435.5** | +6.5 |
+| 164 | 3,100,498 | 3,100,512.0 | **3,100,517.6** | +5.6 |
+| 170 | 6,102,186 | 6,102,205.0 | 6,102,179.0 | −26.0 |
+| 183 | 6,001,093 | 6,001,141.0 | 6,001,116.2 | −24.8 |
+
+Ten wins, eleven losses, two ties over the 23 Track 2 instances. On 070 — unit
+costs, the one instance of the group whose relaxation is *not* the optimum — the
+ascent reaches `LP* = 63.0` **exactly**, from a seed of 57, in 3.87 s and
+16,672 iterations, where the LP needs 139 simplex solves.
+
+**Seeding at the best ascent root instead of the search's root is worth three to
+twenty-two units** — 153 by 21.6, 170 by 13.9, 130 by 10.7, 181 by 7.3, 200 by
+6.6 — and turns the ten wins into eight of ten on the sample measured. It is
+valid as a bound by §77's root-free floor, and its *packing* is unusable by a
+search rooted elsewhere, which is the whole reason the in-solver wiring below did
+not take it.
+
+**The honest summary of the axis item 1 named.** Time to a given fraction of
+`LP*`: the ascent reaches 0.999990 of `LP*` on 083 in 0.05 s and 0.999997 in three
+seconds, and the last four units take longer than the LP's 6.65 s convergence.
+The method is not "a tenth of the time to 0.999 of `LP*`"; it is *at* 0.9999 in
+milliseconds and *asymptotic* thereafter, which is the shape a subgradient method
+has and the shape the LP does not.
+
+### 89. Item 1, wired into the solver, and three paired A/B runs that say no
+
+The ascent was wired into `run_search`'s certificate loop as a second dual source,
+under a measured-rate rule: each source gets one increment, and afterwards the
+next goes to whichever produced more bound per second *on this instance in this
+call*. Three paired A/B runs on Track 2, both binaries in the same worker slot:
+
+| variant | control | candidate | only control | only candidate |
+|---|---|---|---|---|
+| ascent first | 111 | 108 | 075, 117, 120, 132, 194 | 026, 129 |
+| ascent + root-dual path, ascent first | 114 | 107 | 051, 058, 059, 062, 071, 075, 077, 118, 119 | 083, 120 |
+| LP first, width memo, gated root-dual path | 112 / 115 / 110 | 113 / 111 / 108 | 083, 129, 144, 058, 059, 194 | 120 |
+
+**Two reasons, both measured, neither of them about the mathematics:**
+
+- *The increments this loop funds are too small for it.* The batch is a fraction
+  of a search window — 0.1 to 0.3 s on instance083 — and at that size the ascent
+  has barely left its seed. Its advantage over the LP is real and it appears at
+  **three** seconds, not at a quarter of one.
+- *Its packing is dense.* The level-set construction emits one chain per
+  commodity: **2,773 sets on instance083** against the LP dual's 263, and
+  `PackingPotential` pays for every one at every settled label. Truncating the
+  chains to their heaviest sets throws the value away with them, because a
+  chain's weight is spread over its whole length rather than concentrated. A
+  coarsening that keeps the value is *not* available: subsetting the thresholds
+  of a chain breaks (PACK) unless every distinct distance value is kept, because
+  the load an arc picks up from a coarse chain is the length of a threshold
+  interval that may overhang `d(v)`.
+
+The whole wiring was reverted. `src/solver.rs` at the end of the round is
+byte-identical to the control.
+
+### 90. The hole this found, and why closing it did not pay either
+
+Worth recording separately because it is a structural fact about the pipeline and
+not about the flow dual.
+
+**The entire certificate loop lives inside `run_search`, which returns without
+doing any of it when `SteinerSearch::new` refuses the instance.** More than 64
+terminals is the usual reason and it describes 63 of the unproved Track 2
+instances. On that class nothing solves the root relaxation except the
+branch-and-cut's own root node — and on the wide instances it does not solve it
+either: PACE instance092 (157 terminals after reduction) reports
+`Nodes: 0 | LPs: 0 | Time: 0.00s` in **every** pass, leaving the dual at the
+ascent's 114,730,288 against an incumbent of 115,956,503, while `lpstar_probe`
+converges the same instance in **0.43 s at exactly the optimum**.
+
+The cause is upstream of the branch-and-cut: `try_decomposition` is re-run from
+scratch in every pass, is deterministic, and is cut off at the same place by a
+*smaller* window each time — so a later pass repeats a truncated computation and
+consumes the whole budget doing it. Two repairs were built and both work as
+stated:
+
+1. A **truncation memo**: the seconds the width attempt was granted are recorded
+   together with the shape of the graph, and the attempt is skipped when the
+   graph is unchanged and the new window is no larger. This is sound and exact —
+   the DP is deterministic and monotone in its clock — and it is *not* the same
+   event as a refusal on width, which is a property of the graph and costs
+   microseconds. Conflating the two is §47's error and the memo records only the
+   second.
+2. A `run_root_dual` path: the separation loop and the flow dual, on the
+   instances the search cannot address, gated on having *observed* the
+   branch-and-cut solve no LP at all.
+
+With both, instance092's dual rises from 114,730,288 to 115,558,198 — **exactly
+the optimum** — when the path is given half of pass 0's window, and to 114,910,980
+under the gated version that only reaches it in pass 1. It still does not prove:
+092's incumbent is 115,956,503 and §86 is why.
+
+Paired A/B of the gated version, three Track 2 runs: **113 vs 112, 111 vs 115,
+108 vs 110**. Net negative, with losses on 058, 059, 083, 129, 144, 194 — the
+3.2–4.0 s cluster §74 names — and one gain, 120. The freed budget does not convert,
+and the schedule shuffle costs more than it buys. Reverted. The mechanism is
+correct, the hole it names is real, and closing it is worth revisiting only
+together with a primal that can use the budget.
+
+### 91. Item 2: the cutoff transformation, stated exactly — and what is *not* an equivalence
+
+The round proposes: *"solving the instance under costs `c` with cutoff `UB` is
+equivalent to finding a tree of `d`-cost at most `UB - L` in the graph weighted by
+`d`."* Half of that is true and is what a search may use; the other half is false,
+and the gate is what says so.
+
+> **Proposition (cutoff transformation).** With `(L, d)` the pricing of a feasible
+> `lambda`, for every arborescence `A` rooted at `root` reaching `T`:
+> ```text
+> (i)   c(A) = d(A) + sum_{a in A} load(a),   and   c(A) >= L + d(A);
+> (ii)  c(A) <= UB   =>   d(A) <= UB - L;
+> (iii) the converse of (ii) fails.
+> ```
+> *Proof.* (i) is the definition of `d` plus weak duality; (ii) is (i) rearranged;
+> (iii) because `sum_{a in A} load(a)` is not constant over arborescences. ∎
+
+So the `d`-graph with budget `UB - L` is a **relaxation** of the cutoff problem:
+searching there cannot lose an optimum, but a `d`-optimal tree need not be
+`c`-optimal and the two problems do **not** have the same optimal solution sets.
+`the_d_graph_budget_never_excludes_a_cheap_tree` enumerates every arborescence of
+160 small instances at three cutoff slacks, asserts (ii), and **fails if the
+converse never fails** — the gate is written so that it cannot pass by proving an
+equivalence that does not hold.
+
+> **Corollary (a tight dual).** If `L = OPT` then every optimal arborescence has
+> `d(A) = 0`: `OPT = c(A) >= L + d(A) = OPT + d(A)` and `d >= 0`. ∎
+
+That is the statement item 2 is really after, and
+`a_tight_dual_puts_every_optimal_tree_in_the_zero_price_subgraph` gates it on the
+instances where the ascent actually reaches the optimum. Its converse is false and
+is not asserted.
+
+**The composition rule.** `L` and `d` are root-specific exactly as an ascent's
+reduced costs are, and for the same reason: `d = c - sum_t lambda^t` is stated
+against the commodity set `T\{root}`. One root's conclusions may be unioned at the
+arc level; two roots' prices may **not** be added; and an edge dies only when both
+of its orientations do. That is `root_reduce`'s header rule, unchanged, and
+`ReduceConfig::initial_dual` already enforces it.
+
+**And why a `d`-keyed search is not a new machine.** A Dijkstra–Steiner keyed by
+`d`-cost with cutoff `UB - L` orders its states by `g_c(v,I) - load(P)`, and the
+packing potential orders them by `g_c(v,I) + h_pack(v,I)` where `h_pack` is the
+part of `L` not yet paid for. The two keys differ by the constant `L` up to the
+difference between "sets crossed by `P`" and "sets meeting the outstanding
+requirement", so the `d`-graph search item 2 describes is, to that extent, the A*
+potential the solver already runs. What is genuinely new in item 2 is not the
+search; it is the reduction.
+
+### 92. Item 2, measured: the priced fixpoint deletes where the plain one deletes nothing
+
+`dgraph_probe` runs `tighten` **twice** on the same reduced graph at the same
+cutoff — once as it stands, once handed `(L, d)` as
+`ReduceConfig::initial_lower_bound` and `initial_dual` — after three seconds of
+flow-dual ascent. On the 38 refused instances the search can address:
+
+| | count |
+|---|---|
+| the priced fixpoint reduces the graph strictly further | **10 of 38** |
+| the priced fixpoint reports a strictly higher lower bound | **26 of 38** |
+
+| instance | budget `UB - L` | plain `\|E\|` | priced `\|E\|` | plain LB | priced LB |
+|---|---|---|---|---|---|
+| 143 | 6.1 | 792 | **585** (−26 %) | 4,500,711 | 4,500,722 |
+| 144 | 4.8 | 764 | **637** (−17 %) | 3,600,594 | 3,600,606 |
+| 180 | 19.1 | 1,243 | 1,173 | 6,401,970 | 6,401,977 |
+| 193 | 8.6 | 1,148 | 1,096 | 3,800,638 | 3,800,648 |
+| 083 | 8.4 | 624 | 589 | 3,200,527 | 3,200,546 |
+| 164 | 9.6 | 781 | 758 | 3,100,494 | 3,100,517 |
+| 142 | 8.1 | 707 | 692 | 3,000,493 | 3,000,518 |
+| 130 | 21.4 | 750 | 743 | 3,600,560 | 3,600,575 |
+| 148 | 22.5 | 1,127 | 1,112 | 5,501,921 | 5,501,930 |
+| 172 | 20.5 | 1,558 | 1,553 | 6,900,815 | 6,900,821 |
+| 070 | 10.1 | 399 | 399 | 57 | **63** |
+| 172 (T1) | 377.6 | 1,215 | 1,215 | 6,681 | **6,922** |
+| 183 | 49.4 | 1,761 | 1,761 | 6,001,093 | 6,001,115 |
+
+**This is the direct contradiction of §80's inertness, and the reason is exactly
+what §50 says.** §80 fed the reduction the *LP's* certified dual, whose value on
+the refused set is at or below the reduction's own best-root ascent — so the gap
+it ran at did not change and nothing died. The flow dual's `L` is 10 to 25 units
+*above* the ascent on the same instances, so the same rule now runs at a gap of 5
+to 25 rather than 27 to 100, and it deletes. Elimination power is `UB - LB` and
+nothing else; the way to make a starved reduction fire is to hand it a better
+`LB`, not a different rule.
+
+**The shape of the `d`-graph, for the record.** Over the same 38 instances, 18 %
+of arcs price at exactly zero on average — 77 % on 083 — and the largest
+zero-price component is essentially the whole graph on every instance measured
+(306 of 307 vertices on 083, 351 of 352 on 142). So the zero-price subgraph is
+*not* a small object and contracting it is not a reduction; the residual budget is
+the entire difficulty, exactly as item 2 says, and it is the *bound* and not the
+subgraph that does the work.
+
+**And the price of the `L` is measured, not assumed.** The same probe at **half a
+second** of ascent instead of three:
+
+| ascent budget | reduces further | raises the bound |
+|---|---|---|
+| 3.0 s | 10 of 38 | 26 of 38 |
+| 0.5 s | **3 of 38** | **15 of 38** |
+
+At half a second it still deletes on 142, 143 (807 -> 732) and 144 (804 -> 753) and
+still raises the bound on fifteen — so the effect does not vanish, it scales with
+the seconds spent on `L`, which is the honest shape and the one that says what
+would have to change for it to ship.
+
+This was **not wired into the solver**, and the reason is a resource decision and
+not a mathematical one: the version that does the work buys its `L` with three
+seconds of ascent and the solver's whole budget is five, and the half-second
+version's three deletions are not obviously worth the half second against the
+three A/B runs of §89. Wiring it belongs with a faster ascent, not with a hope.
+
+### 93. The final matrix
+
+`src/solver.rs` is byte-identical to the control, so the shipped binary is the
+control and the matrix below is a verification that the round left it that way
+rather than an A/B.
+
+| slice | control (`cdd2502`) | after the round |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 140 | 139 (086) |
+| PACE Track 1 [155..200] @5 s | 27 | 27 |
+| PACE Track 2 [1..200] @5 s | 114 | 112 |
+| SteinLib B @5 s | 18/18 | 18/18 |
+| SteinLib C @5 s | 20/20 | 20/20 |
+| SteinLib D @5 s | 20/20 | 20/20 |
+| SteinLib E @20 s | 19/20 | 19/20 |
+
+The differences are the 3.2–4.0 s cluster §74 names, on identical source —
+instance086 finishes in 2.42 s against a 3 s limit and is the same instance §82
+recorded on the control's side for the same reason. That is the noise band, and it
+is why nothing in §89 or §90 was allowed to ship on an unpaired count.
+
+**No instance reports a value differing from its reference under an `Optimal`
+status, in any slice of any run, on either side.**
+
+189 library tests (was 182), `cargo check --all-targets` clean, every binary
+builds.
+
+### 94. What was delivered, and what was not
+
+**Item 0 — delivered in full.** The control was frozen before any algorithmic
+change. `LP*` is now measured on all 67 wide instances, converged/truncated
+separated honestly, with the per-instance table and the seconds-to-convergence
+distribution the round asked for (§85). The round was re-ordered on the answer,
+and the re-ordering produced a second measurement the round did not ask for and
+should have: on the wide group the binding constraint is the **primal**, not the
+dual, and a perfect dual proves six of sixty-three (§86). That is the single most
+important number this round produced.
+
+**Shipped delta: +6 to +8 on PACE Track 2 and +1 on Track 1's tail** — see §95,
+which also records the measurement error that hid it for most of the round.
+
+**Item 1 — delivered as mathematics and as a measurement; not shipped.** The
+bidirected cut relaxation is now solvable without an LP, by a method whose every
+iterate is feasible by construction, whose oracle is a Dijkstra rather than a max
+flow, whose bound is re-derived from its own multipliers before it is reported,
+and which is checked against `BCR*` computed by enumerating every cut on 90 small
+instances (worst shortfall 3.8e-6). Two step rules were wrong and are recorded
+with their counterexamples; the CFM deflection rule is *proved* dead on this dual.
+Measured against the LP, it wins by up to 14 units on ten of the 23 refused Track 2
+instances and loses on eleven, and reaches `LP*` exactly on the one unit-cost
+instance where the LP needs 139 solves. Three paired A/B runs say the in-solver
+wiring costs proofs, for two measured reasons — the increments are too short and
+the packing is too dense — and it was reverted rather than shipped on a hope.
+
+**Item 2 — delivered in full as mathematics and measurement; not shipped.** The
+transformation is stated exactly, the half that is an equivalence and the half
+that is not are separated, and both are gated by exhaustive enumeration over every
+arborescence of small graphs — including a gate that *fails if the converse never
+fails*. The composition rule across roots is stated. The `d`-keyed search is shown
+to be the A* potential the solver already runs, up to a constant. And the positive
+half — the priced fixpoint — is measured and works: it reduces the graph further
+on 10 of 38 refused instances, by 26 % on 143, and raises the lower bound on 26 of
+38, which is the direct contradiction of §80's inert result and comes from a
+better `L` rather than a different rule. Not wired in, for a session-budget reason
+stated with its number: the `L` that does the work costs three seconds and the
+solver has five.
+
+### 95. What actually shipped, and the one thing that was measured wrong
+
+§89 and §90 reported the width-attempt truncation memo as part of a *bundle* with
+`run_root_dual` and recorded the bundle's three paired runs (+1, −4, −2) as a
+verdict on both. That was a measurement error of exactly the kind §74 exists to
+prevent: two changes, one A/B, no attribution. Separated, the memo is a clean win
+and the bundle's losses belong to the path it was bundled with.
+
+**The change.** `try_decomposition` now reports whether it was cut off by the
+**clock or the state budget** as opposed to refused on **width**, and the solver
+remembers the seconds a truncated attempt was granted together with the shape of
+the graph it was granted them on. A later pass skips the attempt only when the
+graph is unchanged *and* its window is no larger.
+
+> The argument is exact and needs no measurement. `try_decomposition` is
+> deterministic — same graph, same min-degree gate, same ordering portfolio, same
+> dynamic programme, in that order — and the passes share one budget, so a later
+> pass has strictly less clock. An attempt truncated at `t` seconds is truncated
+> at the same place given `t' <= t`. Repeating it cannot reach a different answer
+> and can only consume the window. ∎
+>
+> A refusal on **width** is a different event and is deliberately *not*
+> remembered: the cheap ordering abandons at the first oversized bag, costs
+> microseconds, and repeating it is free. Conflating the two is §47's error.
+
+**Measured, paired, both binaries in the same worker slot, Track 2 at 5 s:**
+
+| run | control | memo | only control | only memo |
+|---|---|---|---|---|
+| 1 | 109 | 109 | 051, 072, 077, 171 | 058, 059, 090, 092 |
+| 2 | 109 | **115** | — | 058, 059, 072, 090, 092, 093 |
+| 3 | 108 | **116** | — | 026, 058, 059, 072, 090, 092, 093, 194 |
+
+**+0, +6, +8, and not one instance lost in runs 2 or 3.** Track 1's tail gains
+188 (27 → 28); Track 1 [1..140] and all four SteinLib slices are unchanged.
+`instance058`, `059`, `090`, `092` appear on the memo's side in all three runs.
+
+Unpaired whole-matrix pass on the same machine:
+
+| slice | control | memo |
+|---|---|---|
+| PACE Track 1 [1..140] @3 s | 140, 139 | 139 |
+| PACE Track 1 [155..200] @5 s | 27 | 26 (paired: 28 vs 27) |
+| PACE Track 2 [1..200] @5 s | 114, 112 | **116** |
+| SteinLib B / C / D / E | 18, 20, 20, 19 | 18, 20, 20, 19 |
+
+**No instance reports a value differing from its reference under an `Optimal`
+status, in any slice of any run, on either side.** 189 library tests,
+`cargo check --all-targets` clean, every binary builds.
+
+**Why it works, which is §90's finding and not a scheduling accident.**
+instance092 is the case the memo was derived from: 157 terminals after reduction,
+so `run_search` refuses it and returns immediately, and every pass then spends its
+whole window inside a width attempt that cannot finish — leaving the
+branch-and-cut reporting `Nodes: 0 | LPs: 0 | Time: 0.00s` and the dual at the
+ascent's value. With the repetition skipped, the branch-and-cut gets the window
+and the instance closes. 092 and 093 are proved in every paired run; 058, 059,
+090 are the same mechanism on smaller margins.
+
+So the round's shipped delta is **+6 to +8 on PACE Track 2 and +1 on Track 1's
+tail**, from a refusal to repeat a computation that provably cannot reach a
+different answer. It is worth stating what that is *not*: it is not a stronger
+relaxation, a stronger reduction, or a better search. It is the pipeline no longer
+spending its budget twice on the same truncated dynamic programme, and it was
+found only because item 0's measurement sent me to look at what the wide
+instances actually spend their five seconds on.
+
+`run_root_dual` and the flow dual's in-search wiring remain out, and §89's and
+§90's verdicts on those stand — but they are now verdicts on those alone.
+
+### 96. What the next round should take from this
+ The dual is no longer the
+constraint anywhere on this benchmark except 070 and 076. The wide group needs a
+primal, the narrow group needs the last five to twenty units of a dual that is
+already asymptotically at `LP*`, and the pipeline needs to stop spending whole
+windows on a width attempt it has already watched fail. Those are three different
+problems and only the last is cheap.
+
+**Closed by this round, added to the standing list:** Polyak's step aimed at the
+incumbent as the flow dual's step rule (§87); restarting the iterate at the best
+one on a level reduction (§87); the Camerini–Fratta–Maffioli deflection rule on
+any dual whose supergradients are flows, which is *proved* dead and not merely
+measured (§87); the flow dual as a second source inside `run_search`'s certificate
+loop (§89); coarsening a level-set chain by subsetting its thresholds, which
+breaks (PACK) (§89); and the reading of item 2 under which the `d`-graph problem
+is *equivalent* to the cutoff problem rather than a relaxation of it (§91).

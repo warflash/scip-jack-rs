@@ -204,6 +204,30 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     // does; only a pass that watched it solve nothing says otherwise.
     let mut carried_lower_bound: Cost = 0.0;
     let mut branch_and_cut_works = true;
+    // What the width attempt already spent, and on which graph.
+    //
+    // [`try_decomposition`] is deterministic: the same graph, the same ordering
+    // portfolio, the same dynamic programme, in that order. An attempt cut off by
+    // the deadline is therefore cut off at exactly the same place when it is
+    // re-run on the same graph with *less* clock — and a later pass always has
+    // less, because the passes share one budget and the earlier one has already
+    // spent from it. Re-running it is not a second chance; it is a guaranteed
+    // repetition of a truncated computation, and on the wide instances it
+    // consumes the entire window. PACE instance092 spends every pass inside a
+    // width attempt that cannot finish, which is why its branch-and-cut reports
+    // `Nodes: 0 | LPs: 0 | Time: 0.00s` while the root separation loop converges
+    // the same instance in 0.43 s at exactly its optimum.
+    //
+    // So the seconds it was granted are remembered together with the shape of the
+    // graph they were granted on, and the attempt is skipped only when both say it
+    // would repeat itself. A pass whose reduction shrank the graph gets a fresh
+    // attempt: that is a different computation. A pass that somehow has *more*
+    // clock gets one too.
+    //
+    // This is a refusal to repeat, not a refusal to try, and it can only move
+    // seconds from a stage that provably cannot use them to one that might. It
+    // never changes the answer of an attempt that ran.
+    let mut td_truncated: Option<(usize, usize, usize, f64)> = None;
     // No pass has run, so no bound has been exhibited yet.
     let mut carried_primal_witnessed = false;
     // Dual bound per second, as the goal-directed search itself was observed to
@@ -291,6 +315,7 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             &mut sep_cache,
             &mut carried_lower_bound,
             &mut branch_and_cut_works,
+            &mut td_truncated,
             &mut search_rate,
             carried_primal_witnessed,
         );
@@ -472,6 +497,7 @@ fn finish(
     sep_cache: &mut Option<RootSeparation>,
     carried_lower_bound: &mut Cost,
     branch_and_cut_works: &mut bool,
+    td_truncated: &mut Option<(usize, usize, usize, f64)>,
     search_rate: &mut Cost,
     // Whether the bound this pass started from was itself exhibited by an
     // earlier pass. A pass that never improves the incumbent inherits its
@@ -615,7 +641,25 @@ fn finish(
     // instances decompose at width 25 to 84. Only when the cheap ordering
     // proves the graph narrow is the slower minimum-fill ordering run to
     // sharpen it.
-    if let Some((value, secs)) = try_decomposition(&work_graph, &terminals, deadline) {
+    let td_shape = (work_graph.num_nodes as usize, work_graph.edges.len(), terminals.len());
+    let td_window = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+    let td_repeats = td_truncated
+        .map(|(n, e, t, granted)| (n, e, t) == td_shape && td_window <= granted + 1e-9)
+        .unwrap_or(false);
+    if td_repeats {
+        if config.verbose {
+            eprintln!(
+                "[td] skipped: the same graph was already given {:.2}s and was cut off;                  {td_window:.2}s cannot get further",
+                td_truncated.map(|x| x.3).unwrap_or(0.0)
+            );
+        }
+    } else if let Some((value, secs)) = {
+        let (out, truncated) = try_decomposition(&work_graph, &terminals, deadline);
+        if truncated {
+            *td_truncated = Some((td_shape.0, td_shape.1, td_shape.2, td_window));
+        }
+        out
+    } {
         if config.verbose {
             eprintln!("[td] exact by tree decomposition: {value:.1} in {secs:.2}s");
         }
@@ -1546,18 +1590,27 @@ const TD_STATE_BUDGET: usize = 40_000_000;
 /// Returns the optimum and what it cost, or `None` when the graph is too wide,
 /// the state budget is hit, or the deadline passes — all of which leave the
 /// caller exactly where it was.
+/// Returns the exact value when the dynamic programme finished, and whether the
+/// attempt was cut off by the **clock or the state budget** rather than refused
+/// on width.
+///
+/// The two are not the same event and conflating them is §47's error. A refusal
+/// on width is a property of the graph: the cheap min-degree ordering abandons at
+/// the first oversized bag, it costs microseconds, and repeating it is free. A
+/// truncation is a property of the budget, repeats *expensively*, and is the only
+/// one worth remembering.
 fn try_decomposition(
     graph: &UndirectedGraph,
     terminals: &[crate::graph::NodeId],
     deadline: Instant,
-) -> Option<(Cost, f64)> {
+) -> (Option<(Cost, f64)>, bool) {
     use crate::graph::algorithms::steiner_td::{steiner_tree_over_decomposition, MAX_BAG};
     use crate::graph::algorithms::tree_decomposition::{
         decompose_portfolio, decompose_with, Ordering, ORDERINGS,
     };
 
     if terminals.len() < 2 || Instant::now() >= deadline {
-        return None;
+        return (None, false);
     }
     // One vertex of every bag is spent on the root terminal the DP pins there.
     let cap = MAX_BAG - 2;
@@ -1567,7 +1620,9 @@ fn try_decomposition(
     // once it has shown the graph is narrow is the rest of the portfolio worth
     // running, and the portfolio then chooses by the work each decomposition
     // implies rather than by width alone.
-    let cheap = decompose_with(graph, Ordering::MinDegree, cap, Some(deadline))?;
+    let Some(cheap) = decompose_with(graph, Ordering::MinDegree, cap, Some(deadline)) else {
+        return (None, false);
+    };
     let td = decompose_portfolio(graph, cap, Some(deadline), &ORDERINGS[1..])
         .map(|(t, _)| t)
         .filter(|t| {
@@ -1576,7 +1631,7 @@ fn try_decomposition(
         })
         .unwrap_or(cheap);
     if !td.verify(graph) {
-        return None;
+        return (None, false);
     }
 
     // One attempt, bounded by the clock rather than by an estimate.
@@ -1602,7 +1657,7 @@ fn try_decomposition(
     // node. So the attempt is single, the state budget is a memory guard, and an
     // instance too big for the clock costs the clock — the same bargain the
     // branch-and-cut it defers to makes.
-    let (cost, _) = steiner_tree_over_decomposition(
+    let Some((cost, _)) = steiner_tree_over_decomposition(
         graph,
         terminals,
         &td,
@@ -1611,8 +1666,13 @@ fn try_decomposition(
         // set, so the tables can be freed as they die.
         false,
         Some(deadline),
-    )?;
-    Some((cost, started.elapsed().as_secs_f64()))
+    ) else {
+        // The decomposition was built, so the graph is narrow enough for the
+        // encoding: what stopped the run was the clock or the state budget, and
+        // both repeat on the same graph with less of the first.
+        return (None, true);
+    };
+    (Some((cost, started.elapsed().as_secs_f64())), false)
 }
 
 fn try_dreyfus_wagner(
