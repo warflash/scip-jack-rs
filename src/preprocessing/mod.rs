@@ -563,6 +563,279 @@ mod tests {
     /// builds a `ReducibleGraph` from a *fresh* instance — nothing retired,
     /// nothing contracted, no offset. The composition is a different object and
     /// this is the gate for it.
+    /// The invariant on the graph the reduction is *actually* handed inside
+    /// `root_reduce::tighten`: one a **reduced-cost elimination** has already
+    /// shrunk.
+    ///
+    /// This is the composition SS70 names and the one the fifteenth round's wrong
+    /// answer lives in. `tighten` runs its round first --- dual ascent, then
+    /// `reduced_cost_fixings` at the round's cutoff, then the undirected union
+    /// that kills an edge only when *both* orientations die --- and only then
+    /// hands what is left to `preprocess_bounded`. Neither the elimination's own
+    /// gate nor the preprocessing's own gate covers that order, because each
+    /// builds its input from a fresh instance.
+    ///
+    /// The cutoff is loose on two of the three arms, because a tight one cannot
+    /// catch a bound-based rule being wrong.
+    #[test]
+    fn a_bounded_fixpoint_after_reduced_cost_elimination_never_changes_the_optimum() {
+        use crate::graph::algorithms::{
+            dreyfus_wagner, dual_ascent_masked, reduced_cost_distances, reduced_cost_fixings,
+            ArcIndex,
+        };
+        use crate::graph::DirectedGraph;
+        let mut seed = 0x9C0F_FEE1_BEEF_0F15u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut ran, mut shrank) = (0, 0);
+        for round in 0..700 {
+            let n = 8 + (rng() % 9) as u32;
+            let k = 2 + (rng() % 4) as u32;
+            let terminals: Vec<NodeId> = (1..=k).collect();
+            let mut g = UndirectedGraph::new(n);
+            for v in 1..=n {
+                let t = terminals.contains(&v);
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+            }
+            let unit = round % 3 == 0;
+            let w = |r: &mut dyn FnMut() -> u64| if unit { 1.0 } else { 1.0 + (r() % 9) as f64 };
+            let mut perm: Vec<u32> = (1..=n).collect();
+            for i in (1..perm.len()).rev() {
+                perm.swap(i, (rng() % (i as u64 + 1)) as usize);
+            }
+            for i in 0..perm.len() - 1 {
+                let c = w(&mut rng);
+                g.add_edge(perm[i], perm[i + 1], c);
+            }
+            let density = 10 + (rng() % 55) as u64;
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 100 < density {
+                        let c = w(&mut rng);
+                        g.add_edge(u, v, c);
+                    }
+                }
+            }
+            let Some(dw) = dreyfus_wagner(&g, &terminals) else { continue };
+            let opt = dw.optimal_cost;
+
+            for slack in [1.0, 4.0, 12.0] {
+                let cutoff = opt + slack;
+                let directed = DirectedGraph::from_undirected(&g);
+                let idx = ArcIndex::new(&directed);
+                let active = vec![true; idx.num_arcs()];
+                let mut dead = vec![false; idx.num_arcs()];
+                for &r in terminals.iter() {
+                    let da = dual_ascent_masked(&idx, r, &terminals, &active);
+                    let dists =
+                        reduced_cost_distances(&idx, r, &terminals, &da.reduced_costs, &active);
+                    let fix =
+                        reduced_cost_fixings(&idx, r, &terminals, &da, &dists, &active, cutoff);
+                    let mut here = vec![false; idx.num_arcs()];
+                    for &a in &fix.arcs {
+                        here[a as usize] = true;
+                    }
+                    for i in 0..g.edges.len() {
+                        if here[2 * i] && here[2 * i + 1] {
+                            dead[2 * i] = true;
+                            dead[2 * i + 1] = true;
+                        }
+                    }
+                }
+                let mut smaller = UndirectedGraph::new(g.num_nodes);
+                for node in &g.nodes {
+                    smaller.add_node(node.id, node.node_type, node.weight);
+                }
+                let mut removed = 0;
+                for (i, e) in g.edges.iter().enumerate() {
+                    if dead[2 * i] {
+                        removed += 1;
+                    } else {
+                        smaller.add_edge(e.src, e.dst, e.cost);
+                    }
+                }
+                if removed > 0 {
+                    shrank += 1;
+                }
+                let Some(mid) = dreyfus_wagner(&smaller, &terminals) else {
+                    panic!("reduced-cost elimination disconnected the terminals");
+                };
+                assert!(
+                    (mid.optimal_cost - opt).abs() < 1e-9,
+                    "reduced-cost elimination at cutoff {cutoff} changed the optimum: {opt} -> {}",
+                    mid.optimal_cost
+                );
+
+                let inst = SteinerInstance {
+                    name: String::from("t"),
+                    comment: String::new(),
+                    num_nodes: smaller.num_nodes,
+                    num_edges: smaller.edges.len() as u32,
+                    num_terminals: terminals.len() as u32,
+                    nodes: smaller.nodes.clone(),
+                    edges: smaller.edges.clone(),
+                    terminals: terminals.clone(),
+                    root: None,
+                };
+                let (rg, _) = preprocess_bounded(&inst, &smaller, None, cutoff);
+                let off = rg.offset;
+                let (ri, ru) = rg.to_instance();
+                let got = if ri.terminals.len() < 2 {
+                    0.0
+                } else {
+                    match dreyfus_wagner(&ru, &ri.terminals) {
+                        Some(r) => r.optimal_cost,
+                        None => panic!("terminals disconnected by the bounded fixpoint"),
+                    }
+                };
+                assert!(
+                    (got + off - opt).abs() < 1e-9,
+                    "the bounded fixpoint on an eliminated graph changed the optimum at cutoff \
+                     {cutoff}: {opt} -> {got} + {off}"
+                );
+                ran += 1;
+            }
+        }
+        assert!(
+            ran > 1500 && shrank > 200,
+            "only {ran} compositions of which {shrank} actually shrank the graph"
+        );
+    }
+
+    /// The same invariant for the **bounded** fixpoint, run the way
+    /// `root_reduce::tighten` runs it: at a finite cutoff, and then **again on
+    /// its own output**.
+    ///
+    /// # Why this gate exists
+    ///
+    /// `the_whole_pipeline_never_changes_the_optimum` calls `preprocess_until`,
+    /// which is `preprocess_bounded` at an *infinite* cutoff. So the only caller
+    /// that passes a finite one — `tighten`, once per round — had no gate at all,
+    /// and neither did the composition of two rounds, which is the regime SS70
+    /// names: the second round sees a graph a bound-based elimination has already
+    /// shrunk.
+    ///
+    /// That regime is where the fifteenth round found a wrong answer. PACE
+    /// Track 2 instance154 at a thirty-second limit reports `Optimal 6001785`
+    /// against a reference of 6001782, reproducibly, and disabling
+    /// `nearest_vertex_reductions` inside this function makes the answer correct
+    /// three times out of three. This gate is the attempt to reproduce that in
+    /// miniature; if it ever fails it has found the counterexample the round
+    /// could not.
+    ///
+    /// The cutoff is deliberately **loose** — a tight one cannot catch a
+    /// bound-based rule being wrong, because under it every bound is right — and
+    /// the invariant asserted is the one the cutoff licenses: every tree strictly
+    /// cheaper than the cutoff survives, so when the optimum is below the cutoff
+    /// it must survive exactly.
+    #[test]
+    fn the_bounded_fixpoint_run_twice_never_changes_the_optimum() {
+        use crate::graph::algorithms::dreyfus_wagner;
+        let mut seed = 0x3F1A_C0DE_5EED_2718u64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut ran, mut twice) = (0, 0);
+        for round in 0..900 {
+            let n = 8 + (rng() % 9) as u32;
+            let k = 2 + (rng() % 4) as u32;
+            let terminals: Vec<NodeId> = (1..=k).collect();
+            let mut g = UndirectedGraph::new(n);
+            for v in 1..=n {
+                let t = terminals.contains(&v);
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+            }
+            let unit = round % 3 == 0;
+            let w = |r: &mut dyn FnMut() -> u64| if unit { 1.0 } else { 1.0 + (r() % 9) as f64 };
+            let mut perm: Vec<u32> = (1..=n).collect();
+            for i in (1..perm.len()).rev() {
+                perm.swap(i, (rng() % (i as u64 + 1)) as usize);
+            }
+            for i in 0..perm.len() - 1 {
+                let c = w(&mut rng);
+                g.add_edge(perm[i], perm[i + 1], c);
+            }
+            let density = 10 + (rng() % 55) as u64;
+            for u in 1..=n {
+                for v in (u + 1)..=n {
+                    if rng() % 100 < density {
+                        let c = w(&mut rng);
+                        g.add_edge(u, v, c);
+                    }
+                }
+            }
+            let Some(dw) = dreyfus_wagner(&g, &terminals) else { continue };
+            let opt = dw.optimal_cost;
+            let mk = |g: &UndirectedGraph, t: &[NodeId]| SteinerInstance {
+                name: String::from("t"),
+                comment: String::new(),
+                num_nodes: g.num_nodes,
+                num_edges: g.edges.len() as u32,
+                num_terminals: t.len() as u32,
+                nodes: g.nodes.clone(),
+                edges: g.edges.clone(),
+                terminals: t.to_vec(),
+                root: None,
+            };
+            // Cutoffs strictly above the optimum, so the optimum must survive.
+            for slack in [1.0, 3.0, 11.0] {
+                let inst = mk(&g, &terminals);
+                let (rg, _) = preprocess_bounded(&inst, &g, None, opt + slack);
+                let off1 = rg.offset;
+                let (ri, ru) = rg.to_instance();
+                let got1 = if ri.terminals.len() < 2 {
+                    0.0
+                } else {
+                    match dreyfus_wagner(&ru, &ri.terminals) {
+                        Some(r) => r.optimal_cost,
+                        None => panic!("terminals disconnected after one bounded pass"),
+                    }
+                };
+                assert!(
+                    (got1 + off1 - opt).abs() < 1e-9,
+                    "one bounded pass at cutoff {} changed the optimum: {opt} -> {got1} + {off1}",
+                    opt + slack
+                );
+                ran += 1;
+
+                // And again, on the graph the first pass left --- the composition
+                // `tighten` actually performs, and the one nothing gated.
+                if ri.terminals.len() < 2 {
+                    continue;
+                }
+                let inst2 = mk(&ru, &ri.terminals);
+                let (rg2, _) = preprocess_bounded(&inst2, &ru, None, opt + slack - off1);
+                let off2 = rg2.offset;
+                let (ri2, ru2) = rg2.to_instance();
+                let got2 = if ri2.terminals.len() < 2 {
+                    0.0
+                } else {
+                    match dreyfus_wagner(&ru2, &ri2.terminals) {
+                        Some(r) => r.optimal_cost,
+                        None => panic!("terminals disconnected after two bounded passes"),
+                    }
+                };
+                assert!(
+                    (got2 + off2 + off1 - opt).abs() < 1e-9,
+                    "two bounded passes at cutoff {} changed the optimum: {opt} -> {got2} + {off2} + {off1}",
+                    opt + slack
+                );
+                twice += 1;
+            }
+        }
+        assert!(
+            ran > 2000 && twice > 50,
+            "only {ran} single and {twice} double bounded fixpoints were exercised"
+        );
+    }
+
     #[test]
     fn the_whole_pipeline_never_changes_the_optimum() {
         use crate::graph::algorithms::dreyfus_wagner;

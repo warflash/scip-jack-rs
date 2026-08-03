@@ -368,29 +368,51 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         // branch-and-cut keeps its share until it has been seen to lose the
         // comparison.
         //
-        // # What it costs when it is wrong
+        // # What it costs when it is wrong, and the stage the seconds may not go to
         //
-        // A second pass whose reduction *would* have fired under the better
-        // cutoff loses its chance. The trade is measured rather than assumed: the
-        // stage that gains the seconds is the one whose rate was measured on this
-        // instance in this call, and the stage that loses them measured zero.
+        // The first version handed the freed seconds to the *whole* of `finish`,
+        // and it measured **negative**: 115 vs 111 and 114 vs 113 paired on
+        // Track 2, losing instance090, instance092 and instance171 in both runs.
+        // The mechanism is exact and is worth recording rather than smoothing
+        // over. Those are wide instances whose width attempt cannot finish, and
+        // `try_decomposition` takes whatever window it is given — so removing the
+        // reservation did not give the seconds to the stage that was paying, it
+        // gave them to the one stage on those instances that provably cannot use
+        // them, and took them from the branch-and-cut that §95's memo exists to
+        // feed.
+        //
+        // So the freed seconds go to the branch-and-cut and to nothing else.
+        // Every other stage keeps exactly the window it had: the width attempt,
+        // which has produced nothing on this instance and is entitled to its
+        // first increment and no more, still gets the reserved window it would
+        // have had, and the goal-directed search likewise. Nothing is worse off
+        // than under the control and one measured-positive stage is better off,
+        // which is the only shape of reallocation this pipeline has ever been
+        // able to keep.
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let pass_deadline = if pass == 0 && reduction_moved {
+        // What every stage before the branch-and-cut gets: unchanged.
+        let stage_deadline = if pass == 0 {
             Instant::now() + remaining.mul_f64(0.5)
         } else {
             deadline
         };
+        // What the branch-and-cut gets: the rest of the budget as well, when the
+        // reduction has measured that a successor pass has nothing to do with it.
+        let pass_deadline =
+            if pass == 0 && reduction_moved { stage_deadline } else { deadline };
         if config.verbose {
             eprintln!(
-                "[time] pass {pass}: tighten {}took {:.2}s and {}, search gets {:.2}s, \
-                 elapsed {:.2}s",
+                "[time] pass {pass}: tighten {}took {:.2}s and {}; stages get {:.2}s, \
+                 the branch-and-cut {:.2}s; elapsed {:.2}s",
                 if reused_here { "(reused fixpoint) " } else { "" },
                 tighten_secs,
                 if reduction_moved {
                     "moved the graph, so a window is reserved for a second pass"
                 } else {
-                    "returned the graph it was handed, so no window is reserved"
+                    "returned the graph it was handed, so the reserved window goes to \
+                     the branch-and-cut"
                 },
+                stage_deadline.saturating_duration_since(Instant::now()).as_secs_f64(),
                 pass_deadline.saturating_duration_since(Instant::now()).as_secs_f64(),
                 start.elapsed().as_secs_f64(),
             );
@@ -401,6 +423,7 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             reduced,
             &config,
             start,
+            stage_deadline,
             pass_deadline,
             &mut search_cache,
             &mut sep_cache,
@@ -633,7 +656,14 @@ fn finish(
     reduced: crate::root_reduce::Reduced,
     config: &SolverConfig,
     start: Instant,
+    // What every stage before the branch-and-cut gets. Unchanged from the
+    // control in every case.
     deadline: Instant,
+    // What the branch-and-cut gets. Equal to `deadline` unless the pass's
+    // reduction measured that no successor pass has anything to do, in which
+    // case it is the solver's own deadline: the seconds a second reduction would
+    // have had go to the branch-and-cut and to no other stage. See the caller.
+    bnc_deadline: Instant,
     search_cache: &mut Option<SteinerSearch>,
     sep_cache: &mut Option<RootSeparation>,
     carried_lower_bound: &mut Cost,
@@ -937,7 +967,7 @@ fn finish(
     let root_lower_bound = search_lower_bound;
     let directed = DirectedGraph::from_undirected(&work_graph);
     let mut solver = BranchAndCutSolver::new(directed.clone(), root, terminals.clone());
-    let remaining = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+    let remaining = bnc_deadline.saturating_duration_since(Instant::now()).as_secs_f64();
     solver.config = SolverConfig { time_limit_secs: remaining, ..config.clone() };
     solver.seed_bounds(root_lower_bound, root_upper_bound);
     // The incumbent's arc numbering matches `work_graph` only when it survived
@@ -1770,7 +1800,7 @@ fn run_search(
         }
         // The elimination is applied whatever happens next - it is free and it
         // only shrinks the state space.
-        if smaller.edges.len() < before && std::env::var("SJ_NO_RESTRICT").is_err() {
+        if smaller.edges.len() < before {
             search.restrict_to(&smaller);
         }
         // Offer the layer only when the object the search actually consumes got

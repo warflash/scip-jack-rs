@@ -4910,3 +4910,279 @@ structure with a half-budget split**, which at a thousand seconds is certainly t
 wrong shape. Nothing in this repository currently measures the matrix at more than
 one time limit, and until it does, every proved-count here is a claim about five
 seconds and not about the solver.
+
+## 2026-08-03 (fifteenth round): the budget was the only thing nobody had varied
+
+### 99. The control, and what was frozen
+
+`tmp/r15/control.exe` is HEAD (`b686415`), built `--release --all-targets` before
+any algorithmic change and never rebuilt. 189 library tests at the start, **194**
+at the end; `cargo check --all-targets` clean; every binary builds.
+
+The control's own Track 2 matrix, taken first and at **three** budgets rather
+than one — which is the whole of item 0 and, as it turned out, the whole of the
+round:
+
+| slice | 1 s | 5 s | 30 s |
+|---|---|---|---|
+| PACE Track 2 [1..200], 8-way, unpaired | 80/200 | 114/200 | 146/200 |
+| wrong under `Optimal` | 0 | 0 | **1** |
+
+Monotone on both adjacent pairs: no instance proved at 1 s is unproved at 5 s,
+and none proved at 5 s is unproved at 30 s. `benchmarks/budget_matrix.sh` writes
+the matrix and checks that; `benchmarks/budget_gate.sh` checks it across a
+control/candidate pair together with the property that matters more — *no change
+may be non-negative at 5 s while negative at 1 s or 30 s* — and exits non-zero on
+a violation.
+
+### 100. Item 0's first result: the solver has a wrong answer, and it is invisible at five seconds
+
+**PACE Track 2 instance154, at a 30-second limit, HEAD reports
+`Status: Optimal`, `Primal bound: 6001785`, `Dual bound: 6001785`,
+`Gap: 0.0000%`, `Verified: true`. The reference optimum is 6001782.**
+
+It reproduces 3 times out of 3. It is not a tolerance artefact: the two bounds
+are equal to the unit and the claimed value is three units above a tree the same
+binary finds at other budgets.
+
+The budget sweep is the shape of the defect:
+
+| limit | 10 s | 15 s | 20 s | 25 s | 30 s | 40 s | 60 s | 90 s | 120 s |
+|---|---|---|---|---|---|---|---|---|---|
+| reported | 6001782 ok | unproved | **6001785** (1 of 3) | 6001782 ok | **6001785** (3 of 3) | 6001782 ok | 6001782 ok | 6001782 ok | 6001782 ok |
+
+So it is not monotone in the budget, it is not present at the budget every number
+in this repository was measured at, and no amount of five-second testing would
+ever have found it. That is the argument for item 0 stated as a fact rather than
+as a principle.
+
+**What it is not.** Each of the following was disabled by hand on a
+control-equivalent build and the wrong answer *persisted*, two runs each:
+
+- `search.restrict_to` — the certificate loop's restriction of the running
+  search to the surviving edges;
+- the strengthened LP arc fixing built from `cert.arc_dual`;
+- `search.add_packing` — installing the LP-derived packing as a potential layer;
+- `bound_reduce::bound_reductions` — the region bound, the only *cutoff-driven*
+  rule inside `preprocess_bounded`.
+
+So the whole of `run_search`'s certificate machinery is exonerated, and so is the
+one bound-based classical rule. The top-level classical reduction is exonerated
+by determinism: it takes 0.06 s, is identical at every budget, and at ten seconds
+the answer is right.
+
+**Where it is.** Inside `root_reduce::tighten`, and the discriminating trace is
+the second round:
+
+```text
+t = 10 s (right):  round 1 kill 107n/283e ... after 2 rounds |V|=532 |E|=1015 |R|=60 offset=0.0
+t = 30 s (wrong):  round 1 kill 107n/286e ... after 2 rounds |V|=515 |E|=979  |R|=59 offset=300063.0
+```
+
+At 30 s the exact recombination finds a tree of 5,801,739 where at 10 s the loop
+carries 5,801,740; three more edges die; and the classical rules then *contract*
+300,063 of cost and merge a terminal away. The true optimum on that scale is
+5,801,736, so a cutoff of 5,801,739 must preserve it and does not. The invariant
+that fails is the one this repository already names — `reduced optimum + offset =
+original optimum` — and it fails on a real instance while
+`a_loose_cutoff_still_leaves_the_optimum_in_the_graph` passes on four hundred
+random ones.
+
+**This is not fixed.** It is reproduced, bisected to a single stage by
+experiment, and recorded. The remaining step is to identify which of the
+structural rules in `preprocess_bounded` — degree, blocks, nearest-vertex,
+bottleneck, or the star test — is unsound on a graph that a reduced-cost
+elimination has already shrunk, which is exactly the regime §70 warns about and
+which none of their gates exercise. A speculative repair was deliberately not
+attempted: the round has a reproduction and a bisection, and inventing a fix
+without the rule in hand is how §61's two wrong repairs happened.
+
+### 101. Item 0's second result: the time limit is not respected, and one overrun grows with the budget
+
+| instance | 1 s limit | 5 s limit | 30 s limit |
+|---|---|---|---|
+| instance079 | 93.0 s | 97.4 s | 98.2 s |
+| instance198 | 16.8 s | 16.2 s | **at least 2335 s** (stopped by hand) |
+| instance191 | 23.6 s | 22.3 s | 41.6 s |
+| instance158 | — | — | 33.9 s |
+
+Two different faults. instance079 (16,808 terminals) takes about ninety-five
+seconds *whatever* it is given, so some stage of the classical reduction does not
+consult the deadline at all; the overrun is a constant, not a fraction.
+instance198 is worse and is the one that matters: at one and five seconds it
+overruns by sixteen seconds, and at thirty seconds it had consumed **2,335
+seconds** — 78 times its limit — when it was killed to let the matrix finish. Its
+row in `tmp/r15/bm/ctl-t2@30s.csv` therefore carries an empty status and is
+counted neither as proved nor as wrong; it is counted as stopped, and saying so
+is the point.
+
+Under PACE's own rules either of these is a disqualification rather than a slow
+instance, and neither is visible in a proved-count. Both are visible the moment
+the matrix is taken at more than one limit.
+
+### 102. Item 1: the feedback, and the scale discipline it needed first
+
+The loop item 1 asks for is *primal -> reduction -> dual -> primal*. Two of its
+edges did not exist and a third was wired to the wrong scale.
+
+**What the pipeline was doing.** On PACE instance094 at five seconds:
+
+```text
+pass 0  tighten 2.23 s  kill 0n/0e   LB 102,550,329  UB 104,995,895
+pass 0  B&C     1.53 s  dual -> 104,033,839
+pass 1  tighten 0.75 s  kill 0n/0e   LB 102,516,601  <- re-derived, and *lower*
+pass 1  B&C     0.49 s  dual -> 103,680,514
+```
+
+No pass ever wrote its dual bound down, so the second pass re-derived its own
+ascent from scratch, got a number 1.5 million *below* what the first pass had
+already proved, and seeded its branch-and-cut with the weaker one. The reduction
+in between ran at a gap of 2.4 % and deleted nothing, which is §50's thesis read
+backwards: the reduction is starved because nothing hands it the bound that has
+already been proved.
+
+**The three changes.**
+
+1. *The branch-and-cut's dual becomes the next pass's `initial_lower_bound`.*
+
+   > **Proposition.** Let `U` be the cutoff `work_graph` was reduced under and let
+   > `U` be *witnessed*. Then `dual <= OPT(work_graph)`.
+   >
+   > *Proof.* The branch-and-cut runs on `work_graph` minus arcs its own
+   > reduced-cost fixing proved absent from every tree of cost `< U`; call that
+   > `R`. Either `OPT(work_graph) < U`, and an optimal tree survives, so
+   > `OPT(R) = OPT(work_graph)` and `dual <= stats.dual_bound <= OPT(R)`; or
+   > `OPT(work_graph) >= U`, and a witnessed `U` exhibits a tree of that cost, so
+   > `OPT(work_graph) = U` and `dual <= primal <= U`. ∎
+
+   The witness hypothesis is not decoration and the bound is simply not carried
+   without it: `primal` is then the branch-and-cut's own tree, which lives in `R`
+   and may cost more than `U`.
+
+2. *A tree found late becomes the next reduction's `initial_witness`.* Only the
+   branch-and-cut's own solution may travel. A `Reduced`'s own witness is stated
+   on an *ancestor* graph, and the contraction lemma lifts a tree of a descendant
+   to an ancestor and never the other way, so forwarding it would assert that the
+   shrunken graph attains a bound whose trees the eliminations may have removed —
+   §61 exactly. The branch-and-cut's solution is a tree of `work_graph` itself,
+   which is precisely the graph the next pass tightens. The arc-to-edge map is
+   `a / 2` and is not trusted: the witness is re-verified against the graph's own
+   edge list and its own terminals, and discarded unless the recomputed cost is
+   the claimed one.
+
+3. *One place owns the scale.* `carried_lower_bound` used to be rebased **twice**
+   — the hypergraphic certificate wrote a bound stated for `reduced.graph` and the
+   caller then subtracted `offset` from it again — while `finish` compared a bound
+   on one graph's scale against a bound on another's. The first only lost
+   strength; the second is the direction that can over-claim, and it was reachable
+   exactly when a later pass contracted more than an earlier one. The rebase now
+   happens once, at entry to `finish`, with its proposition written beside it.
+
+**And the offset that was charged twice.** `Reduced::as_identity` is new and is a
+straight correctness repair. A `Reduced` is stated for the graph `tighten` was
+*handed*; a caller that carries `reduced.graph` forward has already added
+`offset` to its own running total, so reusing the struct unchanged charges it
+again — the pass reports `primal + offset` and the caller adds its accumulated
+offset on top. The merge then keeps the smaller primal, so the primal stays
+right, and clamps the dual to it, which can turn an inflated dual into a proof
+that was never made.
+
+> **Proposition.** `as_identity` preserves both invariants. *Proof.* No bound is
+> touched, so every bound is still stated for `graph`. The witness invariant is
+> `upper_bound + offset == w.cost + w.offset`, and subtracting the same quantity
+> from `offset` and from `w.offset` preserves it. ∎
+
+It is latent rather than live on this benchmark: `tighten`'s own offset measures
+**zero on every PACE instance sampled**, because `preprocess_bounded` runs only
+after a round that killed something and the first round kills nothing there.
+Latent is not a reason to leave it.
+
+### 103. Item 2: the half-budget split becomes evidence-driven
+
+`tighten` costs 2.1–2.2 s of five on the wide instances and reports `kill 0n/0e`.
+The stage after it, on those same instances, moves the dual bound at about a
+million units a second. The pipeline was allocating by position.
+
+Half of pass 0's window is held back for pass 1, and pass 1 differs from pass 0
+in exactly one respect: it hands the reduction a better cutoff. So the
+reservation buys one thing — a second reduction under a tighter incumbent — and a
+tightening that returned *the graph it was handed*, with no vertex removed, no
+edge removed and nothing contracted, has just measured that the reduction is not
+the stage that is paying here.
+
+The rule is therefore: **pass 0 reserves half its window for a successor only
+when its own reduction moved the graph.**
+
+It is budget-invariant by inspection. The condition is "the reduction changed
+nothing", a fact about the graph and the reduction operator; it fires identically
+at one second and at a thousand, and it is self-correcting in the direction §98
+requires — a reduction that *is* working keeps its successor's window, exactly as
+the branch-and-cut keeps its share until it has been seen to lose the comparison.
+It is a refusal and cannot change the answer of an attempt that ran.
+
+Measured on instance094 at five seconds, control against candidate:
+
+| | control | candidate |
+|---|---|---|
+| branch-and-cut calls | 2 (1.53 s + 0.49 s) | **1 (2.76 s)** |
+| LP solves | 32 + 13 | **42** |
+| model builds | 2 | **1** |
+| dual (reduced scale) | 104,033,839 | **104,163,474** |
+| primal | 164,381,477 | **164,211,574** |
+| gap | 0.442 % | **0.155 %** |
+
+Both bounds improve, and the primal improves *because* §98's reading of the
+relaxation's primal point lives inside the node that solves the LP — so more LP
+solves is directly more readings. That is the composition item 1 asked for,
+arriving through item 2's door.
+
+### 104. The gates, and four generators that proved nothing
+
+194 library tests, up from 189. What each new one actually covers:
+
+- `a_tree_becomes_a_witness_of_the_graph_it_is_a_tree_of` — 400 graphs; a
+  spanning tree round-trips, a wrong claimed value is refused, an arc set that
+  does not span the terminals is refused, and the reverse orientation names the
+  same edges. Coverage asserted on all three arms.
+- `the_branch_and_cut_carries_a_bound_no_larger_than_the_optimum` — the
+  proposition of §102, gated **after the classical fixpoint** as §70 requires:
+  tighten under a cutoff, run the branch-and-cut on what it leaves, compose the
+  dual exactly as `finish` does, check against Dreyfus-Wagner. Three cutoffs per
+  instance including a deliberately loose one, because a tight cutoff cannot
+  catch a bound-based rule being wrong. Asserts 300+ compositions of which 100+
+  ran the branch-and-cut and 100+ had a witnessed cutoff.
+- `restating_a_reduction_for_its_own_graph_preserves_every_claim` — `as_identity`
+  at non-zero offsets, on `Reduced` values with real witnesses, asserting that
+  both the witnessed and the unwitnessed answer are exercised.
+- two end-to-end regressions on the reporting path at several budgets.
+
+**The negative result worth recording is about the gates and not the code.** The
+first version of the pipeline gate asserted a counter — that the writeback it
+tests had actually executed — and it **failed**, on four different generators in
+turn. Every one of them is closed before `finish` is entered at all:
+
+| generator | why it never reaches the writeback |
+|---|---|
+| small dense random graphs | Dreyfus-Wagner solves them inside `solve` |
+| 5x9 grids, random costs | the reduction proves them at the root |
+| 6x20 grids, unit costs | the classical reduction takes 120 vertices and 43 terminals to 20 and 9, and Dreyfus-Wagner finishes them |
+| 6x12 grids, 70 % terminals | the classical reduction contracts them to **one** vertex |
+| dense all-terminal graphs (`OPT = MST` in closed form) | the relaxation is the spanning-tree polytope, so the ascent closes them |
+
+That is not an accident of five choices. The branch-and-cut is reached only when
+Dreyfus-Wagner (24 terminals), the goal-directed search (64) and the width DP (a
+bag of `MAX_BAG - 2 = 13`) have *all* refused — and every exact oracle this crate
+has is bounded by one of those same three quantities. **An instance with an
+independently computable optimum is, more or less by definition, an instance the
+pipeline closes early.** The consequence is structural: pipeline-level gates on
+generated instances cannot cover the late stages, and the late stages have to be
+gated at the level of the proposition instead. Both were done, and the end-to-end
+gate now states in its own doc comment what it does *not* cover rather than
+implying that it does.
+
+One further measurement error was caught the same way and is recorded because the
+cost was real: the first oracle used `decompose(&g, 12)` on a grid of treewidth
+eight. The ordering is heuristic, so the generous cap was often *taken*, and
+`B(13) = 27,644,437` signatures a bag made the oracle cost **620 CPU-seconds**
+inside a unit test. A cap about four above the true width is the band where the
+ordering succeeds and the table stays small.
