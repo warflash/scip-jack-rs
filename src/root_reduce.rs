@@ -307,6 +307,51 @@ impl Reduced {
         ((c - w.cost).abs() < 1e-6).then_some(c + w.offset)
     }
 
+    /// The same reduction, restated for its **own** graph.
+    ///
+    /// # The double charge this removes
+    ///
+    /// A `Reduced` is stated for the graph [`tighten`] was *handed*: `offset` is
+    /// the cost contracted on the way to `graph`, and every bound in the struct
+    /// is `graph`-scale. A caller that carries `graph` forward and hands it to a
+    /// later pass has already added `offset` to its own running total — the graph
+    /// it is now handing in *is* `graph`, and the offset from a graph to itself
+    /// is zero. Reusing the struct unchanged therefore charges `offset` twice:
+    /// the pass reports `primal + offset` and the caller adds its accumulated
+    /// `offset` on top.
+    ///
+    /// The consequence is not merely a loose number. Both bounds are inflated by
+    /// the same amount, the caller's merge keeps the *smaller* primal — so the
+    /// primal stays right — and then clamps the dual to it, which can turn an
+    /// inflated dual into a proof of optimality that was never made. It is
+    /// latent rather than live on the current benchmark, where `tighten`'s own
+    /// offset measures zero on every PACE instance sampled, because the classical
+    /// preprocessing has already done every contraction available before
+    /// `tighten` runs. Latent is not a reason to leave it.
+    ///
+    /// > **Proposition.** `as_identity` preserves both invariants of the struct.
+    /// >
+    /// > *Proof.* (i) Every bound is stated for `graph`, and no bound is touched.
+    /// > (ii) The witness invariant is `upper_bound + offset == w.cost +
+    /// > w.offset`; subtracting the same `offset` from the left side's `offset`
+    /// > and the right side's `w.offset` preserves the equation. Hence
+    /// > `verify_witness` and `upper_bound_is_witnessed` answer exactly as
+    /// > before. ∎
+    ///
+    /// `witness.offset` may become negative, which is arithmetically fine and
+    /// semantically honest: it records how much of the accumulated contraction
+    /// had *already* been charged when the witness was taken, now measured from a
+    /// later origin.
+    pub fn as_identity(&self) -> Reduced {
+        let shift = self.offset;
+        let mut out = self.clone();
+        out.offset = 0.0;
+        if let Some(w) = out.witness.as_mut() {
+            w.offset -= shift;
+        }
+        out
+    }
+
     /// Whether `upper_bound + offset` is exactly what the witness attains.
     pub fn upper_bound_is_witnessed(&self) -> bool {
         self.verify_witness()
@@ -1220,7 +1265,7 @@ pub fn as_instance(graph: &UndirectedGraph, terminals: &[NodeId]) -> SteinerInst
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn line_instance() -> (UndirectedGraph, Vec<NodeId>) {
@@ -1298,6 +1343,114 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// [`Reduced::as_identity`] preserves every claim the struct makes, at a
+    /// **non-zero** offset.
+    ///
+    /// # Why the `Reduced` is built rather than produced
+    ///
+    /// The obvious gate — reduce a contractible instance and restate the result —
+    /// cannot reach a non-zero offset at all, and finding that out is worth
+    /// recording. `tighten` runs `preprocess_bounded` only *after* a round that
+    /// killed something: a round that proves optimality, and a round that kills
+    /// nothing, both `break` before the contraction step. On instances small
+    /// enough for a test the first round proves optimality, and on the PACE
+    /// instances measured the first round kills nothing, so `offset` is zero in
+    /// both regimes — 0 of 300 constructed reductions contracted, and every PACE
+    /// instance sampled reports `offset=0.0`. That is exactly why the double
+    /// charge was latent rather than live, and it is also why a gate built on the
+    /// pipeline would assert nothing.
+    ///
+    /// So the proposition is gated on its own terms: `Reduced` values with
+    /// randomly chosen non-zero offsets and real witnesses, checked for the two
+    /// invariants the proposition claims to preserve.
+    #[test]
+    fn restating_a_reduction_for_its_own_graph_preserves_every_claim() {
+        let mut seed = 0x0DDB_A11B_ADC0_FFEEu64;
+        let mut rng = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let (mut witnessed, mut unwitnessed, mut checked) = (0, 0, 0);
+        for _ in 0..400 {
+            let n = 4 + (rng() % 6) as u32;
+            let mut g = UndirectedGraph::new(n);
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = v <= 2 + (rng() % 2) as u32;
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            for v in 1..n {
+                g.add_edge(v, v + 1, 1.0 + (rng() % 9) as f64);
+            }
+            // The path spans every terminal, so it is a genuine witness.
+            let edges: Vec<u32> = (0..g.edges.len() as u32).collect();
+            let cost: Cost = g.edges.iter().map(|e| e.cost).sum();
+            let offset = (rng() % 500) as Cost + 1.0;
+            let w_offset = (rng() % 500) as Cost;
+            // Honest half the time, a value the witness does not attain the other
+            // half: `as_identity` must preserve *whichever* answer holds.
+            let honest = rng() % 2 == 0;
+            let upper_bound =
+                if honest { cost + w_offset - offset } else { cost + w_offset - offset + 7.0 };
+            let out = Reduced {
+                graph: g.clone(),
+                terminals: terminals.clone(),
+                root: terminals[0],
+                lower_bound: (rng() % 100) as Cost,
+                upper_bound,
+                incumbent_arcs: None,
+                witness: Some(Witness {
+                    graph: g.clone(),
+                    terminals: terminals.clone(),
+                    edges,
+                    cost,
+                    offset: w_offset,
+                }),
+                certificate: None,
+                offset,
+                rounds: 1,
+                converged: true,
+            };
+            assert_eq!(out.upper_bound_is_witnessed(), honest, "the fixture is wrong");
+            if honest {
+                witnessed += 1;
+            } else {
+                unwitnessed += 1;
+            }
+
+            let id = out.as_identity();
+            assert!(id.offset.abs() < 1e-12, "offset not zeroed");
+            assert_eq!(id.lower_bound.to_bits(), out.lower_bound.to_bits());
+            assert_eq!(id.upper_bound.to_bits(), out.upper_bound.to_bits());
+            assert_eq!(id.graph.edges.len(), out.graph.edges.len());
+            // The claim that matters.
+            assert_eq!(
+                id.upper_bound_is_witnessed(),
+                out.upper_bound_is_witnessed(),
+                "as_identity changed whether the bound is witnessed at offset {offset}"
+            );
+            // And the value the witness proves attainable moves by exactly the
+            // offset that was removed, which is what makes the caller's own
+            // running total right.
+            let a = out.verify_witness().unwrap();
+            let b = id.verify_witness().unwrap();
+            assert!(
+                (a - offset - b).abs() < 1e-9,
+                "witness value {a} - offset {offset} != restated {b}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 350 && witnessed > 100 && unwitnessed > 100,
+            "{checked} restatements, {witnessed} witnessed and {unwitnessed} not —              the gate did not exercise both answers"
+        );
     }
 
     /// The invariant the whole pipeline rests on, under a **loose** cutoff.
@@ -1604,7 +1757,7 @@ mod tests {
     /// the instance to fewer than two terminals and returns `trivial_result`. A
     /// grid has minimum degree two everywhere, no degree-one chains to contract,
     /// and more terminals than `dw_is_affordable` admits.
-    fn grid_instance(rng: &mut dyn FnMut() -> u64) -> Option<(SteinerInstance, Cost)> {
+    pub(crate) fn grid_instance(rng: &mut dyn FnMut() -> u64) -> Option<(SteinerInstance, Cost)> {
         use crate::graph::algorithms::steiner_td::reference::{raw_dp, RawCensus};
         use crate::graph::algorithms::tree_decomposition::decompose;
         let rows = 5 + (rng() % 2) as u32;

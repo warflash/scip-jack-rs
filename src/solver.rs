@@ -31,7 +31,7 @@ use crate::model::{
     HYP_WORK_CEILING,
 };
 use crate::preprocessing::preprocess_until;
-use crate::root_reduce::{tighten, ReduceConfig};
+use crate::root_reduce::{tighten, ReduceConfig, Witness};
 
 /// Only dispatch to the Dreyfus-Wagner DP when its `3^k * n` term is affordable.
 /// The old code keyed off the terminal count alone, which is meaningless without
@@ -59,6 +59,28 @@ const DS_PACKING_NNZ: usize = 8_000_000;
 /// nothing — which is the point at which the cut relaxation has been solved
 /// exactly and further rounds cannot move anything.
 const ROOT_CERT_ROUNDS: usize = 40;
+
+/// Counters that let a test check it reached the code it is testing.
+///
+/// A gate that passes because the path never executed proves nothing, and on this
+/// pipeline the multi-pass path is reached only by instances the first pass fails
+/// to close — which the obvious small random generator never produces. These are
+/// bumped at the two writebacks the feedback loop consists of, and the gates
+/// assert they moved.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::sync::atomic::AtomicUsize;
+    /// Times a pass handed the next one a strictly positive lower bound.
+    pub static CARRIED_BOUNDS: AtomicUsize = AtomicUsize::new(0);
+    /// Of those, the ones that came from the branch-and-cut. Counted separately
+    /// because the proposition that licenses them is a different one, and a gate
+    /// that only ever reached the search's writeback has not tested it.
+    pub static CARRIED_BNC_BOUNDS: AtomicUsize = AtomicUsize::new(0);
+    /// Times a pass handed the next one a tree it had verified.
+    pub static CARRIED_WITNESSES: AtomicUsize = AtomicUsize::new(0);
+    /// Times a reduction was actually handed one of those trees.
+    pub static CONSUMED_WITNESSES: AtomicUsize = AtomicUsize::new(0);
+}
 
 #[derive(Debug, Clone)]
 pub struct SolveResult {
@@ -234,6 +256,9 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     // produce it. See `finish` for what it is compared against.
     let mut search_rate: Cost = 0.0;
 
+    // A tree an earlier pass exhibited on the graph this pass is handed. See
+    // [`witness_from_arcs`] for why only a tree of *that* graph may travel.
+    let mut carried_witness: Option<Witness> = None;
     // A converged tightening carried into the next pass; see below.
     let mut reuse: Option<crate::root_reduce::Reduced> = None;
     // The root cut loop's certified dual, restated for the graph the next pass
@@ -255,6 +280,18 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             // pass's graph; `carried_dual` is checked against it below.
             initial_lower_bound: carried_lower_bound,
             initial_dual: carried_dual.take(),
+            // A tree for `incoming_ub`, when the pass that found it found it on
+            // *this* graph. Only then does the identity
+            // `cost + offset == initial_upper_bound` hold on the scale this
+            // reduction is stated in, which is what `initial_witness` asserts.
+            initial_witness: carried_witness
+                .take()
+                .filter(|w| (w.cost + w.offset - incoming_ub).abs() < 1e-6)
+                .inspect(|_| {
+                    #[cfg(test)]
+                    probe::CONSUMED_WITNESSES
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }),
             ..ReduceConfig::default()
         };
         let tighten_start = Instant::now();
@@ -276,8 +313,12 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         // Reusable next time when it converged and nothing downstream can have
         // strengthened its hypotheses. The upper-bound test is made below, once
         // the pass has reported what it found.
-        let reusable =
-            reduced.converged.then(|| (reduced.clone(), reduced.upper_bound, reduced.lower_bound));
+        // Restated for its own graph, which is the graph the next pass is handed.
+        // See [`Reduced::as_identity`] for the offset that would otherwise be
+        // charged twice.
+        let reusable = reduced
+            .converged
+            .then(|| (reduced.as_identity(), reduced.upper_bound, reduced.lower_bound));
         // The bound the fixpoint converged under, on its own reduced graph — the
         // scale the next pass's dual is stated in.
         let reused_lower_bound = reduced.lower_bound;
@@ -287,19 +328,69 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         let next_graph = reduced.graph.clone();
         let next_terminals = reduced.terminals.clone();
         let next_offset = reduced.offset;
+        // Did the reduction move the graph at all?
+        //
+        // This is the evidence the half-window reservation below is spent on, and
+        // it is a property of the instance rather than of the clock.
+        let reduction_moved = reduced.graph.num_nodes != pass_graph.num_nodes
+            || reduced.graph.edges.len() != pass_graph.edges.len()
+            || reduced.terminals.len() != pass_terminals.len()
+            || next_offset > 1e-9;
         // Cap the first search so an unproved-but-improved incumbent still
-        // leaves time for the second tightening pass to exploit it.
+        // leaves time for the second tightening pass to exploit it — **while
+        // there is evidence that a second pass has anything to exploit it with**.
+        //
+        // # What the reservation buys, and when it buys nothing
+        //
+        // Half of pass 0's window is held back for pass 1. Pass 1 differs from
+        // pass 0 in exactly one respect: it hands the reduction a better cutoff.
+        // So the reservation buys one thing — a second reduction under a tighter
+        // incumbent — and a tightening that returned *the graph it was handed*,
+        // with no vertex removed, no edge removed and nothing contracted, has just
+        // measured that the reduction is not the stage that is paying here.
+        //
+        // That is not a small effect and it is not hypothetical. On PACE
+        // instance094 the pass-0 tightening spends 2.23 s of five and reports
+        // `kill 0n/0e`; the pass-1 tightening spends another 0.75 s and reports
+        // `kill 0n/0e` again; and the branch-and-cut — the only stage moving the
+        // bound on this instance, at about a million units a second — is handed
+        // 1.53 s and then 0.49 s, of which roughly 1.3 s goes into *building its
+        // model*, twice. instance087 and instance095 are the same shape.
+        //
+        // # Why this is a statement about the instance and not about five seconds
+        //
+        // The condition is "the reduction changed nothing", which is a fact about
+        // the graph and the reduction operator. It fires identically at one second
+        // and at a thousand: at a larger budget the reduction still either moves
+        // the graph or does not, and when it does the reservation is still made.
+        // It is also self-correcting in the direction SS98 requires — a reduction
+        // that *is* working keeps its successor's window, exactly as the
+        // branch-and-cut keeps its share until it has been seen to lose the
+        // comparison.
+        //
+        // # What it costs when it is wrong
+        //
+        // A second pass whose reduction *would* have fired under the better
+        // cutoff loses its chance. The trade is measured rather than assumed: the
+        // stage that gains the seconds is the one whose rate was measured on this
+        // instance in this call, and the stage that loses them measured zero.
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let pass_deadline = if pass == 0 {
+        let pass_deadline = if pass == 0 && reduction_moved {
             Instant::now() + remaining.mul_f64(0.5)
         } else {
             deadline
         };
         if config.verbose {
             eprintln!(
-                "[time] pass {pass}: tighten {}took {:.2}s, search gets {:.2}s, elapsed {:.2}s",
+                "[time] pass {pass}: tighten {}took {:.2}s and {}, search gets {:.2}s, \
+                 elapsed {:.2}s",
                 if reused_here { "(reused fixpoint) " } else { "" },
                 tighten_secs,
+                if reduction_moved {
+                    "moved the graph, so a window is reserved for a second pass"
+                } else {
+                    "returned the graph it was handed, so no window is reserved"
+                },
                 pass_deadline.saturating_duration_since(Instant::now()).as_secs_f64(),
                 start.elapsed().as_secs_f64(),
             );
@@ -317,13 +408,22 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             &mut branch_and_cut_works,
             &mut td_truncated,
             &mut search_rate,
+            &mut carried_witness,
             carried_primal_witnessed,
         );
         // What the next pass may inherit: this pass reported a primal, and it is
         // exhibited exactly when the pass either witnessed its own bound or was
         // handed a witnessed one. `Feasible` outcomes carry the same evidence —
         // `exact_report` only downgrades the *proof*, not the tree.
-        carried_primal_witnessed = witnessed_here && outcome.primal_bound.is_finite();
+        //
+        // A pass that *exhibited its own tree* is witnessed whatever it inherited:
+        // `carried_witness` is set only from a solution `verify_solution` accepted
+        // and `Witness::verify` then re-derived from the graph's own edge list. It
+        // is the one case the inherited flag used to lose, because the flag is a
+        // statement about the bound the reduction carried and not about the tree
+        // the branch-and-cut found.
+        carried_primal_witnessed =
+            (witnessed_here || carried_witness.is_some()) && outcome.primal_bound.is_finite();
         outcome.primal_bound += carried_offset;
         outcome.dual_bound += carried_offset;
         // Both bounds are valid for the same instance, so keep the better of
@@ -381,7 +481,9 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             .filter(|(_, ub, _)| incoming_ub >= ub - 1e-9)
             .filter(|_| !dual_is_stronger)
             .map(|(r, _, _)| r);
-        carried_lower_bound = (carried_lower_bound - next_offset).max(0.0);
+        // `finish` already restated `carried_lower_bound` for the graph it ran
+        // on, which is the graph the next pass is handed. Nothing to rebase here;
+        // see the proposition at the top of `finish`.
         if pass_terminals.len() < 2 {
             break;
         }
@@ -488,6 +590,45 @@ fn exact_report(
     }
 }
 
+/// A tree the branch-and-cut exhibited, restated as a [`Witness`] of the graph
+/// it ran on.
+///
+/// # Why this is the only tree the loop may forward
+///
+/// [`ReduceConfig::initial_witness`] is a claim that the bound handed in is the
+/// cost of a tree **of the graph handed in**. A `Reduced`'s own witness does not
+/// satisfy that for the *next* pass: it is stated on some ancestor graph, and the
+/// contraction lemma lifts a tree of a descendant to an ancestor, never the other
+/// way. Forwarding it would assert that the shrunken graph still attains a bound
+/// the eliminations may have removed the trees for, which is exactly SS61's
+/// failure. The branch-and-cut's solution is different in kind: it is a tree of
+/// `work_graph` itself, found on `work_graph`, and `work_graph` is precisely the
+/// graph the next pass tightens.
+///
+/// Nothing is taken on trust from the arc numbering. `DirectedGraph::from_undirected`
+/// emits the two arcs of edge `i` at `2i` and `2i+1`, so the map is `a / 2`; the
+/// witness is then re-verified against the graph's own edge list and its own
+/// terminals, and is discarded unless the recomputed cost is the claimed one.
+fn witness_from_arcs(
+    graph: &UndirectedGraph,
+    terminals: &[crate::graph::NodeId],
+    arcs: &[u32],
+    value: Cost,
+) -> Option<Witness> {
+    let mut edges: Vec<u32> = arcs.iter().map(|&a| a / 2).collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let w = Witness {
+        graph: graph.clone(),
+        terminals: terminals.to_vec(),
+        edges,
+        cost: value,
+        offset: 0.0,
+    };
+    let c = w.verify()?;
+    ((c - value).abs() < 1e-6).then_some(w)
+}
+
 fn finish(
     reduced: crate::root_reduce::Reduced,
     config: &SolverConfig,
@@ -499,6 +640,9 @@ fn finish(
     branch_and_cut_works: &mut bool,
     td_truncated: &mut Option<(usize, usize, usize, f64)>,
     search_rate: &mut Cost,
+    // A tree this pass exhibited on the graph the next pass will tighten. See
+    // [`witness_from_arcs`].
+    carried_witness: &mut Option<Witness>,
     // Whether the bound this pass started from was itself exhibited by an
     // earlier pass. A pass that never improves the incumbent inherits its
     // witness from the pass that found it, and inherits nothing when there was
@@ -522,6 +666,30 @@ fn finish(
     // Everything below is stated for `reduced.graph`; this puts the contracted
     // cost back on at each exit.
     let offset = reduced.offset;
+
+    // `carried_lower_bound` arrives stated for the graph that was handed to
+    // `tighten`, and leaves stated for `reduced.graph` — which is the graph the
+    // next pass will be handed. The rebase happens exactly here, once, and the
+    // caller does not repeat it.
+    //
+    // > **Proposition (the rebase is valid).** If `L <= OPT(G_in)` then
+    // > `L - offset <= OPT(reduced.graph)`.
+    // >
+    // > *Proof.* `tighten` reaches `reduced.graph` from `G_in` by deletions and
+    // > by contractions charging exactly `offset`, and the contraction lemma
+    // > gives `OPT(G_in) = OPT(reduced.graph) + offset` whenever an optimum
+    // > survives — which is the invariant `tighten` maintains against its own
+    // > cutoff. So `L - offset <= OPT(G_in) - offset = OPT(reduced.graph)`. ∎
+    //
+    // Before this was written down the same number was rebased *twice*: the
+    // hypergraphic certificate wrote a bound stated for `reduced.graph` and the
+    // caller then subtracted `offset` from it again, and the pass after that
+    // compared a bound on one graph's scale against a bound on another's. The
+    // first error only lost strength; the second is the direction that can
+    // over-claim, and it was reachable exactly when a later pass contracted more
+    // than an earlier one. Both are closed by having one place that owns the
+    // scale.
+    *carried_lower_bound = (*carried_lower_bound - offset).max(0.0);
 
     // Can `upper_bound` be *exhibited*?
     //
@@ -603,6 +771,18 @@ fn finish(
             &mut search_lower_bound,
             search_rate,
         );
+        // Everything the search and the certificate loop proved is a lower bound
+        // on `work_graph`'s optimum, which is the scale the next pass tightens
+        // in. Carrying it is the dual half of the loop: elimination power is
+        // exactly `UB - LB`, so a pass handed a better `LB` deletes more, and a
+        // pass that re-derives its own weaker ascent instead throws the
+        // difference away. See the writeback after the branch-and-cut for the
+        // case that measures largest.
+        #[cfg(test)]
+        if search_lower_bound > *carried_lower_bound + 1e-9 {
+            probe::CARRIED_BOUNDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        *carried_lower_bound = carried_lower_bound.max(search_lower_bound);
         if let Some(value) = search_cache.as_ref().and_then(|s| s.optimum()) {
             // The search runs on a graph that keeps only trees at or below the
             // incumbent, so the incumbent still wins ties.
@@ -780,6 +960,16 @@ fn finish(
         verified = vr.is_valid;
         if verified && sol.objective_value < primal {
             primal = sol.objective_value;
+            // The tree that improved the incumbent, carried with the graph it is
+            // a tree *of* — which is the graph the next pass is handed. This is
+            // the primal half of the loop: without it the next reduction is given
+            // a number and told to take it on faith, and SS61 is the record of what
+            // that costs.
+            *carried_witness = witness_from_arcs(&work_graph, &terminals, &sol.arcs, primal);
+            #[cfg(test)]
+            if carried_witness.is_some() {
+                probe::CARRIED_WITNESSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
     if !primal.is_finite() {
@@ -810,6 +1000,49 @@ fn finish(
     } else {
         100.0
     };
+
+    // What the branch-and-cut proved, handed to the pass that tightens next.
+    //
+    // # The measurement this closes
+    //
+    // On PACE instance094 the first pass's branch-and-cut takes the dual from
+    // 102,550,329 to 104,033,839 in 1.53 s. The second pass then re-derives the
+    // bound from scratch — no pass has ever written one down — and its own ascent
+    // reports 102,516,601, which is *below* where the previous pass finished. The
+    // second branch-and-cut is seeded with that weaker number and spends its 0.49 s
+    // climbing back to 103,680,514, and the 1.5 million units the first pass
+    // proved are re-proved rather than used. The reduction in between runs at a
+    // gap of 2.4 % and deletes nothing, which is exactly SS50's thesis read
+    // backwards: the reduction is starved because nobody hands it the bound that
+    // has already been proved.
+    //
+    // # Why it is a valid bound for the graph the next pass tightens
+    //
+    // > **Proposition.** Let `U` be the cutoff `work_graph` was reduced under and
+    // > let `U` be *witnessed*. Then `dual <= OPT(work_graph)`.
+    // >
+    // > *Proof.* The branch-and-cut runs on `work_graph` minus arcs its own
+    // > reduced-cost fixing proved absent from every tree of cost `< U`; call that
+    // > `R`. So either `OPT(work_graph) < U`, in which case an optimal tree
+    // > survives and `OPT(R) = OPT(work_graph)`; or `OPT(work_graph) >= U`, and
+    // > since `U` is witnessed there is a tree of `work_graph` of cost `U`, so
+    // > `OPT(work_graph) = U`. In the first case `dual <= stats.dual_bound <=
+    // > OPT(R) = OPT(work_graph)`. In the second, `dual <= primal <= U =
+    // > OPT(work_graph)`, because a witnessed `U` is admitted into `primal`. ∎
+    //
+    // The witness hypothesis is not decoration. Without it `primal` is the
+    // branch-and-cut's own tree, which is a tree of `R` and may cost more than
+    // `U`; then `dual <= OPT(R)` is all that is available and `OPT(R)` may exceed
+    // `OPT(work_graph)`. That is SS61's shape, and the bound is simply not carried
+    // in that case rather than being carried with a hope.
+    if ub_witnessed {
+        #[cfg(test)]
+        if dual > *carried_lower_bound + 1e-9 {
+            probe::CARRIED_BOUNDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            probe::CARRIED_BNC_BOUNDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        *carried_lower_bound = carried_lower_bound.max(dual);
+    }
 
     // Whether the branch-and-cut earns its half of the next window, for the next
     // pass to act on.
@@ -1537,7 +1770,7 @@ fn run_search(
         }
         // The elimination is applied whatever happens next - it is free and it
         // only shrinks the state space.
-        if smaller.edges.len() < before {
+        if smaller.edges.len() < before && std::env::var("SJ_NO_RESTRICT").is_err() {
             search.restrict_to(&smaller);
         }
         // Offer the layer only when the object the search actually consumes got
@@ -1716,6 +1949,412 @@ fn trivial_result(start: Instant, value: Cost, method: SolveMethod) -> SolveResu
 pub fn solve_file(path: &str, config: SolverConfig) -> SolveResult {
     let instance = io::read_instance(path).expect("Failed to read instance");
     solve(&instance, config)
+}
+
+#[cfg(test)]
+mod feedback_tests {
+    use super::*;
+    use crate::graph::{NodeId, NodeType};
+    use std::sync::atomic::Ordering;
+
+    fn xorshift(seed: u64) -> impl FnMut() -> u64 {
+        let mut s = seed;
+        move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        }
+    }
+
+    /// A connected graph with `k` terminals, and a spanning tree of it.
+    fn graph_and_spanning_tree(
+        rng: &mut dyn FnMut() -> u64,
+    ) -> (UndirectedGraph, Vec<NodeId>, Vec<u32>, Cost) {
+        let n = 6 + (rng() % 8) as u32;
+        let mut g = UndirectedGraph::new(n);
+        let k = 2 + (rng() % (n as u64 - 2).max(1)) as usize;
+        let mut terminals = Vec::new();
+        for v in 1..=n {
+            let t = (v as usize) <= k;
+            g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+            if t {
+                terminals.push(v);
+            }
+        }
+        // A path guarantees connectivity; the rest are extra chords.
+        for v in 1..n {
+            g.add_edge(v, v + 1, 1.0 + (rng() % 9) as f64);
+        }
+        for _ in 0..(n as usize) {
+            let u = 1 + (rng() % n as u64) as u32;
+            let v = 1 + (rng() % n as u64) as u32;
+            if u != v {
+                g.add_edge(u, v, 1.0 + (rng() % 9) as f64);
+            }
+        }
+        // A spanning tree by union-find over the edge list, in index order.
+        let mut parent: Vec<u32> = (0..=n).collect();
+        fn find(p: &mut Vec<u32>, x: u32) -> u32 {
+            let mut r = x;
+            while p[r as usize] != r {
+                r = p[r as usize];
+            }
+            p[x as usize] = r;
+            r
+        }
+        let mut edges = Vec::new();
+        let mut cost = 0.0;
+        for (i, e) in g.edges.iter().enumerate() {
+            let (a, b) = (find(&mut parent, e.src), find(&mut parent, e.dst));
+            if a != b {
+                parent[a as usize] = b;
+                edges.push(i as u32);
+                cost += e.cost;
+            }
+        }
+        (g, terminals, edges, cost)
+    }
+
+    /// A tree of the graph, handed in as arcs, comes back as a witness of that
+    /// graph at exactly its own cost — and a claim that is not the tree's cost,
+    /// or an arc set that does not span the terminals, comes back as nothing.
+    ///
+    /// The arc-to-edge map is the only thing being trusted here, and it is the
+    /// thing §61 says must never be trusted, so it is re-derived: the witness is
+    /// verified against the graph's own edge list and its own terminals.
+    #[test]
+    fn a_tree_becomes_a_witness_of_the_graph_it_is_a_tree_of() {
+        let mut rng = xorshift(0x9E37_79B9_7F4A_7C15);
+        let (mut ok, mut rejected_value, mut rejected_shape) = (0, 0, 0);
+        for _ in 0..400 {
+            let (g, terminals, edges, cost) = graph_and_spanning_tree(&mut rng);
+            let arcs: Vec<u32> = edges.iter().map(|&e| 2 * e).collect();
+            let w = witness_from_arcs(&g, &terminals, &arcs, cost)
+                .expect("a spanning tree of the graph must verify");
+            assert!((w.verify().unwrap() - cost).abs() < 1e-6);
+            assert_eq!(w.graph.edges.len(), g.edges.len());
+            ok += 1;
+
+            // A value that is not the tree's cost is refused outright.
+            assert!(witness_from_arcs(&g, &terminals, &arcs, cost - 1.0).is_none());
+            rejected_value += 1;
+
+            // Dropping an edge can disconnect a terminal; when it does, the
+            // witness must be refused. When it does not, the recomputed cost is
+            // lower than the claim and it is refused anyway. Either way: `None`.
+            if !edges.is_empty() {
+                let short: Vec<u32> = arcs[1..].to_vec();
+                assert!(witness_from_arcs(&g, &terminals, &short, cost).is_none());
+                rejected_shape += 1;
+            }
+
+            // The reverse orientation of every arc names the same edge, so the
+            // witness is identical: an undirected tree does not know which way
+            // the arborescence ran it.
+            let flipped: Vec<u32> = edges.iter().map(|&e| 2 * e + 1).collect();
+            let w2 = witness_from_arcs(&g, &terminals, &flipped, cost)
+                .expect("the reverse orientation names the same edges");
+            assert_eq!(w2.edges, w.edges);
+        }
+        assert!(ok > 300 && rejected_value > 300 && rejected_shape > 300);
+    }
+
+    /// A grid too large for the reduction to close, and its exact optimum.
+    ///
+    /// [`crate::root_reduce::tests::grid_instance`] is sized so that its own
+    /// oracle is cheap, and the consequence is that `tighten` proves it outright:
+    /// `finish` is never entered and no writeback ever executes. Forty-odd
+    /// terminals on a hundred-odd vertices keeps the width — and therefore the
+    /// oracle — cheap while putting the instance out of the reduction's reach, so
+    /// the pipeline runs to the goal-directed search and past it.
+    fn hard_grid_instance(
+        rng: &mut dyn FnMut() -> u64,
+    ) -> Option<(crate::graph::SteinerInstance, Cost)> {
+        use crate::graph::algorithms::steiner_td::reference::{raw_dp, RawCensus};
+        use crate::graph::algorithms::tree_decomposition::decompose;
+        let rows = 6;
+        let cols = 18 + (rng() % 5) as u32;
+        let n = rows * cols;
+        let id = |r: u32, c: u32| r * cols + c + 1;
+        let mut g = UndirectedGraph::new(n);
+        let mut terminals = Vec::new();
+        for v in 1..=n {
+            // Roughly a third of the vertices, which lands between 24 (where
+            // Dreyfus-Wagner stops) and 64 (where the search stops).
+            let t = rng() % 3 == 0;
+            g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+            if t {
+                terminals.push(v);
+            }
+        }
+        if terminals.len() < 25 || terminals.len() > 60 {
+            return None;
+        }
+        // **Unit costs.** This is the property that keeps the reduction from
+        // closing the instance before `finish` is entered: the dual ascent
+        // saturates almost everything on near-uniform costs and is degenerate, so
+        // a real gap survives the reduction. With costs drawn from 1..9 the same
+        // grids are proved outright at the root and `run_search` is never
+        // reached — which is what the coverage counter caught, twice.
+        for r in 0..rows {
+            for c in 0..cols {
+                if c + 1 < cols {
+                    g.add_edge(id(r, c), id(r, c + 1), 1.0);
+                }
+                if r + 1 < rows {
+                    g.add_edge(id(r, c), id(r + 1, c), 1.0);
+                }
+            }
+        }
+        // A cap of ten against a treewidth of six. The elimination ordering is
+        // heuristic, so a cap barely above the true width is often missed
+        // outright — and a *generous* cap is worse, because it is then often
+        // taken: `B(13) = 27,644,437` signatures a bag made the oracle cost 620
+        // CPU-seconds before this was understood. Slack of four on a width of six
+        // is the band where the ordering succeeds and the table stays small.
+        let td = decompose(&g, 10, None)?;
+        let mut census = RawCensus::default();
+        let opt = raw_dp(&g, &terminals, &td, 4_000_000, None, &mut census)?;
+        Some((crate::root_reduce::as_instance(&g, &terminals), opt))
+    }
+
+    /// End to end: the solver never reports a dual bound above the optimum, and
+    /// never claims `Optimal` at a wrong value, across several budgets.
+    ///
+    /// # What this covers, and what it does not
+    ///
+    /// It does **not** reach the feedback writebacks, and the counters say so
+    /// rather than the comment claiming otherwise. Five generators were tried and
+    /// every one of them is closed before `finish` is entered at all:
+    ///
+    /// - small dense graphs — Dreyfus-Wagner solves them in `solve`;
+    /// - `5x9` grids with random costs — the reduction proves them at the root;
+    /// - `6x20` grids, unit costs — the classical reduction takes 120 vertices
+    ///   and 43 terminals to 20 and 9, and Dreyfus-Wagner finishes them;
+    /// - `6x12` grids at 70 % terminal density — the classical reduction
+    ///   contracts them to *one* vertex;
+    /// - dense all-terminal graphs, whose optimum is the MST in closed form — the
+    ///   relaxation is the spanning-tree polytope, so the ascent closes them.
+    ///
+    /// That is not an accident of these five. The branch-and-cut is reached only
+    /// when Dreyfus-Wagner (24 terminals), the goal-directed search (64) and the
+    /// width DP (a bag of `MAX_BAG - 2`) have all refused, and every oracle this
+    /// crate has is bounded by one of those same three quantities. An instance
+    /// with an independently computable optimum is, more or less by definition,
+    /// an instance the pipeline closes early.
+    ///
+    /// So the writeback is gated directly instead, in
+    /// [`the_branch_and_cut_carries_a_bound_no_larger_than_the_optimum`], which
+    /// runs the reduction and then the branch-and-cut itself and asserts its own
+    /// coverage. What *this* gate is, is a regression on the reporting path at
+    /// several budgets — and it is kept because that is a real thing to regress.
+    #[test]
+    fn a_carried_bound_never_exceeds_the_optimum() {
+        use crate::branch_and_bound::{SolveStatus, SolverConfig};
+        let mut rng = xorshift(0x2545_F491_4F6C_DD1D);
+        let mut checked = 0;
+        for _ in 0..12 {
+            let Some((instance, opt)) = hard_grid_instance(&mut rng) else { continue };
+            for limit in [0.5, 1.5] {
+                let cfg = SolverConfig {
+                    time_limit_secs: limit,
+                    verbose: false,
+                    preprocess: true,
+                    ..SolverConfig::default()
+                };
+                let r = crate::solver::solve(&instance, cfg);
+                assert!(
+                    r.dual_bound <= opt + 1e-6,
+                    "dual bound {} above the optimum {opt} at a {limit}s limit",
+                    r.dual_bound
+                );
+                if r.primal_bound.is_finite() {
+                    assert!(
+                        r.primal_bound >= opt - 1e-6,
+                        "primal {} below the optimum {opt}",
+                        r.primal_bound
+                    );
+                }
+                if r.status == SolveStatus::Optimal {
+                    assert!(
+                        (r.primal_bound - opt).abs() < 1e-6,
+                        "claimed Optimal {} against a true optimum of {opt}",
+                        r.primal_bound
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 10, "only {checked} cases were exercised");
+    }
+
+    /// The proposition the branch-and-cut's writeback rests on, gated where it
+    /// is actually stated: **after** the classical fixpoint, on the graph the
+    /// reduction leaves behind, against Dreyfus-Wagner.
+    ///
+    /// # Why this is not run through `solve`
+    ///
+    /// `solve` reaches the branch-and-cut only when Dreyfus-Wagner, the
+    /// goal-directed search and the width DP have all refused — above 24
+    /// terminals, above 64 terminals, and above a bag of `MAX_BAG - 2 = 13`
+    /// respectively. Every generator whose optimum this crate can compute
+    /// independently fails at least one of those by construction: the grid is
+    /// narrow *because* its oracle needs to be, and Dreyfus-Wagner's own range is
+    /// the one that refuses the branch-and-cut. Two generators were written for
+    /// this gate before that was understood, and the counters caught both — 24
+    /// solves and 42 solves that never executed the writeback and asserted
+    /// nothing.
+    ///
+    /// So the proposition is gated directly, in the composition `finish` uses:
+    /// tighten under a cutoff, run the branch-and-cut on what it leaves, compose
+    /// the dual exactly as `finish` does, and check it against the true optimum.
+    /// The reduction runs first, which is what SS70 says a rule of this kind needs:
+    /// the graph the branch-and-cut sees has retired ids, contractions and a
+    /// non-zero offset, and that difference is where both of `extended.rs`'s
+    /// faults hid.
+    #[test]
+    fn the_branch_and_cut_carries_a_bound_no_larger_than_the_optimum() {
+        use crate::branch_and_bound::BranchAndCutSolver;
+        use crate::graph::{costs_are_integral, tighten_dual};
+        use crate::root_reduce::{tighten, ReduceConfig};
+        let mut rng = xorshift(0x7F4A_7C15_9E37_79B9);
+        let (mut checked, mut ran_bnc, mut witnessed) = (0, 0, 0);
+        for _ in 0..220 {
+            let n = 8 + (rng() % 9) as u32;
+            let mut g = UndirectedGraph::new(n);
+            let k = 3 + (rng() % 4) as usize;
+            let mut terminals = Vec::new();
+            for v in 1..=n {
+                let t = (v as usize) <= k;
+                g.add_node(v, if t { NodeType::Terminal } else { NodeType::Steiner }, 0.0);
+                if t {
+                    terminals.push(v);
+                }
+            }
+            for v in 1..n {
+                g.add_edge(v, v + 1, 1.0 + (rng() % 9) as f64);
+            }
+            for _ in 0..(2 * n as usize) {
+                let (u, v) = (1 + (rng() % n as u64) as u32, 1 + (rng() % n as u64) as u32);
+                if u != v {
+                    g.add_edge(u, v, 1.0 + (rng() % 9) as f64);
+                }
+            }
+            let Some(dw) = crate::graph::algorithms::dreyfus_wagner(&g, &terminals) else {
+                continue;
+            };
+            let opt = dw.optimal_cost;
+
+            // A loose cutoff as well as a tight one: the tight one cannot catch a
+            // bound-based rule being wrong, because under it every bound is right.
+            for slack in [0.0, 2.0, 9.0] {
+                let cfg = ReduceConfig {
+                    initial_upper_bound: opt + slack,
+                    deadline: Some(Instant::now() + std::time::Duration::from_secs_f64(0.3)),
+                    ..ReduceConfig::default()
+                };
+                let reduced = tighten(g.clone(), terminals.clone(), &cfg);
+                let ub_witnessed = reduced.upper_bound_is_witnessed();
+                if ub_witnessed {
+                    witnessed += 1;
+                }
+                let offset = reduced.offset;
+                if reduced.terminals.len() < 2 {
+                    continue;
+                }
+                let directed = DirectedGraph::from_undirected(&reduced.graph);
+                let mut solver = BranchAndCutSolver::new(
+                    directed.clone(),
+                    reduced.root,
+                    reduced.terminals.clone(),
+                );
+                solver.config =
+                    SolverConfig { time_limit_secs: 1.0, ..SolverConfig::default() };
+                solver.seed_bounds(reduced.lower_bound, reduced.upper_bound);
+                let (solution, stats) = solver.solve();
+                if stats.lp_solves > 0 || stats.nodes_processed > 0 {
+                    ran_bnc += 1;
+                }
+
+                // Exactly `finish`'s composition, so the number under test is the
+                // number the pipeline would carry.
+                let mut primal =
+                    if ub_witnessed { reduced.upper_bound } else { Cost::INFINITY };
+                if let Some(ref sol) = solution {
+                    if verify_solution(&directed, reduced.root, &reduced.terminals, sol).is_valid
+                        && sol.objective_value < primal
+                    {
+                        primal = sol.objective_value;
+                    }
+                }
+                let integral = costs_are_integral(directed.arcs.iter().map(|a| a.cost));
+                let dual =
+                    tighten_dual(stats.dual_bound.max(reduced.lower_bound), integral).min(primal);
+
+                // The claim, on the scale of the graph `tighten` was handed.
+                if ub_witnessed && dual.is_finite() {
+                    assert!(
+                        dual + offset <= opt + 1e-6,
+                        "carried dual {} + offset {offset} above the optimum {opt} \
+                         at a cutoff of {} on {n} nodes / {k} terminals",
+                        dual,
+                        opt + slack
+                    );
+                }
+                // And the rebase the caller then applies must stay valid too.
+                assert!(
+                    (dual - offset).max(0.0) <= opt + 1e-6,
+                    "rebased dual above the optimum {opt}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 300 && ran_bnc > 100 && witnessed > 100,
+            "only {checked} compositions, {ran_bnc} of which ran the branch-and-cut and \
+             {witnessed} of which had a witnessed cutoff — the gate proved nothing"
+        );
+    }
+
+    /// The same instances, with the reduction's own deliberately *loose* cutoff:
+    /// a bound-based rule being wrong cannot be caught by a tight one.
+    ///
+    /// Supplying an incumbent above the optimum is the loose case, and it is the
+    /// one that exercises the carried bound against a reduction that has deleted
+    /// nothing on its strength.
+    #[test]
+    fn a_carried_bound_is_valid_under_a_loose_cutoff() {
+        use crate::branch_and_bound::{SolveStatus, SolverConfig};
+        let mut rng = xorshift(0xD1B5_4A32_D192_ED03);
+        let mut checked = 0;
+        for _ in 0..10 {
+            let Some((instance, opt)) = crate::root_reduce::tests::grid_instance(&mut rng) else {
+                continue;
+            };
+            for slack in [1.0, 10.0, 100.0] {
+                let cfg = SolverConfig {
+                    time_limit_secs: 1.0,
+                    verbose: false,
+                    preprocess: true,
+                    initial_upper_bound: opt + slack,
+                    ..SolverConfig::default()
+                };
+                let r = crate::solver::solve(&instance, cfg);
+                assert!(
+                    r.dual_bound <= opt + 1e-6,
+                    "dual bound {} above the optimum {opt} under a cutoff of {}",
+                    r.dual_bound,
+                    opt + slack
+                );
+                if r.status == SolveStatus::Optimal {
+                    assert!((r.primal_bound - opt).abs() < 1e-6);
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 20, "only {checked} cases were exercised");
+    }
 }
 
 #[cfg(test)]
