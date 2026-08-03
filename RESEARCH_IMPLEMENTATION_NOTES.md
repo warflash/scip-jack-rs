@@ -5186,3 +5186,193 @@ eight. The ordering is heuristic, so the generous cap was often *taken*, and
 `B(13) = 27,644,437` signatures a bag made the oracle cost **620 CPU-seconds**
 inside a unit test. A cap about four above the true width is the band where the
 ordering succeeds and the table stays small.
+
+### 105. Item 2, built twice, measured four times, and **removed** — with both mechanisms
+
+The reallocation is the change item 2 asks for: the half-window a pass reserves for
+its successor is conditioned on a measured property of the instance — *did this pass's
+reduction move the graph at all* — instead of on the pass number. That condition is
+admissible: it is a fact about the graph and the reduction operator, it fires
+identically at one second and at a thousand, and it is a refusal that cannot change
+the answer of an attempt that ran.
+
+It was built, measured, repaired, and measured again. **Both versions lose, and the
+two failures are mirror images.**
+
+*Version one — the freed seconds go to the whole of `finish`.*
+
+| run | control | candidate | only control | only candidate |
+|---|---|---|---|---|
+| Track 2 @5 s, run 1 | 115 | 111 | 090, 092, 120, 129, 144, 171 | 026, 064 |
+| Track 2 @5 s, run 2 | 114 | 113 | 090, 092, 093, 171 | 064, 129, 194 |
+
+090, 092 and 171 are lost in both runs and the mechanism is exact rather than
+statistical. Those are the wide instances of §90 and §95: `run_search` refuses them, so
+the stage that follows the reduction is the width attempt, and **`try_decomposition`
+takes whatever window it is given**. Removing the reservation did not hand the seconds
+to the stage that was paying; it handed them to the one stage on that class which
+provably cannot use them, and took them from the branch-and-cut that §95's memo exists
+to feed.
+
+*Version two — the freed seconds go to the branch-and-cut and to nothing else.* Every
+stage before it keeps exactly the window the control gave it, so nothing is worse off
+than the control by construction and one measured-positive stage is better off. It
+fixes version one completely:
+
+| | control | version one | version two |
+|---|---|---|---|
+| instance092 @5 s | unproved | unproved | **Optimal**, branch-and-cut 0.39 s |
+| instance090 @5 s | unproved | unproved | **Optimal**, branch-and-cut 0.66 s |
+| instance094 @5 s gap | 0.442 % | 0.155 % | 0.155 % |
+
+and it is exactly neutral on Track 2, twice — 115 vs 115 and 116 vs 116, with
+symmetric single-instance swaps. And then it loses somewhere else:
+
+| slice | control | version two | only control | only candidate |
+|---|---|---|---|---|
+| Track 2 @5 s, run 1 | 115 | 115 | 120, 194 | 026, 148 |
+| Track 2 @5 s, run 2 | 116 | 116 | 083 | 095 |
+| Track 2 @1 s | 82 | 81 | 109, 152 | 053 |
+| Track 1 [1..140] @3 s | 139 | 138 | 087 | — |
+| **Track 1 [155..200] @5 s** | **27** | **25** | **167, 192, 193** | 182 |
+| SteinLib B / C / D / E | 18/20/20/19 | 18/20/20/19 | — | — |
+
+instance167 is named in this file already, for exactly this: its pass-1 **resumed**
+goal-directed search is three units short of a proof it reaches in 363,000 labels. On
+Track 1's tail the paying stage is that search, not the branch-and-cut, and version
+two walked the seconds straight past it.
+
+**So the change is removed, and what it establishes is the specification for a correct
+one.** Version one names the wrong recipient by naming none; version two names one
+recipient and is right on one class and wrong on the other. The recipient has to be
+chosen by a *measured rate* — and `search_rate` and `bnc_rate` are both already
+measured, in the same unit, on the same instance. What is missing is that both are
+only known **after** the pass that produced them, so a rule that acts on them needs a
+third pass to act in. That is the loop item 1 asks for and this round did not build,
+and it is now the concrete reason to build it rather than a general preference for
+loops.
+
+It also fails the round's own merge gate, which is the point of having one: version two
+is neutral at 5 s and −1 at 1 s, and a change that is non-negative at five seconds and
+negative at one is inadmissible whatever its mechanism.
+
+The reasoning survives in `solve`'s comment at the split, so the next round inherits
+the measurement rather than the code.
+
+### 106. What shipped, and its matrix
+
+What ships is §102 alone: the feedback and the scale discipline, plus the harness of
+§99, plus the gates of §104. Paired, both binaries in the same worker slot:
+
+| slice | control | shipped | only control | only shipped |
+|---|---|---|---|---|
+| Track 2 @5 s, run 1 | 116 | 116 | 120 | 129 |
+| Track 2 @5 s, run 2 | 116 | 115 | 120 | — |
+| Track 1 [1..140] @3 s | 139 | 139 | — | — |
+| Track 1 [155..200] @5 s | 26 | **27** | — | 193 |
+| SteinLib B / C / D / E | 18/20/20/19 | 18/20/20/19 | — | — |
+| Track 2 @1 s (budget gate) | 82 | 82 | 109 | 038 |
+
+**Neutral, within the one-instance band this benchmark has on every slice.** That is
+the honest headline and it is stated as such: the round's shipped delta on proved-count
+is zero, and what it ships is a correctness repair, a harness, and four gates.
+
+**No instance reports a value differing from its reference under an `Optimal` status in
+any slice of any run of the shipped binary.** 196 library tests (was 189),
+`cargo check --all-targets` clean, every binary builds.
+
+The one number that is *not* zero is the one §100 records: the control has a wrong
+answer at thirty seconds that no five-second matrix in this repository would ever have
+found.
+
+### 107. Item 3: not delivered, and the reason is session budget rather than mathematics
+
+Item 3 asks for the flow dual as a **bound and a source of arc prices** feeding
+`ReduceConfig::initial_lower_bound` and `initial_dual` between passes — the experiment
+§89 does not cover, since §89 closed it only as a second source inside `run_search`'s
+certificate loop.
+
+Nothing was built for it and nothing about it is closed. The reason is stated with its
+cost: the correctness investigation of §100 — reproducing a wrong answer, bisecting it
+across nine hand-built diagnostic binaries, and building the two gates of §104 for the
+code path it lives in — consumed the share of the session item 3 was scheduled into.
+§92's measurement stands as the case for it (10 of 38 refused instances reduce further,
+26 of 38 get a better bound, at three seconds of ascent; 3 and 15 at half a second), and
+so does §92's stated obstacle: the `L` that does the work costs three seconds and the
+solver has five.
+
+**Do not read this as a closed direction. It is an unstarted one.**
+
+### 108. What was delivered
+
+**Item 0 — delivered in full, and it is what the round turned on.**
+`benchmarks/budget_matrix.sh` and `benchmarks/budget_gate.sh` take the matrix at 1 s,
+5 s and 30 s, check monotonicity within a binary and the no-budget-trade property across
+a pair, and exit non-zero on the latter. The control matrix is 80 / 114 / 146 on Track 2
+and monotone on both adjacent pairs. The harness then produced two findings that
+five-second testing cannot reach: a **reproducible wrong answer** at 20–30 s (§100),
+bisected to `nearest_vertex_reductions` inside `preprocess_bounded`; and **two instances
+that ignore the time limit**, one of them by 78× (§101). It also did the job a merge
+gate is for: it is what rejected §105's version two.
+
+The question item 0 poses about the pass structure is answered by §105 rather than by a
+table. The half-budget split is the largest budget-coupled object left; conditioning it
+on a measured property of the instance is admissible and was implemented twice; both
+versions lose, for two mirror-image reasons that together specify what a correct one
+must do. `TD_UNITS_PER_SECOND`, `HYP_UNITS_PER_SECOND` and `SEARCH_SLICE_LABELS` were
+**not** shown to be wrong at another budget and were therefore not touched, which is
+what the instruction asked.
+
+**Item 1 — delivered in part, and the part delivered is shipped.** The three edges of
+the loop that did not exist now do: the branch-and-cut's dual becomes the next
+reduction's `initial_lower_bound` under a stated and proved hypothesis; its verified
+tree becomes that reduction's `initial_witness`, and only its tree, because a
+`Reduced`'s own witness lives on an ancestor graph and the contraction lemma runs the
+other way; and one place owns the scale instead of it being rebased twice and compared
+across graphs. `Reduced::as_identity` closes an offset that was charged twice on the
+reuse path.
+
+What was **not** delivered is the *loop*: the pass count is still two, and the
+composition rule across roots was restated rather than extended. The per-round
+measurement item 1 asks for was therefore not taken — with two passes there is no
+series to take — and §105 is the reason it is now the obvious next thing to build
+rather than an open-ended ambition.
+
+**Item 2 — built, measured, and removed.** §105, with both mechanisms and all four
+paired runs. The direction is not closed; the two recipients tried are.
+
+**Item 3 — not started.** §107.
+
+### 109. Closed by this round, added to the standing list
+
+- *Handing a pass's freed window to the whole of `finish`.* −4 and −1 paired, losing
+  090, 092 and 171 in both runs, because `try_decomposition` consumes any window it is
+  given and cannot finish on exactly that class.
+- *Handing it to the branch-and-cut alone.* Neutral on Track 2 twice and −2 on Track 1's
+  tail, losing 167, 192 and 193, because there the paying stage is the resumed
+  goal-directed search. A reallocation on this pipeline must choose its recipient by a
+  measured rate, and no rate is available until a pass has finished producing it.
+- *Gating a late-stage rule through a generated instance.* Five generators, all closed
+  before `finish` is entered, for a structural reason: every exact oracle this crate has
+  is bounded by one of the same three quantities that decide whether the late stages run
+  at all. Late stages get gated at the level of the proposition instead.
+- *A generous width cap in a test oracle.* `decompose(&g, 12)` on a treewidth-8 grid is
+  often *taken*, and `B(13)` signatures a bag cost 620 CPU-seconds inside a unit test.
+  Cap about four above the true width.
+
+### 110. What the next round should take from this
+
+The wrong answer of §100 is the first thing and it is now cheap to finish: the rule is
+named, the reproduction is three lines of shell, and the two new gates already cover the
+*shape* of the composition on 1,500+ small instances without reproducing it — so the
+missing ingredient is scale, terminal density, or a third round of `tighten` with a
+contraction between the second and the third. A generator that reaches it turns a
+bisection into a proof.
+
+The time-limit overruns of §101 are the second, and they are not a performance question:
+under PACE's own rules a solver that spends 2,335 seconds on a 30-second instance has
+not solved it slowly, it has failed.
+
+The third is the loop, and §105 is now its specification rather than its motivation.
+
+And item 3 remains exactly where §92 left it.

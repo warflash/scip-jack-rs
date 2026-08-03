@@ -328,91 +328,55 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         let next_graph = reduced.graph.clone();
         let next_terminals = reduced.terminals.clone();
         let next_offset = reduced.offset;
-        // Did the reduction move the graph at all?
-        //
-        // This is the evidence the half-window reservation below is spent on, and
-        // it is a property of the instance rather than of the clock.
-        let reduction_moved = reduced.graph.num_nodes != pass_graph.num_nodes
-            || reduced.graph.edges.len() != pass_graph.edges.len()
-            || reduced.terminals.len() != pass_terminals.len()
-            || next_offset > 1e-9;
         // Cap the first search so an unproved-but-improved incumbent still
-        // leaves time for the second tightening pass to exploit it — **while
-        // there is evidence that a second pass has anything to exploit it with**.
+        // leaves time for the second tightening pass to exploit it.
         //
-        // # What the reservation buys, and when it buys nothing
+        // # The reallocation this round built here, measured, and removed
         //
-        // Half of pass 0's window is held back for pass 1. Pass 1 differs from
-        // pass 0 in exactly one respect: it hands the reduction a better cutoff.
-        // So the reservation buys one thing — a second reduction under a tighter
-        // incumbent — and a tightening that returned *the graph it was handed*,
-        // with no vertex removed, no edge removed and nothing contracted, has just
-        // measured that the reduction is not the stage that is paying here.
+        // The half is the largest budget-coupled object left in the pipeline and
+        // it allocates by *position*: pass 1 differs from pass 0 only in handing
+        // the reduction a better cutoff, so on an instance whose tightening
+        // returned the graph it was handed — `kill 0n/0e`, no contraction — the
+        // reservation buys a repeat of a stage that has just measured zero.
+        // instance094 spends 2.23 s and then 0.75 s there and deletes nothing
+        // either time, while the branch-and-cut moves the bound at about a
+        // million units a second and is handed 1.53 s and then 0.49 s, of which
+        // roughly 1.3 s is model construction, twice.
         //
-        // That is not a small effect and it is not hypothetical. On PACE
-        // instance094 the pass-0 tightening spends 2.23 s of five and reports
-        // `kill 0n/0e`; the pass-1 tightening spends another 0.75 s and reports
-        // `kill 0n/0e` again; and the branch-and-cut — the only stage moving the
-        // bound on this instance, at about a million units a second — is handed
-        // 1.53 s and then 0.49 s, of which roughly 1.3 s goes into *building its
-        // model*, twice. instance087 and instance095 are the same shape.
+        // Conditioning the reservation on "the reduction moved the graph" is a
+        // statement about the instance and fires identically at any budget, so it
+        // is admissible. It was built, and it was measured **twice, and both
+        // versions lose**:
         //
-        // # Why this is a statement about the instance and not about five seconds
+        // - handing the freed seconds to the whole of `finish` costs 090, 092 and
+        //   171 in both of two paired Track 2 runs (115 vs 111, 114 vs 113),
+        //   because `try_decomposition` consumes any window it is given and
+        //   cannot finish on exactly that class;
+        // - handing them to the branch-and-cut *alone* fixes that — 090 and 092
+        //   then close in 0.39 s and 0.66 s, and Track 2 is exactly neutral twice
+        //   (115/115, 116/116) — and costs Track 1's tail 167, 192 and 193
+        //   (27 vs 25), because on those the paying stage is the **resumed
+        //   goal-directed search** in pass 1, and the seconds went past it.
         //
-        // The condition is "the reduction changed nothing", which is a fact about
-        // the graph and the reduction operator. It fires identically at one second
-        // and at a thousand: at a larger budget the reduction still either moves
-        // the graph or does not, and when it does the reservation is still made.
-        // It is also self-correcting in the direction SS98 requires — a reduction
-        // that *is* working keeps its successor's window, exactly as the
-        // branch-and-cut keeps its share until it has been seen to lose the
-        // comparison.
-        //
-        // # What it costs when it is wrong, and the stage the seconds may not go to
-        //
-        // The first version handed the freed seconds to the *whole* of `finish`,
-        // and it measured **negative**: 115 vs 111 and 114 vs 113 paired on
-        // Track 2, losing instance090, instance092 and instance171 in both runs.
-        // The mechanism is exact and is worth recording rather than smoothing
-        // over. Those are wide instances whose width attempt cannot finish, and
-        // `try_decomposition` takes whatever window it is given — so removing the
-        // reservation did not give the seconds to the stage that was paying, it
-        // gave them to the one stage on those instances that provably cannot use
-        // them, and took them from the branch-and-cut that §95's memo exists to
-        // feed.
-        //
-        // So the freed seconds go to the branch-and-cut and to nothing else.
-        // Every other stage keeps exactly the window it had: the width attempt,
-        // which has produced nothing on this instance and is entitled to its
-        // first increment and no more, still gets the reserved window it would
-        // have had, and the goal-directed search likewise. Nothing is worse off
-        // than under the control and one measured-positive stage is better off,
-        // which is the only shape of reallocation this pipeline has ever been
-        // able to keep.
+        // The two failures are mirror images and together they say what a correct
+        // version needs: the recipient must be chosen by a *measured rate*, not
+        // named in advance. `search_rate` and `bnc_rate` are both already
+        // measured, and both are only known after the pass that produced them —
+        // so the rule wants a third pass to act on, which is the loop item 1 asks
+        // for and this round did not build. Until then the position-based split
+        // stands, and it stands as a known-wrong shape rather than as a defended
+        // one.
         let remaining = deadline.saturating_duration_since(Instant::now());
-        // What every stage before the branch-and-cut gets: unchanged.
-        let stage_deadline = if pass == 0 {
+        let pass_deadline = if pass == 0 {
             Instant::now() + remaining.mul_f64(0.5)
         } else {
             deadline
         };
-        // What the branch-and-cut gets: the rest of the budget as well, when the
-        // reduction has measured that a successor pass has nothing to do with it.
-        let pass_deadline =
-            if pass == 0 && reduction_moved { stage_deadline } else { deadline };
         if config.verbose {
             eprintln!(
-                "[time] pass {pass}: tighten {}took {:.2}s and {}; stages get {:.2}s, \
-                 the branch-and-cut {:.2}s; elapsed {:.2}s",
+                "[time] pass {pass}: tighten {}took {:.2}s, search gets {:.2}s, elapsed {:.2}s",
                 if reused_here { "(reused fixpoint) " } else { "" },
                 tighten_secs,
-                if reduction_moved {
-                    "moved the graph, so a window is reserved for a second pass"
-                } else {
-                    "returned the graph it was handed, so the reserved window goes to \
-                     the branch-and-cut"
-                },
-                stage_deadline.saturating_duration_since(Instant::now()).as_secs_f64(),
                 pass_deadline.saturating_duration_since(Instant::now()).as_secs_f64(),
                 start.elapsed().as_secs_f64(),
             );
@@ -423,7 +387,6 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             reduced,
             &config,
             start,
-            stage_deadline,
             pass_deadline,
             &mut search_cache,
             &mut sep_cache,
@@ -656,14 +619,7 @@ fn finish(
     reduced: crate::root_reduce::Reduced,
     config: &SolverConfig,
     start: Instant,
-    // What every stage before the branch-and-cut gets. Unchanged from the
-    // control in every case.
     deadline: Instant,
-    // What the branch-and-cut gets. Equal to `deadline` unless the pass's
-    // reduction measured that no successor pass has anything to do, in which
-    // case it is the solver's own deadline: the seconds a second reduction would
-    // have had go to the branch-and-cut and to no other stage. See the caller.
-    bnc_deadline: Instant,
     search_cache: &mut Option<SteinerSearch>,
     sep_cache: &mut Option<RootSeparation>,
     carried_lower_bound: &mut Cost,
@@ -967,7 +923,7 @@ fn finish(
     let root_lower_bound = search_lower_bound;
     let directed = DirectedGraph::from_undirected(&work_graph);
     let mut solver = BranchAndCutSolver::new(directed.clone(), root, terminals.clone());
-    let remaining = bnc_deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+    let remaining = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
     solver.config = SolverConfig { time_limit_secs: remaining, ..config.clone() };
     solver.seed_bounds(root_lower_bound, root_upper_bound);
     // The incumbent's arc numbering matches `work_graph` only when it survived
@@ -1985,7 +1941,6 @@ pub fn solve_file(path: &str, config: SolverConfig) -> SolveResult {
 mod feedback_tests {
     use super::*;
     use crate::graph::{NodeId, NodeType};
-    use std::sync::atomic::Ordering;
 
     fn xorshift(seed: u64) -> impl FnMut() -> u64 {
         let mut s = seed;
