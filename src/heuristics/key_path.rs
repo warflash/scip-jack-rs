@@ -141,6 +141,9 @@ pub fn key_path_exchange(
 
 /// One sweep over every key path, applying each improving exchange as it is
 /// found. Returns the new arc set, or `None` if nothing improved.
+/// Key paths between clock reads. See the sampling note in `one_pass`.
+const CLOCK_EVERY: usize = 64;
+
 fn one_pass(
     idx: &ArcIndex,
     active: &[bool],
@@ -162,13 +165,22 @@ fn one_pass(
         let mut paths = paths;
         paths.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal));
 
-        for path in &paths {
+        for (path_i, path) in paths.iter().enumerate() {
             // Each key path is a bounded Dijkstra, and a tree with thousands of
             // terminals has thousands of key paths, so the clock is read here and
             // not only once per pass: on PACE instance079 a *single* pass measured
-            // 75.65 s. Stopping mid-pass keeps every exchange already applied, each
-            // of which strictly lowered the tree's cost on its own.
-            if crate::deadline::expired() {
+            // 75.65 s. Stopping mid-pass keeps every exchange already applied,
+            // each of which strictly lowered the tree's cost on its own.
+            //
+            // It is **sampled**, and that is not a detail. Reading the clock on
+            // every path costs PACE Track 1's instance192 and instance193 their
+            // proofs under an eight-way load: the control closes them in 4.23 s
+            // and 4.65 s of a five-second budget, and a per-path `Instant::now()`
+            // pushed both to 5.35 s and 5.24 s and past the limit. Once every
+            // sixty-four paths the read is free relative to the Dijkstra it
+            // guards, and the worst the sampling can overshoot by is sixty-four
+            // key paths.
+            if path_i % CLOCK_EVERY == 0 && crate::deadline::expired() {
                 break;
             }
             if path.cost <= 1e-9 {

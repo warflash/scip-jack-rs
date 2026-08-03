@@ -5390,3 +5390,103 @@ not solved it slowly, it has failed.
 The third is the loop, and §105 is now its specification rather than its motivation.
 
 And item 3 remains exactly where §92 left it.
+
+### 111. The time limit, made true
+
+§101 recorded that the solver does not respect its own deadline and that the
+overrun does not move when the budget moves. That is now fixed, and the fix is
+one object rather than a parameter added to a dozen signatures.
+
+**The diagnosis.** Every stage already took a deadline and checked it *between*
+the things it called. That suffices exactly when each thing it calls is cheap,
+and on an instance with thousands of terminals none of them is. Measured on PACE
+Track 2's instance079 — 36,415 vertices, 145,635 edges and **16,808 terminals**
+after a classical reduction that deletes nothing:
+
+| single call | seconds |
+|---|---|
+| `bottleneck_reductions_watched` (`\|R\|` Dijkstras, an `\|R\| x n` table = 4.9 GB) | **55.6** |
+| one `shortest_path_heuristic` start | 15.1 |
+| one pass of `key_path_exchange` | **75.7** |
+| the *initial* polish inside `iterated_local_search`, before its own deadline check | **252** |
+
+Each is one function call, so no caller could interrupt any of them.
+
+**The fix.** `src/deadline.rs` holds a per-thread deadline, installed once by
+`solve` for the duration of the call and restored by a guard on drop, and read by
+the loops where the seconds actually are: the special-distance table's Dijkstras,
+the shortest-path heuristic's outer loop, the dual ascent's main loop,
+key-path exchange's per-pass *and* per-path loops, and the local search's polish.
+`bottleneck_reductions_watched` additionally takes an explicit `Option<Instant>`,
+because it is called from outside a solve as well.
+
+> **Proposition (consulting it cannot change an answer).** Every reader uses it
+> only to stop early, and each stop is a refusal the caller already tolerates: a
+> primal heuristic that stops returns no tree, which is what finding none returns;
+> a dual ascent that stops returns its current iterate, and every iterate
+> maintains `reduced >= 0` and `c(A) >= L + sum_{a in A} reduced_a`, so it is
+> already a certified dual and a longer run only raises `L`; a reduction that
+> stops has performed a prefix of deletions each of which is justified
+> independently of the others; a key-path pass that stops keeps the exchanges it
+> applied, each of which strictly lowered the tree's cost. ∎
+
+That is the standing rule of this repository — *a deadline may refuse an attempt,
+but may never change the answer of a completed attempt* — applied where it had
+never been applied.
+
+**Measured, wall clock, on the three instances §101 names:**
+
+| instance | limit | before | after |
+|---|---|---|---|
+| instance079 | 1 s | 93.0 s | **1.4 s** |
+| instance079 | 5 s | 97.4 s | **5.4 s** |
+| instance079 | 30 s | 98.2 s | **30.6 s** |
+| instance198 | 1 s | 16.8 s | **1.1 s** |
+| instance198 | 5 s | 16.2 s | **5.1 s** |
+| instance198 | 30 s | at least 2,335 s | **30.2 s** |
+| instance191 | 5 s | 22.3 s | **5.1 s** |
+| instance191 | 30 s | 41.6 s | **30.0 s** |
+
+Under PACE's own rules that is the difference between a disqualification and a
+result, and it is the one number this round moved by two orders of magnitude.
+
+Two library tests were added for the mechanism itself — that no installed
+deadline never expires, and that nested installs stack and restore rather than
+clobber — bringing the suite to 198.
+
+**The clock read must be sampled, and that was measured too.** The first version
+read `Instant::now()` on every key path of `one_pass`, and it cost PACE Track 1's
+instance192 and instance193 their proofs under an eight-way load: the control
+closes them in 4.23 s and 4.65 s of a five-second budget, and the per-path read
+pushed them to 5.35 s and 5.24 s. Sampling once every sixty-four paths restores
+both — Track 1 [155..200] goes from 28 vs 26 back to **28 vs 28** — and the worst
+the sampling can overshoot by is sixty-four key paths.
+
+**Paired, both binaries in the same worker slot:**
+
+| slice | control | shipped | only control | only shipped |
+|---|---|---|---|---|
+| Track 2 @5 s, run 1 | 116 | **117** | 120 | 075, 194 |
+| Track 2 @5 s, run 2 | 118 | 116 | 075, 120, 171 | 148 |
+| Track 2 @1 s | 84 | 83 | 109, 152 | 025 |
+| Track 1 [1..140] @3 s | 140 | 140 | — | — |
+| Track 1 [155..200] @5 s | 28 | 28 | — | — |
+| SteinLib B / C / D / E | 18/20/20/19 | 18/20/20/19 | — | — |
+
+Neutral on proved-count, within the one-instance band. What is not neutral is
+compliance, and it is the number worth reporting:
+
+| | control | shipped |
+|---|---|---|
+| Track 2 @5 s, instances exceeding 5.5 s | **21 of 200** | **3 of 200** |
+| Track 2 @5 s, total wall time | 750–775 s | **600–604 s** |
+
+Eighteen of the twenty-one overruns are gone and the slice finishes in 22 % less
+wall time for the same proved-count. The control's extra seconds were not free —
+they were taken from whatever else shared the machine, which is how three probe
+processes from an earlier session were still running with 22,850, 13,185 and
+12,914 CPU-seconds when this was found.
+
+Unpaired: 116–117 / 200 proved, **0 wrong**, against the control's 114–118 / 200.
+198 library tests. The three remaining overruns are the honest residue and are
+not claimed to be fixed.
