@@ -991,6 +991,29 @@ impl RootSeparation {
     }
 
     /// Rows in the model right now.
+    /// The LP's own **primal** point, one entry per arc.
+    ///
+    /// # Why this is exposed at all
+    ///
+    /// Every use this repository has made of the root relaxation reads its
+    /// *dual*: the cut packing that becomes the search's potential, the arc
+    /// prices that drive the elimination, the certified bound. The primal point
+    /// has never been looked at, and §85 says that is a hole. On the instances
+    /// with more than 64 terminals the relaxation is at or beside the optimum —
+    /// `LP* = OPT` exactly on 16 of 64 and within 0.01 % on 39 — while the
+    /// *incumbent* is 0.1 % to 3 % above it on 57 of 63. Where `LP* = OPT`, the
+    /// optimal face of this LP contains an integral point, so `x*` is not merely
+    /// a bound: it is a description of where an optimal tree lies.
+    ///
+    /// The values are whatever the backend last returned. Nothing downstream may
+    /// treat them as feasible, optimal, or even in `[0,1]` — they are a *hint*
+    /// for a primal heuristic, and every tree built from them is costed with the
+    /// true arc costs and verified like any other.
+    pub fn primal_solution(&self) -> &[f64] {
+        let x = self.lp.get_solution();
+        &x[..x.len().min(self.idx.num_arcs())]
+    }
+
     pub fn num_rows(&self) -> usize {
         self.lp.num_constraints()
     }

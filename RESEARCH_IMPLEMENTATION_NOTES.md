@@ -4798,3 +4798,65 @@ measured (§87); the flow dual as a second source inside `run_search`'s certific
 loop (§89); coarsening a level-set chain by subsetting its thresholds, which
 breaks (PACK) (§89); and the reading of item 2 under which the `d`-graph problem
 is *equivalent* to the cutoff problem rather than a relaxation of it (§91).
+
+### 97. The primal read out of the relaxation, which is where the wide group was hiding
+
+§86 said the wide group is primal-limited and §85 said its relaxation is exact.
+Put together those two facts say something neither says alone: **where
+`LP* = OPT`, the optimal face of the root relaxation contains an integral point,
+so `x*` is not a bound but a description of where an optimal tree is.** Every use
+this solver had ever made of that LP read its *dual*.
+
+`src/bin/lpprimal_probe.rs` reads it. The tree is built by Prim over the **true**
+costs on the subgraph `{a : max(x*_a, x*_{a^1}) >= theta}` over a ladder of
+thresholds, pruned of non-terminal leaves, and costed from the true costs, so an
+`x*` that means nothing yields a worse tree or none — never a wrong one.
+Measured on the 65 wide instances at three seconds of separation:
+
+| | count |
+|---|---|
+| shipped primal is exact | 11 |
+| the LP-primal reading is exact | **19** |
+| the reading improves the incumbent | **49** |
+| the same loop's bound then *meets* the tree — a complete proof | **7** |
+
+The seven are 084, 087, 090, 092, 093, 094, 095, each inside 0.4 to 2.9 s.
+
+**One thing had to be measured before it worked.** A converged loop whose point
+yields no tree is the interior point's doing, not the instance's: without
+crossover it returns a point in the relative interior of the optimal face, so a
+face with an integral vertex is reported as a spread of fractional columns. On
+instance087 the converged interior point has 1,123 positive columns and yields
+nothing; a *basic* solution of the same model has 604, is integral, and is the
+optimum. The loop therefore asks for a vertex **once**, and only after the bound
+has converged, so nothing is paid twice.
+
+**Placement is measured, not chosen.** Ahead of the width attempt it wins +5 and
+loses 051, 062, 063 to a width DP it displaced; behind it, and gated on having
+*observed* the branch-and-cut solve no LP at all, it loses nothing. Ungated it
+costs SteinLib d18, d19, e19 and Track 1's 182, which is the same lesson §90
+recorded: a stage that is working keeps its window.
+
+**Paired, both binaries in the same worker slot:**
+
+| slice | control | memo + LP-primal | only control | only candidate |
+|---|---|---|---|---|
+| Track 2 @5 s | 109 | **116** | — | 058, 059, 090, 092, 120, 144, 194 |
+| Track 1 [1..140] @3 s | 139 | 139 | — | — |
+| Track 1 [155..200] @5 s | 27 | 27 | 193 | 192 |
+| SteinLib B / C / D / E | 18/20/20/19 | 18/20/20/19 | — | — |
+
+**+7 on Track 2 with zero losses.** Unpaired matrix: 115/200 against the
+control's 114 and 112, 0 wrong in every slice, 189 library tests,
+`cargo check --all-targets` clean.
+
+The round's shipped total is therefore **+7 to +8 on PACE Track 2**, from two
+changes that between them cost about 250 lines: not repeating a truncated width
+attempt (§95), and reading the relaxation's primal point instead of only its dual.
+Neither is a stronger relaxation. Both came from item 0's measurement rather than
+from item 1's mathematics.
+
+**What is still open on this class.** 087, 094, 095 have an exact LP-primal
+reading at three seconds and do not get three seconds inside a five-second solve;
+12 of the 19 exact readings sit on instances whose bound does not reach them in
+the budget. Both are seconds, not mathematics.

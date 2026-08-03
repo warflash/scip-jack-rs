@@ -204,6 +204,16 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     // does; only a pass that watched it solve nothing says otherwise.
     let mut carried_lower_bound: Cost = 0.0;
     let mut branch_and_cut_works = true;
+    // Has the branch-and-cut ever solved an LP on this instance?
+    //
+    // Not [`branch_and_cut_works`], which compares *rates*. This asks whether the
+    // stage touched the relaxation at all. On the wide instances the answer is no
+    // — PACE instance092 reports `LPs: 0` in every pass — and where nothing is
+    // solving the root relaxation, [`run_root_primal`] may have the window. Where
+    // the branch-and-cut *is* solving it, taking that window costs proofs:
+    // measured, SteinLib d18, d19, e19 and PACE Track 1's 182 all fall to an
+    // ungated version.
+    let mut bnc_solved_lps = true;
     // What the width attempt already spent, and on which graph.
     //
     // [`try_decomposition`] is deterministic: the same graph, the same ordering
@@ -315,6 +325,7 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             &mut sep_cache,
             &mut carried_lower_bound,
             &mut branch_and_cut_works,
+            &mut bnc_solved_lps,
             &mut td_truncated,
             &mut search_rate,
             carried_primal_witnessed,
@@ -497,6 +508,7 @@ fn finish(
     sep_cache: &mut Option<RootSeparation>,
     carried_lower_bound: &mut Cost,
     branch_and_cut_works: &mut bool,
+    bnc_solved_lps: &mut bool,
     td_truncated: &mut Option<(usize, usize, usize, f64)>,
     search_rate: &mut Cost,
     // Whether the bound this pass started from was itself exhibited by an
@@ -754,7 +766,76 @@ fn finish(
             method: SolveMethod::AscendAndPrune,
         };
     }
+    // The root relaxation's primal point, on the instances the search refuses.
+    //
+    // See [`run_root_primal`]. This is where the largest measured block of this
+    // benchmark lives: the dual is at or beside the optimum on that class and the
+    // incumbent is not, and the relaxation already holds the tree.
+    let mut lp_witness: Option<(Vec<u32>, Cost)> = None;
+    if !*bnc_solved_lps
+        && search_cache.is_none()
+        && terminals.len() >= 2
+        && root_upper_bound.is_finite()
+    {
+        let mut b = search_lower_bound;
+        if let Some((arcs, cost)) = run_root_primal(
+            &work_graph,
+            &terminals,
+            root_upper_bound,
+            config,
+            deadline,
+            sep_cache,
+            &mut b,
+        ) {
+            lp_witness = Some((arcs, cost));
+        }
+        search_lower_bound = search_lower_bound.max(b);
+        // The tree is exhibited, so the claim of optimality rests on a witness in
+        // the sense `Reduced::upper_bound_is_witnessed` demands: this pass holds
+        // the arcs, checked by `verify_solution` before adoption.
+        if let Some((_, cost)) = &lp_witness {
+            if search_lower_bound >= *cost - config.gap_tolerance.max(1e-6) {
+                return SolveResult {
+                    status: SolveStatus::Optimal,
+                    primal_bound: *cost + offset,
+                    dual_bound: *cost + offset,
+                    gap_pct: 0.0,
+                    nodes_processed: 0,
+                    cuts_added: 0,
+                    lp_solves: 0,
+                    time_secs: start.elapsed().as_secs_f64(),
+                    verified: true,
+                    method: SolveMethod::AscendAndPrune,
+                };
+            }
+        } else if search_lower_bound >= root_upper_bound - config.gap_tolerance.max(1e-6)
+            && ub_witnessed
+        {
+            return SolveResult {
+                status: SolveStatus::Optimal,
+                primal_bound: root_upper_bound + offset,
+                dual_bound: root_upper_bound + offset,
+                gap_pct: 0.0,
+                nodes_processed: 0,
+                cuts_added: 0,
+                lp_solves: 0,
+                time_secs: start.elapsed().as_secs_f64(),
+                verified: true,
+                method: SolveMethod::AscendAndPrune,
+            };
+        }
+    }
+
     let root_lower_bound = search_lower_bound;
+    // A better tree than the one the reduction carried: hand it to the
+    // branch-and-cut as its incumbent, in that solver's own arc numbering, which
+    // is `work_graph`'s because that is the graph it is about to be built on.
+    let (root_upper_bound, incumbent_arcs, ub_witnessed) = match &lp_witness {
+        Some((arcs, cost)) if *cost < root_upper_bound - 1e-9 => {
+            (*cost, Some(arcs.clone()), true)
+        }
+        _ => (root_upper_bound, incumbent_arcs, ub_witnessed),
+    };
 
     let directed = DirectedGraph::from_undirected(&work_graph);
     let mut solver = BranchAndCutSolver::new(directed.clone(), root, terminals.clone());
@@ -835,6 +916,7 @@ fn finish(
     // 0.38 s after the search fails, keeps its share because a completed proof
     // wins the comparison outright.
     let bnc_rate = if bnc_secs > 1e-9 { (dual - root_lower_bound).max(0.0) / bnc_secs } else { 0.0 };
+    *bnc_solved_lps = stats.lp_solves > 0;
     *branch_and_cut_works = matches!(stats.status, SolveStatus::Optimal | SolveStatus::Infeasible)
         || primal < root_upper_bound - 1e-6
         || bnc_rate >= *search_rate;
@@ -1143,6 +1225,239 @@ fn potential_will_not_close(
 /// separation. The separation loop is resumable, so "spend some on separation"
 /// is a genuine increment and not a restart, and the answer can be revisited
 /// every slice.
+/// A tree read out of the root relaxation's **primal** point.
+///
+/// # Why this exists
+///
+/// §85 measured `LP*` on every unproved instance with more than 64 terminals: it
+/// equals `OPT` exactly on 16 of 64 and lands within 0.01 % on 39. §86 measured
+/// the other side and found the incumbent equals the optimum on **six of
+/// sixty-three**. So on the largest remaining block of this benchmark the dual is
+/// solved and the primal is not — and every use this solver had ever made of the
+/// root relaxation read its *dual*.
+///
+/// Where `LP* = OPT`, the optimal face of the relaxation contains an integral
+/// point, so `x*` is not a bound but a description of where an optimal tree lies.
+/// Measured on the 65 wide instances: the shipped primal is exact on 11 of them,
+/// the reading below is exact on **19**, and it improves the incumbent on **49**.
+/// On seven the bound the same loop produces then *meets* the tree, which is a
+/// complete proof with no search and no branching — 084, 087, 090, 092, 093, 094,
+/// 095, each inside three seconds of separation.
+///
+/// # What is and is not trusted
+///
+/// Nothing about `x*` is trusted. It selects a subgraph; the tree is then built
+/// by Prim over the **true** costs, pruned of non-terminal leaves, and costed
+/// from the true costs. An `x*` that is meaningless yields a worse tree or none
+/// at all, never a wrong one, and the caller checks the result against its
+/// incumbent before adopting it.
+///
+/// Returns the arcs of the tree and its true cost.
+fn tree_from_lp_point(
+    idx: &ArcIndex,
+    x: &[f64],
+    terminals: &[crate::graph::NodeId],
+    is_terminal: &[bool],
+    root: crate::graph::NodeId,
+    theta: f64,
+) -> Option<(Vec<u32>, Cost)> {
+    let n = idx.num_nodes();
+    let m = idx.num_arcs();
+    // An undirected edge survives when *either* orientation does: the tree does
+    // not know which way the arborescence will eventually run it.
+    let keep = |a: usize| -> bool {
+        x.get(a).copied().unwrap_or(0.0).max(x.get(a ^ 1).copied().unwrap_or(0.0)) >= theta
+    };
+    // Prim over the kept subgraph, from the root, under the true costs.
+    let mut in_tree = vec![false; n];
+    let mut best_cost = vec![Cost::INFINITY; n];
+    let mut best_arc = vec![u32::MAX; n];
+    let mut heap = std::collections::BinaryHeap::new();
+    best_cost[root as usize] = 0.0;
+    heap.push(std::cmp::Reverse((0u64, root)));
+    let mut chosen: Vec<u32> = Vec::new();
+    while let Some(std::cmp::Reverse((_, v))) = heap.pop() {
+        if in_tree[v as usize] {
+            continue;
+        }
+        in_tree[v as usize] = true;
+        if best_arc[v as usize] != u32::MAX {
+            chosen.push(best_arc[v as usize]);
+        }
+        for &a in idx.outgoing(v) {
+            if (a as usize) >= m || !keep(a as usize) {
+                continue;
+            }
+            let u = idx.head(a) as usize;
+            let c = idx.cost(a);
+            if !in_tree[u] && c < best_cost[u] {
+                best_cost[u] = c;
+                best_arc[u] = a;
+                heap.push(std::cmp::Reverse((c.to_bits(), idx.head(a))));
+            }
+        }
+    }
+    if terminals.iter().any(|&t| !in_tree[t as usize]) {
+        return None;
+    }
+    // Prune non-terminal leaves. With non-negative costs this cannot disconnect a
+    // terminal and cannot raise the cost.
+    let mut deg = vec![0u32; n];
+    let mut alive = vec![true; chosen.len()];
+    for &a in &chosen {
+        deg[idx.tail(a) as usize] += 1;
+        deg[idx.head(a) as usize] += 1;
+    }
+    loop {
+        let mut cut = false;
+        for i in 0..chosen.len() {
+            if !alive[i] {
+                continue;
+            }
+            let a = chosen[i];
+            for v in [idx.tail(a), idx.head(a)] {
+                if deg[v as usize] == 1 && !is_terminal[v as usize] {
+                    alive[i] = false;
+                    deg[idx.tail(a) as usize] -= 1;
+                    deg[idx.head(a) as usize] -= 1;
+                    cut = true;
+                    break;
+                }
+            }
+        }
+        if !cut {
+            break;
+        }
+    }
+    let arcs: Vec<u32> =
+        chosen.iter().enumerate().filter(|&(i, _)| alive[i]).map(|(_, &a)| a).collect();
+    let cost: Cost = arcs.iter().map(|&a| idx.cost(a)).sum();
+    Some((arcs, cost))
+}
+
+/// The root relaxation, and the tree its primal point describes, on the
+/// instances the goal-directed search cannot address.
+///
+/// Returns the best tree found, or `None`. The bound it reached is written to
+/// `bound` whatever happens, so a run that improves only the dual still pays.
+#[allow(clippy::too_many_arguments)]
+fn run_root_primal(
+    work_graph: &UndirectedGraph,
+    terminals: &[crate::graph::NodeId],
+    root_upper_bound: Cost,
+    config: &SolverConfig,
+    deadline: Instant,
+    sep_cache: &mut Option<RootSeparation>,
+    bound: &mut Cost,
+) -> Option<(Vec<u32>, Cost)> {
+    if terminals.len() < 2 {
+        return None;
+    }
+    let directed = DirectedGraph::from_undirected(work_graph);
+    let root = terminals[0];
+    let idx = ArcIndex::new(&directed);
+    let mut is_terminal = vec![false; idx.num_nodes()];
+    for &t in terminals {
+        is_terminal[t as usize] = true;
+    }
+    let mut separation =
+        sep_cache.take().filter(|s| s.applies_to(&directed, root, terminals));
+    let sep = separation
+        .get_or_insert_with(|| RootSeparation::new(&directed, root, terminals));
+
+    let mut best: Option<(Vec<u32>, Cost)> = None;
+    let mut incumbent = root_upper_bound;
+    // The batch doubles, for §79's reason, and the loop stops itself on three
+    // measured events rather than on a clock fraction: the separation converged,
+    // the bound met the tree, or two consecutive batches read no better tree out
+    // of a point that did not move.
+    let mut batch: Option<std::time::Duration> = None;
+    let mut barren = 0u32;
+    let mut basis_tried = false;
+    loop {
+        let budget = deadline.saturating_duration_since(Instant::now());
+        if budget.is_zero() || barren >= 2 {
+            break;
+        }
+        let b = batch.get_or_insert_with(|| budget.mul_f64(0.25));
+        let stop = Instant::now() + (*b).min(budget);
+        *b = b.saturating_mul(2);
+        let bound_before = *bound;
+        let Some(cert) = sep.advance(incumbent, stop, ROOT_CERT_ROUNDS, DS_PACKING_NNZ) else {
+            break;
+        };
+        *bound = bound.max(cert.lp_bound).max(cert.packing.value);
+        let x = sep.primal_solution().to_vec();
+        let mut improved = false;
+        // A ladder of thresholds, cheapest first to state: an `x*` that is
+        // integral is read at 0.99 and the rest are what keep the reading useful
+        // while the point is still fractional.
+        for theta in [0.99, 0.9, 0.75, 0.5, 0.25, 0.1, 0.01] {
+            let Some((arcs, cost)) =
+                tree_from_lp_point(&idx, &x, terminals, &is_terminal, root, theta)
+            else {
+                continue;
+            };
+            if cost < incumbent - 1e-9 {
+                // A tree of `work_graph`, checked before it is believed.
+                let mut nodes: Vec<crate::graph::NodeId> = arcs
+                    .iter()
+                    .flat_map(|&a| [idx.tail(a), idx.head(a)])
+                    .collect();
+                nodes.push(root);
+                nodes.sort_unstable();
+                nodes.dedup();
+                let sol = crate::model::SteinerSolution::new(arcs.clone(), nodes, cost);
+                if !verify_solution(&directed, root, terminals, &sol).is_valid {
+                    continue;
+                }
+                incumbent = cost;
+                best = Some((arcs, cost));
+                improved = true;
+            }
+        }
+        if config.verbose {
+            eprintln!(
+                "[lpprimal] lp bound {:.1}{}, {} positive columns -> tree {}",
+                cert.lp_bound,
+                if sep.is_converged() { ", converged" } else { "" },
+                x.iter().filter(|&&v| v > 1e-6).count(),
+                best.as_ref().map_or("none".to_string(), |(_, c)| format!("{c:.1}")),
+            );
+        }
+        // A batch is barren only when it moved *neither* side. The tree reading
+        // cannot work until `x*` is close to integral, so early batches that
+        // produce no tree while the bound is still climbing are the method
+        // working, not the method stalling — and stopping on them is what cost
+        // instance087 its proof in the first wiring.
+        barren = if improved || *bound > bound_before + 1e-9 { 0 } else { barren + 1 };
+        if *bound >= incumbent - config.gap_tolerance.max(1e-6) {
+            break;
+        }
+        if sep.is_converged() {
+            // A converged loop whose point yields no tree is almost always the
+            // interior point's doing, and that is a property of the *algorithm*
+            // rather than of the instance: without crossover it returns a point
+            // in the relative interior of the optimal face, so a face with an
+            // integral vertex is reported as a spread of fractional columns. On
+            // instance087 the converged interior point has 1,123 positive columns
+            // and yields nothing, while a basic solution of the same model has
+            // 604, is integral, and is the optimum.
+            //
+            // So the loop asks the same model for a *vertex* — once, and only
+            // after the bound has converged, so nothing is being paid twice.
+            if !basis_tried && matches!(sep.method(), crate::model::LpMethod::InteriorPoint) {
+                basis_tried = true;
+                sep.set_method(crate::model::LpMethod::Simplex);
+                continue;
+            }
+            break;
+        }
+    }
+    *sep_cache = separation;
+    best
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_search(
     work_graph: &UndirectedGraph,
