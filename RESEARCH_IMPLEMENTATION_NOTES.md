@@ -4860,3 +4860,53 @@ from item 1's mathematics.
 reading at three seconds and do not get three seconds inside a five-second solve;
 12 of the 19 exact readings sit on instances whose bound does not reach them in
 the budget. Both are seconds, not mathematics.
+
+### 98. The gate was a statement about five seconds, so it is gone
+
+§97 shipped the primal reading as a stage of its own, gated on having *observed*
+the branch-and-cut solve no LP. That gate is not a property of an instance; it is
+a property of a **time limit**. At five seconds the branch-and-cut often cannot
+finish one solve, so the gate opens. At any limit where every node solves LPs it
+closes, and the reading — the round's largest measured win — would have switched
+itself off entirely. A solver that stops working when given *more* time is
+overfitted to the clock it was tuned on, whatever its proved-count says.
+
+**The repair is structural, not a different gate.** The branch-and-cut's root node
+already solves that LP, and `lp_guided_tree` already reads its point. What it did
+not do is read the *arcs*: its support is the vertex set every positive column
+touches, which on a fractional point is most of the graph, whereas the reading
+that works keeps `{a : max(y_a, y_{a^1}) >= theta}` over a ladder and spans it
+with `mst_prune` under the true costs. Where the relaxation is tight that set
+**is** an optimal tree rather than a neighbourhood of one.
+
+Moved there, the reading costs no window, needs no gate, and behaves identically
+at any time limit — it simply fires on more instances as the budget grows, because
+more relaxations converge. `run_root_primal`, `bnc_solved_lps` and the separate
+stage are deleted.
+
+**Paired, both binaries in the same worker slot:**
+
+| slice | control | shipped | only control | only shipped |
+|---|---|---|---|---|
+| Track 2 @5 s, run 1 | 109 | **114** | — | 058, 059, 072, 090, 092 |
+| Track 2 @5 s, run 2 | 110 | **114** | 117 | 026, 058, 059, 090, 092 |
+| Track 1 [1..140] @3 s | 139 | 139 | — | — |
+| Track 1 [155..200] @5 s | 25 | 26 | — | 188 |
+| SteinLib B / C / D / E | 18/20/20/19 | 18/20/20/19 | — | — |
+
+**+5 and +4 on Track 2**, against +7 for the gated version. Two proofs were bought
+by the gate and they are not worth keeping: they were bought by a condition that
+is false at every other budget.
+
+**The audit this prompted, recorded because the answer is not "no".** Of the two
+changes this round shipped, the width memo (§95) is budget-invariant by proof —
+the dynamic programme is deterministic and later passes have strictly less clock,
+so the rule fires the same way at any limit and degrades to inert when the budget
+is large enough for the DP to finish. The primal reading is budget-invariant in
+its mathematics and *was* not in its placement, which is what this section fixes.
+What remains budget-coupled is older and larger than either: `TD_UNITS_PER_SECOND`,
+`HYP_UNITS_PER_SECOND`, `SEARCH_SLICE_LABELS`, and above all the **two-pass
+structure with a half-budget split**, which at a thousand seconds is certainly the
+wrong shape. Nothing in this repository currently measures the matrix at more than
+one time limit, and until it does, every proved-count here is a claim about five
+seconds and not about the solver.

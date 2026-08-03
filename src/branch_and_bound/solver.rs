@@ -1226,6 +1226,60 @@ fn lp_guided_tree(
             }
         }
 
+        // The relaxation's own point, read at a ladder of thresholds.
+        //
+        // The vertex support above keeps every vertex an arc of positive value
+        // touches, which on a fractional point is most of the graph. The reading
+        // that matters keeps *arcs*: where the relaxation is tight its optimal
+        // face contains an integral point, and then `{a : y_a >= theta}` **is** an
+        // optimal tree rather than a neighbourhood of one.
+        //
+        // Measured over the 65 unproved PACE instances with more than 64
+        // terminals: the shipped primal is exact on 11, this reading on 19, and it
+        // improves the incumbent on 49. It lives here, inside the node that
+        // already solved the LP, rather than in a stage of its own — so it costs
+        // no window, needs no gate, and works identically at any time limit.
+        // An earlier version ran as a separate stage under the solver's budget and
+        // had to be gated on the branch-and-cut having been *observed* to solve no
+        // LP; that gate is a statement about a five-second limit and nothing else,
+        // and at a limit where every node solves LPs it would have switched the
+        // reading off entirely.
+        //
+        // An undirected edge survives when either orientation does: the tree does
+        // not know which way the arborescence will run it.
+        for theta in [0.99, 0.9, 0.75, 0.5, 0.25] {
+            let mut kept = vec![false; num_arcs];
+            let mut verts: Vec<NodeId> = vec![root];
+            let mut any = false;
+            for a in 0..num_arcs {
+                if !active[a] {
+                    continue;
+                }
+                let y = lp_solution.get(a).copied().unwrap_or(0.0);
+                let z = lp_solution.get(a ^ 1).copied().unwrap_or(0.0);
+                if y.max(z) >= theta {
+                    kept[a] = true;
+                    verts.push(idx.tail(a as ArcId));
+                    verts.push(idx.head(a as ArcId));
+                    any = true;
+                }
+            }
+            if !any {
+                continue;
+            }
+            verts.sort_unstable();
+            verts.dedup();
+            // `mst_prune` spans `verts` using only the arcs left active, so
+            // masking the arcs below the threshold is exactly "Prim over the kept
+            // subgraph". Costs are the true ones throughout; `theta` selects a
+            // subgraph and never prices anything.
+            if let Some(t) = mst_prune(idx, &kept, root, &verts, is_terminal, sws) {
+                if !t.arcs.is_empty() {
+                    offer(t, &mut best);
+                }
+            }
+        }
+
         // A spread of starts, capped: this runs many times per node.
         let starts = 4.min(terminals.len()).max(1);
         for i in 0..starts {
