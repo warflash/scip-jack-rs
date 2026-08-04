@@ -163,26 +163,50 @@ pub struct LpRelaxation {
 /// appended, the basis stays feasible for the dual, and a re-solve costs a
 /// handful of pivots. That is what the branch-and-cut wants and it keeps it.
 ///
-/// It is the wrong algorithm for the models this benchmark's larger instances
-/// present, and the reason is visible in their costs. PACE Track 2's
+/// # The stall, and what it actually was
+///
+/// It was believed to be the wrong algorithm for the models this benchmark's
+/// larger instances present, on the grounds of their costs. PACE Track 2's
 /// instance142 has 118 edges of cost 100,000 among 724, the rest costing 1 to
 /// 47; its optimum is `30 * 100,000 + 526`. The relaxation must resolve a
 /// 526-unit structure inside a 3,000,000-unit objective, and it is massively
-/// degenerate at that scale — many bases of all but identical value. Measured on
-/// the root loop with nothing else changed:
+/// degenerate at that scale — many bases of all but identical value. The
+/// measurement was real: with HiGHS's defaults a single solve on a 1,248-column
+/// model runs for 105 seconds without terminating, and 083, 130, 142 and 164 all
+/// stalled below the value the interior point converged to.
 ///
-/// | instance | simplex | interior point |
-/// |---|---|---|
-/// | 083 | 66 solves, stalls, 3,200,553.1 | 93 solves, **converged**, 3,200,554.0 |
-/// | 130 | 28 solves, stalls, 3,600,591.9 | 79 solves, **converged**, 3,600,596.0 |
-/// | 142 | 45 solves, stalls, 3,000,522.2 | 82 solves, 3,000,526.0 |
-/// | 164 | 39 solves, stalls, 3,100,524.3 | 83 solves, **converged**, 3,100,526.0 |
-/// | 070 | 139 solves, converged, 63.0 | 63 solves, converged, 63.0 |
+/// Reading HiGHS's own log says what the stall is, and it is not the dual
+/// simplex. On instance130's 15.4-second solve:
 ///
-/// "Stalls" is literal: a single solve on a 1,248-column model runs for 105
-/// seconds without terminating, having been preceded by sixty-five solves
-/// averaging a quarter of a second. Every converged interior-point value in that
-/// table is *exactly the instance's optimum*.
+/// ```text
+/// DuPh2   1593  3.6030281214e+06  Pr: 0(0); Du: 0(2.4e-07)   Possibly optimal
+/// DuPh2   1593  3.6005921370e+06  Pr: 0(0); Du: 330(1394.02) Perturbation cleanup
+/// HEkkDual:: Using primal simplex to try to clean up num/max/sum = 330/32.3/1394
+/// PrPh2   5522  3.6005919877e+06  Pr: 0(0); Du: 326(329.285) Synthetic clock
+/// ```
+///
+/// The dual simplex converges in 1,593 iterations. HiGHS then removes the
+/// anti-degeneracy *cost perturbation* it applied, that exposes 330 dual
+/// infeasibilities summing to 1,394, it falls back to the primal simplex to clean
+/// them up, and the primal simplex makes no progress: from iteration 1,593 to
+/// 5,522 the objective is frozen and the infeasibility count oscillates between
+/// 300 and 460. Those four thousand iterations are the fifteen seconds. The
+/// perturbation scale is why: HiGHS caps it at `max_abs_cost^(1/4) = 17.8` on a
+/// cost vector running to 100,000, so on this family it is orders of magnitude
+/// too small to be removable cleanly.
+///
+/// With `dual_simplex_cost_perturbation_multiplier = 0` the cleanup phase does
+/// not exist, and the same loops converge — to the same `BCR*`, which on all
+/// three is the instance's optimum exactly:
+///
+/// | instance | interior point | dual simplex, no perturbation | dual simplex, HiGHS default |
+/// |---|---|---|---|
+/// | 130 | 79 solves, 18.34 s | 77 solves, **7.67 s** | stalls at 3,600,591.9 |
+/// | 083 | 93 solves, 16.95 s | 95 solves, **5.48 s** | stalls at 3,200,553.1 |
+/// | 142 | 85 solves, 22.19 s | 90 solves, **6.82 s** | stalls at 3,000,522.2 |
+///
+/// So the choice below is a genuine one again, and it is made by measurement in
+/// [`crate::model::RootSeparation`] rather than by this table.
 ///
 /// # Why the choice is safe whichever way it goes
 ///
@@ -441,6 +465,21 @@ impl LpRelaxation {
         // pool grows to several times the number of variables before anything is
         // evicted — which is exactly where the LP starts costing milliseconds
         // per solve on a problem that should take microseconds.
+        // Measured, and the answer is that it must stay loose. Sweeping the
+        // multiplier down on the converging root loop (`lpstar_probe`, dual
+        // simplex, no clock cap) does not shrink the model — the structural and
+        // lazy rows are protected and instance130 stops at 3,159 rows however
+        // hard the budget is squeezed — but it does make every prune trigger a
+        // rebuild, and a rebuild is a cold solve with presolve on:
+        //
+        // | multiplier | instance130 | rebuilds | instance192 | rebuilds |
+        // |---|---|---|---|---|
+        // | 2.0 | **10.28 s, converged** | 2 | 35.14 s | 2 |
+        // | 1.0 | 35.32 s, not converged | 64 | 35.51 s | 32 |
+        // | 0.6 | 35.18 s, not converged | 71 | 35.97 s | 42 |
+        //
+        // The rows a tighter budget would evict are not the ones that cost the
+        // solve; what costs is throwing the basis away.
         let row_budget = structural_count + (2 * num_arcs as usize).max(1000);
         let lazy_count = b.lazy.len();
 
@@ -825,12 +864,15 @@ impl LpRelaxation {
                 LpMethod::Simplex => {
                     model.set_option("solver", "simplex");
                     model.set_option("run_crossover", "on");
+                    // Anti-degeneracy cost perturbation, off. See [`LpMethod`]:
+                    // the dual simplex converges on these models; what does not
+                    // terminate is HiGHS's *cleanup* of its own perturbation.
                     model.set_option(
                         "dual_simplex_cost_perturbation_multiplier",
                         std::env::var("SJ_PERTURB")
                             .ok()
                             .and_then(|v| v.parse::<f64>().ok())
-                            .unwrap_or(1.0),
+                            .unwrap_or(0.0),
                     );
                 }
                 LpMethod::InteriorPoint => {

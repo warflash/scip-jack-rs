@@ -603,7 +603,9 @@ impl BranchAndCutSolver {
                 break;
             }
             arm(self.base_lp.as_mut().unwrap(), node_deadline);
+            let node_lp_started = Instant::now();
             let mut obj = self.base_lp.as_mut().unwrap().solve();
+            let mut node_lp_secs = node_lp_started.elapsed().as_secs_f64();
             self.total_lp_solves += 1;
 
             if !self.base_lp.as_ref().unwrap().is_optimal() {
@@ -635,7 +637,9 @@ impl BranchAndCutSolver {
                 }
                 self.total_cuts_added += added as u64;
                 arm(self.base_lp.as_mut().unwrap(), node_deadline);
+                let again = Instant::now();
                 obj = self.base_lp.as_mut().unwrap().solve();
+                node_lp_secs = again.elapsed().as_secs_f64();
                 self.total_lp_solves += 1;
                 if !self.base_lp.as_ref().unwrap().is_optimal() {
                     return if self.base_lp.as_ref().unwrap().status == LpStatus::Infeasible {
@@ -717,6 +721,13 @@ impl BranchAndCutSolver {
                 }
             }
 
+            // What the solve that produced this point cost, so the separator can
+            // weigh a complete sweep of every terminal against the extra round an
+            // incomplete one buys. See
+            // [`crate::separation::FlowCutSeparator::find_violated_cuts`]; the
+            // quantity is measured on this instance in this solve and is not a
+            // share of any budget.
+            separator.lp_secs = node_lp_secs;
             let flow_cuts = separator.find_violated_cuts(&lp_solution);
             let cycle_cuts = if no_cycle {
                 Vec::new()
@@ -890,6 +901,10 @@ impl BranchAndCutSolver {
                 self.tree.nodes[node_id as usize].dual_bound = node_dual_bound.max(da_bound);
                 return NodeResult::IntegerFeasible(sol);
             }
+            // The integrality repair asks a different question — *is this
+            // integral point disconnected* — and an incomplete answer to it is
+            // worthless, so it always gets the complete sweep.
+            separator.lp_secs = f64::INFINITY;
             let forced = separator.find_violated_cuts(&lp_solution);
             let mut added = 0usize;
             for cut in &forced {

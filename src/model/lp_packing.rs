@@ -247,6 +247,70 @@ fn decompose_partition(
     out
 }
 
+/// Every packing member the multipliers now standing in `lp` license.
+///
+/// Two row families can be read as cut weights and they are read the same way
+/// whichever algorithm produced the multipliers: a row over unit arc
+/// coefficients with right-hand side one is a Steiner cut and carries its own
+/// dual, and a partition row is decomposed by the lemma on
+/// [`decompose_partition`]. Everything else in the model contributes to the
+/// bound and nothing to the packing.
+///
+/// Validity does not depend on the multipliers being optimal, or even feasible:
+/// `certify` recovers each set's true boundary and `CertifiedPacking::repair`
+/// scales the result to satisfy (PACK). A worse dual costs the packing value and
+/// never its correctness — the same contract [`crate::model::LpMethod`] states
+/// for the bound.
+fn harvest_candidates(
+    lp: &LpRelaxation,
+    partitions: &HashMap<Vec<ArcId>, Vec<Vec<NodeId>>>,
+    idx: &ArcIndex,
+    root: NodeId,
+) -> Vec<Candidate> {
+    let mut harvest: Vec<Candidate> = lp
+        .unit_arc_rows()
+        .into_iter()
+        .map(|(entries, dual)| (dual, entries.iter().map(|&(c, _)| c as ArcId).collect()))
+        .collect();
+    // Partition rows, decomposed into the Steiner cuts that imply them.
+    //
+    // > **Lemma (partition decomposition).** Let `V = P_0 + P_1 + ... + P_k`
+    // > with the root in `P_0`, let `C` be the arcs whose endpoints lie in
+    // > different parts, and let the row `x(C) >= k` carry dual `lambda`.
+    // > Then giving each of `P_1, ..., P_k` the weight `lambda` contributes
+    // > exactly `lambda * k` to the packing's value -- the same as the row
+    // > contributes to the LP objective -- and loads every arc by no more
+    // > than the row already did.
+    //
+    // *Proof.* Each `delta^-(P_i)` is contained in `C`, since an arc
+    // entering `P_i` from outside has its endpoints in different parts. The
+    // sets `delta^-(P_i)` are pairwise disjoint, because an arc `(u,v)` lies
+    // in `delta^-(P_i)` only for the unique `i` with `v in P_i`. So the load
+    // the `k` sets place on an arc is `lambda` if it enters some `P_i` and
+    // zero otherwise, while the row placed `lambda` on every arc of `C`,
+    // a superset. And `k` sets of weight `lambda` sum to `lambda * k = rhs *
+    // lambda`. Finally no `P_i` with `i >= 1` holds the root, which is what
+    // a packing member must satisfy. QED
+    //
+    // This is what stops the extra families *starving* the packing. Without
+    // it, a partition row raises the LP bound and contributes nothing the
+    // search can use, and rows that displace flow cuts make the search's
+    // potential strictly weaker -- which is exactly how instance188 lost the
+    // proof it had.
+    for (entries, rhs, dual) in lp.unit_rows_above_one() {
+        let arcs: Vec<ArcId> = entries.iter().map(|&(c, _)| c as ArcId).collect();
+        let Some(parts) = partitions.get(&signature(&arcs)) else { continue };
+        if (parts.len() as f64 - rhs).abs() > 1e-9 {
+            // The witness does not match the row it was recorded for. Drop
+            // it rather than guess: the packing must never rest on a
+            // correspondence nobody checked.
+            continue;
+        }
+        harvest.extend(decompose_partition(parts, dual, idx, root));
+    }
+    harvest
+}
+
 /// Canonical identity of a row over arcs: its sorted support.
 fn signature(arcs: &[ArcId]) -> Vec<ArcId> {
     let mut s = arcs.to_vec();
@@ -753,6 +817,13 @@ pub struct RootSeparation {
     lp_solves: u64,
     rounds: Vec<RoundStat>,
     candidates: Option<Vec<Candidate>>,
+    /// The same harvest taken from an interior point's dual instead of the
+    /// simplex's, and kept across calls. See the second-dual passage at the end
+    /// of `advance` for why the packing wants a different dual from the bound,
+    /// and why a list harvested from an earlier model is still valid here.
+    fat_candidates: Option<Vec<Candidate>>,
+    /// Which algorithm's multipliers `candidates` was read from.
+    candidates_method: Option<LpMethod>,
     /// The objective of the solve whose reduced costs `lp` still holds. Pairing
     /// a bound with another solve's vector is the mistake `RootCertificate`
     /// documents; keeping them together is how it is not made again.
@@ -905,6 +976,8 @@ impl RootSeparation {
             // be abandoned at any point and still hand back the strongest dual
             // it actually proved.
             candidates: None,
+            fat_candidates: None,
+            candidates_method: None,
             last_obj: None,
             eliminated_arcs: Vec::new(),
             converged: false,
@@ -1043,6 +1116,8 @@ impl RootSeparation {
             lp_solves,
             rounds,
             candidates,
+            fat_candidates,
+            candidates_method,
             last_obj,
             eliminated_arcs,
             converged,
@@ -1061,6 +1136,20 @@ impl RootSeparation {
         let mut cycle_sep = CycleCutSeparator::new(graph);
         let mut partition_sep = PartitionSeparator::new(graph, root, terminals);
         let mut tf_sep = TfCutSeparator::new(graph, terminals);
+
+    // The batch's own clock, narrowed for the loops inside the *rounds* -- the
+    // connectivity sweep is one max flow per terminal and there are 16,808 of
+    // them on instance079 -- exactly as §111 asks and as `root_reduce::round`
+    // does for its phases. Narrowing only ever shortens, so nothing here is
+    // handed more clock than the solve has.
+    //
+    // It is dropped before the extraction below and that is not a detail. The
+    // rounds run *until* this deadline, so it has passed by the time the
+    // extraction starts, and `extend_by_residual_ascent` -- which is what takes
+    // instance074's packing from 4602071.0 to 4602085.5 -- reads the same clock.
+    // Holding the guard to the end of the function silences the extension on
+    // every call, and paired at five seconds that is worth several instances.
+    let batch_clock = crate::deadline::narrow(Some(deadline));
 
     // One clock for the whole call. HiGHS drops the simplex state when an option
     // is assigned, so the limit is stated once here rather than once per round;
@@ -1129,48 +1218,9 @@ impl RootSeparation {
         );
         *best_bound = best_bound.max(obj);
         let t_harvest = Instant::now();
-        let mut harvest: Vec<Candidate> = lp
-            .unit_arc_rows()
-            .into_iter()
-            .map(|(entries, dual)| (dual, entries.iter().map(|&(c, _)| c as ArcId).collect()))
-            .collect();
-        // Partition rows, decomposed into the Steiner cuts that imply them.
-        //
-        // > **Lemma (partition decomposition).** Let `V = P_0 + P_1 + ... + P_k`
-        // > with the root in `P_0`, let `C` be the arcs whose endpoints lie in
-        // > different parts, and let the row `x(C) >= k` carry dual `lambda`.
-        // > Then giving each of `P_1, ..., P_k` the weight `lambda` contributes
-        // > exactly `lambda * k` to the packing's value -- the same as the row
-        // > contributes to the LP objective -- and loads every arc by no more
-        // > than the row already did.
-        //
-        // *Proof.* Each `delta^-(P_i)` is contained in `C`, since an arc
-        // entering `P_i` from outside has its endpoints in different parts. The
-        // sets `delta^-(P_i)` are pairwise disjoint, because an arc `(u,v)` lies
-        // in `delta^-(P_i)` only for the unique `i` with `v in P_i`. So the load
-        // the `k` sets place on an arc is `lambda` if it enters some `P_i` and
-        // zero otherwise, while the row placed `lambda` on every arc of `C`,
-        // a superset. And `k` sets of weight `lambda` sum to `lambda * k = rhs *
-        // lambda`. Finally no `P_i` with `i >= 1` holds the root, which is what
-        // a packing member must satisfy. QED
-        //
-        // This is what stops the extra families *starving* the packing. Without
-        // it, a partition row raises the LP bound and contributes nothing the
-        // search can use, and rows that displace flow cuts make the search's
-        // potential strictly weaker -- which is exactly how instance188 lost the
-        // proof it had.
-        for (entries, rhs, dual) in lp.unit_rows_above_one() {
-            let arcs: Vec<ArcId> = entries.iter().map(|&(c, _)| c as ArcId).collect();
-            let Some(parts) = partitions.get(&signature(&arcs)) else { continue };
-            if (parts.len() as f64 - rhs).abs() > 1e-9 {
-                // The witness does not match the row it was recorded for. Drop
-                // it rather than guess: the packing must never rest on a
-                // correspondence nobody checked.
-                continue;
-            }
-            harvest.extend(decompose_partition(parts, dual, idx, root));
-        }
+        let harvest = harvest_candidates(lp, partitions, idx, root);
         *candidates = Some(harvest);
+        *candidates_method = Some(lp.method);
         *last_obj = Some(obj);
         let harvest_secs = t_harvest.elapsed().as_secs_f64();
         if upper_bound.is_finite() {
@@ -1204,6 +1254,10 @@ impl RootSeparation {
         *batch = batch.saturating_mul(4);
         let solution = lp.get_solution().to_vec();
         let t_flow = Instant::now();
+        // What the solve that produced this point cost, so the separator can
+        // weigh a complete sweep against the round an incomplete one adds. See
+        // [`FlowCutSeparator::find_violated_cuts`].
+        separator.lp_secs = lp_secs;
         let cuts = separator.separate_cuts(&solution);
         let flow_secs = t_flow.elapsed().as_secs_f64();
         // The three families the branch-and-cut already had and the root loop
@@ -1360,10 +1414,17 @@ impl RootSeparation {
             extra_secs = t0.elapsed().as_secs_f64();
         }
 
-        if structural == 0 && installed == 0 && extra == 0 {
+        if structural == 0 && installed == 0 && extra == 0 && !separator.was_truncated() {
             // The point satisfies every requirement any family here can express,
             // so no further round of this loop can move the bound — this call's
             // or any later one's.
+            //
+            // `was_truncated` is the difference between "nothing is violated" and
+            // "nobody looked". A connectivity sweep is one max flow per terminal
+            // and on the wide instances that is thousands of them, so it can be
+            // cut off by the clock; an empty answer from a cut-off sweep is not
+            // evidence about the point, and treating it as a fixpoint would claim
+            // `BCR*` for a bound that has not been separated.
             *converged = true;
             break;
         }
@@ -1422,15 +1483,19 @@ impl RootSeparation {
 
     // A converged loop still owes the caller the strongest elimination its own
     // last solve licenses under the *current* incumbent, which the caller may
-    // have improved since. `last_obj` and `lp.reduced_costs` come from the same
-    // solve; nothing here pairs a bound with another solve's vector.
+    // have improved since.
     if *converged && upper_bound.is_finite() {
-        // The multipliers still in `lp` are the ones `last_obj` was certified
-        // from, so re-deriving the pair here reproduces it exactly; the
-        // recomputation is what keeps value and reduced costs matched rather than
-        // read from two different places.
-        if let (Some(obj), Some(certified)) = (*last_obj, lp.certified_dual_bound()) {
-            debug_assert!((certified.value - obj).abs() <= 1e-6 * obj.abs().max(1.0));
+        // Both halves come from `certified`, and that is not a tidying: this
+        // block runs on a *later* call than the solve `last_obj` was recorded
+        // from, and since the second dual below leaves the model holding an
+        // interior point's multipliers, `last_obj` and `lp` can now belong to
+        // different solves. Pairing them would be the exact mistake
+        // [`RootCertificate`] documents. `certified.value` is the bound those
+        // multipliers prove and `certified.reduced` the prices they set, so the
+        // pair is self-consistent whichever algorithm left them; a weaker dual
+        // costs eliminations and never validity.
+        if let Some(certified) = lp.certified_dual_bound() {
+            let obj = certified.value;
             let fixed: Vec<ArcId> = (0..num_arcs)
                 .filter(|&a| {
                     let rc = certified.reduced.get(a).copied().unwrap_or(0.0);
@@ -1444,25 +1509,13 @@ impl RootSeparation {
         }
     }
 
-    let candidates = candidates.as_ref()?;
-    let packing = certify(candidates, idx, root);
-    let mut packing = extend_by_residual_ascent(packing, idx, root, terminals, max_set_nnz);
-
-    // (PACK) is re-derived from the multipliers on *every* extraction, not only
-    // in a debug build and not only at the end of a one-shot run. A resumed loop
-    // hands the search a packing built from a dual it did not itself produce, and
-    // a bound that gets announced as a proof must not rest on a solver's
-    // tolerance. `repair` scales to feasibility and can only lower the claim; see
-    // the certified-scaling lemma on [`CertifiedPacking::repair`].
-    let scale = packing.repair(idx, root);
-    debug_assert!(
-        scale >= 1.0 - 1e-9,
-        "extracted packing violated (PACK) and was scaled by {scale}"
-    );
+    // The rounds are over; the extraction runs under the solve's clock again.
+    drop(batch_clock);
 
     // The arc-priced dual, for the reduction. `last_obj` and the multipliers in
     // `lp` belong to the same solve; nothing here pairs a bound with another
-    // solve's vector.
+    // solve's vector. It is read *before* the second dual below, which replaces
+    // those multipliers with another algorithm's.
     let arc_dual = last_obj.and_then(|value| {
         let certified = lp.certified_dual_bound()?;
         (certified.value >= value - 1e-6 * value.abs().max(1.0)).then(|| ArcDual {
@@ -1473,6 +1526,91 @@ impl RootSeparation {
                 .collect(),
         })
     });
+
+    // ## The bound and the packing want different duals
+    //
+    // The loop above has been asking one dual vector to do two jobs.
+    //
+    // The **bound** is a number. `certified_dual_bound` turns any multiplier
+    // vector into a valid lower bound and attains the LP optimum at any optimal
+    // dual, so all that matters is *which* optimal dual is reached fastest — and
+    // that is the simplex, which stops at a vertex of the optimal face.
+    //
+    // The **packing** is a combinatorial object: the members are the rows whose
+    // dual is positive, and its value is what the goal-directed search gets as a
+    // potential. Here it is the *support* that matters, and a vertex is the worst
+    // possible optimal dual for this purpose. At a degenerate optimum — which is
+    // this family, see [`crate::model::LpMethod`] — the optimal face has many
+    // vertices, every one of them carries at most `m` positive multipliers, and
+    // which rows those are is decided by the pivot rule rather than by the
+    // instance. An interior point without crossover converges instead toward the
+    // analytic centre of the optimal face, which puts positive weight on *every*
+    // row that is positive in some optimal dual. Same bound, strictly broader
+    // support, and support is what `certify` turns into packing members.
+    //
+    // Measured on PACE instance074 at a one-second limit, the same model and the
+    // same round: the simplex dual yields a packing of 4602071.0 and the interior
+    // point's yields 4602085.5, against an LP bound of 4602071.0 that both
+    // certify. The search closes the instance on the second and not on the first.
+    //
+    // So the second dual is bought once per call, at the end, on the model as it
+    // finally stands — against the *N* interior-point solves the loop used to
+    // spend when it ran on the interior point throughout. Its candidates are kept
+    // across calls because they stay valid: `certify` recovers each set's own
+    // boundary from the graph and `repair` scales to (PACK), so a set list
+    // harvested from an older, smaller model is a weaker packing and never an
+    // invalid one. The two are certified separately and the stronger is returned,
+    // which is why this can only raise the potential.
+    //
+    // The test is on the algorithm that produced the *candidates*, not on the
+    // one that happens to be current: the end-of-call switch above may already
+    // have moved `lp.method` on, and what is being repaired is the harvest that
+    // was actually taken.
+    if *candidates_method == Some(LpMethod::Simplex)
+        && !refused.contains(&LpMethod::InteriorPoint)
+        && *lp_solves > solves_at_entry
+    {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+        if remaining > 0.0 {
+            let resume = lp.method;
+            lp.method = LpMethod::InteriorPoint;
+            lp.arm_time_limit(remaining);
+            lp.solve();
+            *lp_solves += 1;
+            if lp.is_optimal() {
+                *fat_candidates = Some(harvest_candidates(lp, partitions, idx, root));
+            }
+            // Back to whatever the loop had decided to run next. The
+            // reassignment costs the basis; one cold solve per call is the price
+            // of the support.
+            lp.method = resume;
+        }
+    }
+
+    let candidates = candidates.as_ref()?;
+    // (PACK) is re-derived from the multipliers on *every* extraction, not only
+    // in a debug build and not only at the end of a one-shot run. A resumed loop
+    // hands the search a packing built from a dual it did not itself produce, and
+    // a bound that gets announced as a proof must not rest on a solver's
+    // tolerance. `repair` scales to feasibility and can only lower the claim; see
+    // the certified-scaling lemma on [`CertifiedPacking::repair`].
+    let build = |cands: &[Candidate]| {
+        let p = certify(cands, idx, root);
+        let mut p = extend_by_residual_ascent(p, idx, root, terminals, max_set_nnz);
+        let scale = p.repair(idx, root);
+        debug_assert!(
+            scale >= 1.0 - 1e-9,
+            "extracted packing violated (PACK) and was scaled by {scale}"
+        );
+        p
+    };
+    let mut packing = build(candidates);
+    if let Some(fat) = fat_candidates.as_ref() {
+        let alt = build(fat);
+        if alt.value > packing.value {
+            packing = alt;
+        }
+    }
 
     Some(RootCertificate {
         lp_bound: *best_bound,

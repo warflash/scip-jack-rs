@@ -232,7 +232,11 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     // been observed to do anything on this instance. The first pass assumes it
     // does; only a pass that watched it solve nothing says otherwise.
     let mut carried_lower_bound: Cost = 0.0;
-    let mut branch_and_cut_works = true;
+    // `SJ_BNC=0` is an *instrument*, off unless set: it withholds the
+    // branch-and-cut's share of every window and gives it to the goal-directed
+    // search and the separation loop instead, so the two stages can be told
+    // apart on a paired run. Nothing in the pipeline reads it by default.
+    let mut branch_and_cut_works = std::env::var("SJ_BNC").as_deref() != Ok("0");
     // What the width attempt already spent, and on which graph.
     //
     // [`try_decomposition`] is deterministic: the same graph, the same ordering
@@ -940,6 +944,9 @@ fn finish(
     }
 
     let bnc_started = Instant::now();
+    if std::env::var("SJ_BNC").as_deref() == Ok("0") {
+        solver.config.time_limit_secs = 0.0;
+    }
     let (solution, stats) = solver.solve();
     let bnc_secs = bnc_started.elapsed().as_secs_f64();
 
@@ -1407,8 +1414,90 @@ fn run_search(
         let da = dual_ascent_packing(&idx, terminals[0], terminals, &active, DS_PACKING_NNZ);
         search = SteinerSearch::new(work_graph, terminals, root_upper_bound, &[&da.sets]);
     }
-    // Out of the addressable range, or the terminals are split.
-    let Some(mut search) = search else { return };
+    // ## The relaxation on the instances the search cannot reach
+    //
+    // `SteinerSearch::new` returns `None` above the goal-directed search's
+    // 64-terminal range, and §122 recorded the consequence without acting on it:
+    // *the certificate loop and the search are behind the same gate*, so on every
+    // instance with more than 64 terminals the resumable root separation has
+    // never run at all. That is the whole of the wide group — PACE Track 2's
+    // `|R|` there runs from 235 to 2,402 — and the only cut loop those instances
+    // ever see is the branch-and-cut's, which rebuilds its model from a few
+    // hundred seeded rows on every pass and is thrown away between them.
+    //
+    // §133 makes running it here affordable and §130 makes it fast. Measured with
+    // `lpstar_probe`, no clock cap, dual simplex, on the instances this branch is
+    // for: instance096 converges in **2.77 s** to `BCR*` = 0.9968 of the optimum,
+    // against 0.9954 for the whole five-second pipeline; instance064 in 1.42 s;
+    // instance101 in 17.57 s to 0.9942 against the pipeline's 0.9847.
+    //
+    // There is no allocation question on this branch and none is asked. With no
+    // search to feed there is no frontier rate to compare a batch against, no
+    // packing to install as a potential and no repayment to test; the loop runs
+    // until it converges — a fixpoint, not a budget, and the point at which its
+    // value *is* the optimum of the bidirected cut relaxation — or until the
+    // window ends. Both of its outputs are valid lower bounds on the same
+    // instance and the caller already takes the maximum.
+    //
+    // **It is off, behind `SJ_WIDE`, because paired it loses.** Five seconds,
+    // Track 2 `[1..200]`, both binaries in the same worker slot: **105 against
+    // 102**, four losses against one gain. The window it takes is the
+    // branch-and-cut's, and §135 measured that the branch-and-cut earns it. The
+    // trace says why and the reason is not the mathematics: on instance096 the
+    // loop gets nine solves where the probe needed thirty-six, because
+    // `RootSeparation::new` rebuilds the model and the seed ascents from nothing
+    // on this path and every `advance` call buys the second dual of §131 for a
+    // packing that has no consumer here. Both are fixable and neither was fixed;
+    // that measurement was also taken under an eight-way load that should not have
+    // been there, so it is a provisional negative and not a closed direction.
+    // Left wired and switched off so the next round re-measures rather than
+    // re-implements — the shape §123 gave `SJ_EXTENDED`.
+    let Some(mut search) = search else {
+        if terminals.len() < 2 || std::env::var("SJ_WIDE").as_deref() != Ok("1") {
+            return;
+        }
+        let window = {
+            let budget = deadline.saturating_duration_since(Instant::now());
+            if branch_and_cut_works {
+                Instant::now() + budget.mul_f64(0.5)
+            } else {
+                deadline
+            }
+        };
+        let mut separation =
+            sep_cache.take().filter(|s| s.applies_to(&directed, terminals[0], terminals));
+        let sep = separation
+            .get_or_insert_with(|| RootSeparation::new(&directed, terminals[0], terminals));
+        while Instant::now() < window && !sep.is_converged() {
+            let before = sep.lp_solves();
+            let Some(cert) = sep.advance(root_upper_bound, window, ROOT_CERT_ROUNDS, DS_PACKING_NNZ)
+            else {
+                break;
+            };
+            *search_lower_bound = search_lower_bound.max(cert.lp_bound).max(cert.packing.value);
+            if config.verbose {
+                eprintln!(
+                    "[certify] wide: lp bound {:.1}, packing {:.1} over {} sets, {} solves (+{}) \
+                     [{:?}], {} rows{}",
+                    cert.lp_bound,
+                    cert.packing.value,
+                    cert.packing.sets.len(),
+                    cert.lp_solves,
+                    cert.lp_solves - before,
+                    sep.method(),
+                    sep.num_rows(),
+                    if sep.is_converged() { ", converged" } else { "" },
+                );
+            }
+            // A call that solved nothing will solve nothing next time either:
+            // the model is unchanged and so is the algorithm.
+            if sep.lp_solves() == before {
+                break;
+            }
+        }
+        *sep_cache = separation;
+        return;
+    };
     // A pass that improved the incumbent hands the tighter cutoff to a search
     // that has already run under the looser one. That only ever prunes more.
     search.set_upper_bound(root_upper_bound);

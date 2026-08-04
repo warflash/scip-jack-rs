@@ -6023,3 +6023,378 @@ The `SJ_PERTURB` hook that produced these numbers is committed as an instrument,
 defaulting to HiGHS's own 1.0, so the pipeline is unchanged. Wiring it is the
 first item of the next round and it is the largest measured multiplier this
 project has found since the LP was introduced.
+
+### 129. The control, and what was frozen
+
+HEAD `66d6737` on `main`, copied aside as `control.exe` before anything was
+touched. Every paired comparison below runs both binaries in the same worker slot
+on the same instance, eight-way, which is the only comparison on this benchmark
+that means anything (§74).
+
+§128 left one item and it is the first thing this round did. Everything after it
+came out of asking, on the **wide** group rather than on Group A, the question
+§119 asked on Group A: where do the seconds actually go. Nobody had asked it
+there, and the answers are larger.
+
+### 130. §128 wired: the perturbation is off, and the simplex is a real choice again
+
+`dual_simplex_cost_perturbation_multiplier` now defaults to `0` for
+`LpMethod::Simplex`; `SJ_PERTURB` stays as the override that produced §128's
+table. [`LpMethod`]'s documentation is rewritten: §76's stall table is kept,
+because the measurement was real, and the diagnosis attached to it is replaced by
+HiGHS's own log — the dual simplex converges in 1,593 iterations and the four
+thousand that follow are the *primal* simplex failing to clean up a perturbation
+HiGHS capped at `max_abs_cost^(1/4) = 17.8` on a cost vector running to 100,000.
+
+Paired, Track 2 `[1..200]`, control against perturbation-off and nothing else:
+
+| budget | control | perturbation off |
+|---|---|---|
+| 5 s | 116 | **118** |
+| 1 s | **81** | 79 |
+
+The five-second gain is real and so is the one-second loss, and the loss is
+exactly what §128 said to look for. instance074 at a one-second limit, same model,
+same round:
+
+```text
+control  [certify] lp bound 4602071.0, packing 4602085.5 over 482 sets
+cand     [certify] lp bound 4602071.0, packing 4602071.0 over 515 sets
+```
+
+Same bound. The packing — which is what the goal-directed search consumes as a
+potential — is **14.5 units weaker**, and the instance closes on the first and not
+on the second. That is §83 arriving from the other side: what changed is not that
+the interior point got better, it is that the loop used to *fall back* to it when
+the simplex stalled, and a working simplex stopped it doing so.
+
+### 131. The bound and the packing want different duals
+
+The loop had been asking one dual vector to do two jobs, and they are not the
+same job.
+
+> The **bound** is a number. `certified_dual_bound` turns any multiplier vector
+> into a valid lower bound and attains the LP optimum at any optimal dual, so all
+> that matters is which optimal dual is reached fastest — and that is the simplex,
+> which stops at a vertex of the optimal face.
+>
+> The **packing** is a combinatorial object. Its members are the rows whose dual
+> is positive, so what matters is the dual's *support*, and a vertex is the worst
+> optimal dual there is for that purpose: at a degenerate optimum — which is this
+> family, §115 — the optimal face has many vertices, each carries at most `m`
+> positive multipliers, and which rows those are is decided by the pivot rule and
+> not by the instance. An interior point without crossover converges toward the
+> analytic centre of the optimal face, which puts positive weight on every row
+> that is positive in *some* optimal dual. Same bound, strictly broader support,
+> and support is what `certify` turns into packing members.
+
+So `RootSeparation::advance` buys a **second dual**: one interior-point solve,
+once per call, on the model as it finally stands, harvested into a second
+candidate list and certified separately. The stronger of the two packings is
+returned. Three things make that safe and cheap:
+
+- it can only raise the potential, because the two are certified independently and
+  the maximum is taken;
+- validity does not depend on the multipliers at all — `certify` recovers each
+  set's own boundary from the graph and `repair` scales to (PACK) — so the fat
+  list is also kept across calls, where it is a weaker packing and never an
+  invalid one;
+- it costs **one** interior-point solve per call against the *N* the loop used to
+  spend when the interior point ran throughout.
+
+The test is on the algorithm that produced the candidates, not the one that
+happens to be current: §83's end-of-call switch may already have moved
+`lp.method` on, and what is being repaired is the harvest that was actually taken.
+Getting that wrong is why the first version fired on nothing.
+
+Paired at one second, perturbation-off against perturbation-off plus the second
+dual: **79 → 82**, and instance074 closes again.
+
+One consequence had to be repaired with it. The converged branch's reduced-cost
+elimination paired `last_obj` — recorded when the rounds ran — with the
+multipliers `lp` happens to hold now, and the second dual makes those two
+different solves on any later call. `c(A) >= L + rc_a` needs both from one
+`lambda`, so both now come from `certified`, and the check that they agree is
+gone because it is no longer a property that holds.
+
+### 132. The round's own clock, which the loops inside it could not read
+
+§119 attributed a tightening round on Group A. Run on the **wide** group, the same
+instrument says something much larger. PACE Track 2, five-second limit,
+`SJ_ROUND_TRACE`:
+
+| instance | greedy | ascents | ils | recomb | grow | round | search gets |
+|---|---|---|---|---|---|---|---|
+| instance101 | 0.83 | 1.37 | **2.21** | 0.00 | 0.00 | 4.42 s | **0.00 s** |
+| instance122 | 1.24 | 1.17 | **2.08** | 0.00 | 0.00 | 4.49 s | 0.00 s |
+| instance137 | 0.81 | 0.91 | **2.24** | 0.00 | 0.00 | 3.96 s | 0.00 s |
+| instance096 | 0.68 | 1.09 | 0.47 | 0.00 | 0.00 | 2.25 s | 1.31 s |
+
+instance101's pass-0 deadline is 2.50 s; the round returned at 5.00 s; the
+branch-and-cut then solved **zero LPs**. The iterated local search reports *zero
+iterations* on 101 and 122 and still costs 2.2 s, and the reason is §111's own:
+its loop checks the round deadline, and the `polish` in front of that loop does
+not take one. §111 installed the **solve's** deadline where the seconds are — the
+shortest-path heuristic, the dual ascent, key-path exchange, the local search's
+polish — and every one of those was then being read from inside a phase whose own
+deadline is a fraction of it. §111's comment on `polish` even names the case it
+fixed, instance079's 252 s; what it could not fix is a phase overrunning by a
+factor of two rather than by a factor of eight.
+
+The repair needed no new plumbing, only the right clock in the existing one.
+`deadline::narrow` installs the *earlier* of a stage's deadline and the solve's —
+narrowing is the only admissible direction, and `narrowing_only_ever_shortens` is
+the gate — and `root_reduce::round` narrows to its own deadline across the three
+primal phases, dropping the guard before the elimination block, which by its own
+header must run whatever the clock says.
+
+| instance | tighten, control | tighten, narrowed | what followed |
+|---|---|---|---|
+| instance101 | 4.38 s | **1.54 s** | 0 LPs → **18 LPs**, dual +1.35 M |
+| instance122 | 4.49 s | 1.54 s | gap 1.79 % → 1.14 % |
+| instance137 | 3.96 s | 1.56 s | gap 1.43 % → 1.05 % |
+
+Paired at five seconds: 118 → 119. Nothing here is a budget rule: every reader may
+only stop early, each stop is a refusal the caller already tolerates, and the
+phases it makes room for are the ones §119 measured as *producing* the
+improvements — the exact recombination costs three hundredths of a second on
+instance130 and takes the incumbent to the optimum.
+
+`RootSeparation::advance` narrows to its own batch deadline for the same reason
+and with the same discipline, and there the scope of the guard is itself a
+measurement: held to the end of the call it silences
+`extend_by_residual_ascent`, which runs *after* the rounds have used the batch up
+and which is what takes instance074's packing from 4602071.0 to 4602085.5. Paired
+at five seconds that mistake is worth five instances — 109 against 114 — and it is
+the only version of any of this that measured negative.
+
+### 133. Where the wide group's seconds really go: max flows on terminals that are not violated
+
+With the LP two and a half times faster, `lpstar_probe` was pointed at the wide
+group for the first time. instance096, root cut loop run to convergence, no clock
+cap, dual simplex:
+
+```text
+round 15  cuts  4   lp 0.028  flow 0.197
+round 17  cuts  2   lp 0.026  flow 0.170
+round 19  cuts  4   lp 0.024  flow 0.179
+```
+
+Converged in 5.56 s, of which the LP is 0.94 s and **the flow separation is
+3.88 s**. Every late round pays 305 max flows — one per terminal — to find two to
+four violated cuts. The separation is four times the LP it is feeding, and nobody
+had looked because on Group A it is 0.016 s a round against an LP of 0.2.
+
+> **Proposition (a short list cannot change what the loop proves).** Let `A` be
+> any set of terminals. A pass over `A` emits only rows it has checked against the
+> true LP values, so every row it emits is a valid inequality violated by the
+> point, whatever `A` is. And the only conclusion the loop draws from an *empty*
+> separation is that the point is feasible for this family — a conclusion reached
+> only after a pass over **all** the terminals, because an empty short pass is
+> followed by the complete one before anything is returned. So the short list
+> changes which violated rows are found first, and never which points are
+> separable. ∎
+
+`FlowCutSeparator` therefore keeps the terminals its last pass found something
+for, sweeps those first, and falls back to the complete sweep exactly when that
+finds nothing — which is also the only pass whose emptiness is allowed to mean
+anything. The list is self-regulating rather than tuned: the first rounds violate
+hundreds of terminals and the pass is nearly complete; it thins as the point
+approaches feasibility, which is where the seconds were.
+
+Two things had to be added for the proposition to be *true of the code* rather
+than of the idea. A sweep is thousands of max flows on the wide instances —
+instance079 has 16,808 terminals after a classical reduction that deletes nothing
+— so it now reads the deadline; and a sweep the clock cut short has not looked at
+every terminal, so `was_truncated` reports it and the cut loop refuses to call
+that a fixpoint. Without it a truncated empty sweep would set `converged`, and
+`converged` is the flag that claims `BCR*`.
+`an_empty_separation_means_every_terminal_is_covered` drives the separator
+through sequences of points on random graphs — which is what builds up and thins
+out the list — and checks every empty answer against an independent max flow per
+terminal, and every emitted row against the point that was separated.
+
+**Unconditionally, the short list is a trade and not a win.** A short pass finds
+fewer rows, so the loop needs more rounds, and a round costs an LP solve:
+
+| instance | control | short list always | what moved |
+|---|---|---|---|
+| instance096 | 5.56 s, 24 solves | **3.02 s**, 36 solves | flow 3.88 → 1.02 |
+| instance064 | 2.19 s, 15 solves | **1.38 s**, 22 solves | flow 1.30 → 0.32 |
+| instance130 | **10.25 s**, 78 solves | 13.74 s, 189 solves | lp 8.91 → 12.58 |
+| instance101 | **27.53 s**, 25 solves | 36.79 s, 44 solves | flow 20.5 → 8.9, lp 4.1 → 24.3 |
+
+So the loop asks which of the two it is paying for, and it already knows: what a
+complete sweep cost it last time, and what the solve that produced this point cost
+it. Both are seconds already spent on this instance, neither is a share of any
+budget, and the comparison reads the same at one second and at a thousand. A
+separator whose caller does not set `lp_secs` sees infinity and sweeps completely,
+which is exactly what it did before — and the branch-and-cut's integrality repair
+keeps that unconditionally, because "is this integral point disconnected" is a
+question an incomplete answer cannot answer.
+
+| instance | LP per solve | complete sweep | control | dispatched |
+|---|---|---|---|---|
+| instance130 | 0.11 s | 0.01 s | 10.25 s | **9.57 s** |
+| instance192 | 0.29 s | 0.02 s | 40.35 s | 40.10 s |
+| instance064 | 0.03 s | 0.09 s | 2.19 s | **1.42 s** |
+| instance096 | 0.04 s | 0.18 s | 5.56 s | **2.77 s** |
+| instance101 | 0.16 s | 0.82 s | 27.53 s | **17.57 s** |
+
+Every converged `BCR*` is unchanged to six figures. Paired at five seconds:
+119 → 122, three gains and no losses.
+
+And one fact worth recording separately, because it bounds a family of ideas the
+way §113 did: on instance096 `BCR*` is `161,246,440.5` against an optimum of
+`161,760,951` — **0.9968 of it**. §113's "there is nothing to branch on" is a
+statement about Group A and it does not transfer. On the wide group there is a
+genuine integrality gap of a third of a percent, and converging the root loop is a
+*prerequisite* for the proof rather than the proof.
+
+### 134. Wired and switched off: the root separation on the instances the search cannot reach
+
+§122 recorded that the certificate loop and the goal-directed search are behind
+the same 64-terminal gate, so on the whole wide group — `|R|` from 235 to 2,402 —
+the resumable root separation has never run at all. §133 is what makes running it
+there affordable and §130 is what makes it fast, so it was built: with no search
+to feed there is no rate to compare against and no repayment to test, and the loop
+simply runs until it converges or the window ends.
+
+**Paired at five seconds it loses: 105 against 102**, four losses against one
+gain. The window it takes is the branch-and-cut's, and §135 measured that the
+branch-and-cut earns it. The trace says why, and the reason is not the
+mathematics: on instance096 the loop gets nine solves where the probe needed
+thirty-six, because `RootSeparation::new` rebuilds the model and its seed ascents
+from nothing on this path, and every `advance` call buys §131's second dual for a
+packing that has no consumer here. Both are fixable and neither was fixed. That
+run was also taken under an eight-way load left behind by a cancelled matrix, so
+it is a *provisional* negative rather than a closed direction.
+
+It stays wired, behind `SJ_WIDE`, off by default, so the next round re-measures
+instead of re-implementing — the shape §123 gave `SJ_EXTENDED`.
+
+### 135. Measured and rejected: the branch-and-cut is not the waste it looked like
+
+§116 says the branch-and-cut opens one node on Group A and spends its window in a
+root cut loop, and §120 says its rate is zero by construction. It also rebuilds
+that loop from 290 seeded rows while `RootSeparation` — resumable, carried across
+passes — already holds 2,828. The hypothesis was that half of every window goes to
+re-deriving a strictly weaker copy of something the pipeline already has.
+
+`SJ_BNC=0` is the instrument that tests it: it withholds the branch-and-cut's
+share of every window and gives it to the goal-directed search and the separation
+loop instead. It is off unless set and nothing reads it by default.
+
+Paired at five seconds, Track 2 `[1..200]`: **120 with, 114 without.** Eight
+losses — 029, 077, 083, 090, 092, 093, 114, 168 — against two gains. The
+branch-and-cut earns its seconds even on the class where it opens one node, and
+the hypothesis is wrong. Keeping the instrument is cheaper than re-arguing it.
+
+### 136. Built, measured, removed: a tighter row budget
+
+The converging loop's models reach 4,385 rows against 1,863 columns, and at a
+vertex at most `n` rows can be tight, so most of what is carried is provably
+slack. Sweeping the budget multiplier down (`lpstar_probe`, dual simplex, no cap):
+
+| multiplier | instance130 | rebuilds | instance192 | rebuilds |
+|---|---|---|---|---|
+| 2.0 (shipped) | **10.28 s, converged** | 2 | 35.14 s | 2 |
+| 1.0 | 35.32 s, not converged | 64 | 35.51 s | 32 |
+| 0.6 | 35.18 s, not converged | 71 | 35.97 s | 42 |
+
+It does not even shrink the model — the structural and lazy rows are protected and
+instance130 stops at 3,159 rows however hard the budget is squeezed — and every
+prune it does trigger is a rebuild, and a rebuild is a cold solve with presolve
+on: 744 ms on instance130. **The rows a tighter budget would evict are not what
+costs the solve; what costs is throwing the basis away.** The constant is unchanged
+and the measurement now sits in the source beside it.
+
+### 137. The matrix, and what shipped
+
+Four behavioural changes, in the order they were built, each paired against the
+one before it at five seconds on Track 2 `[1..200]`:
+
+| change | before | after |
+|---|---|---|
+| dual simplex cost perturbation off (§130) | 116 | 118 |
+| the packing's own dual (§131) | 118 | 118 — and 79 → **82** at 1 s |
+| the round's clock, narrowed (§132) | 118 | 119 |
+| the separation's short list, dispatched (§133) | 119 | 122 |
+
+Plus two instruments (`SJ_BNC` §135, `SJ_WIDE` §134), one negative result recorded
+in the source (§136), and one correctness repair the second dual required (§131's
+last paragraph). The binary the numbers below were taken on and the binary with
+`SJ_WIDE` wired in but switched off were then paired at five seconds and score
+**120 against 120**, which is what a default-off gate should measure.
+
+**Paired, control against shipped, both binaries in the same worker slot,
+eight-way:**
+
+| slice | control | shipped |
+|---|---|---|
+| Track 2 @1 s, run 1 | 81 | **83** |
+| Track 2 @1 s, run 2 | 82 | **84** (private 100: 38 → **39**) |
+| Track 2 @5 s, run 1 | 115 | **116** (private 100: 49 → **50**) |
+| Track 2 @5 s, run 2 | 114 | **119** (private 100: 48 → **52**) |
+
+**The budget matrix, `benchmarks/budget_matrix.sh` on each binary and
+`benchmarks/budget_gate.sh` over the pair, Track 2 `[1..200]`, eight-way:**
+
+| budget | control | shipped | delta | control private 100 | shipped private 100 |
+|---|---|---|---|---|---|
+| 1 s | 79 | **84** | +5 | 35 | **39** |
+| 5 s | 111 | **120** | +9 | 48 | **53** |
+| 30 s | 146 | **153** | +7 | 70 | **73** |
+
+`budget gate: PASS` — **0 wrong on both sides at every budget**, monotone
+`1 s -> 5 s -> 30 s` on both sides, and no budget trade. The thirty-second run is
+also 200 s faster in total wall time, 2404 s against 2599 s. Its eight gains are
+065, 089, 105, 130, 146, 180, 181, 192 against one loss, 150 — which §118 records
+as the instance whose dual bound already equals the optimum and which is one tree
+from a proof either way.
+
+**Neutral where it should be neutral**, paired, same worker slot:
+
+| slice | control | shipped |
+|---|---|---|
+| SteinLib B / C / D @5 s | 18 / 20 / 20 | 18 / 20 / 20 |
+| SteinLib E @20 s | 19 | 19 |
+| Track 1 [1..140] @3 s | 139 | 139 |
+| Track 1 [155..200] @5 s | 28 | 28 |
+
+| | private 100 |
+|---|---|
+| this solver @1 s | 39 |
+| this solver @5 s | **53** |
+| this solver @30 s | **73** |
+| best non-SCIP-Jack entrant, 1800 s | 77 |
+| SCIP-Jack, 2018 competition build, 1800 s | 92 |
+| SCIP-Jack, later build, ~25 s average | 99 |
+
+200 library tests, `cargo build --release --bins` clean.
+
+**The count moved.** Three rounds at +0 and this one is +5 / +9 / +7 across the
+three budgets, +4 / +5 / +3 on the private hundred, with the gate passing and
+nothing else moving.
+
+### 138. What the next round should take from this
+
+1. **`BCR*` on the wide group is 0.9968 of the optimum** (§133), so that class
+   needs a tree as well as a bound — §118's "half of Group A is a primal deficit"
+   now has a companion one group over. What §133 buys is that converging the wide
+   group's root loop is affordable for the first time: instance096 in 2.77 s,
+   instance064 in 1.42 s, instance101 in 17.57 s.
+2. **§134 is the direction that direction opens**, and it is one construction and
+   one refusal away from being testable properly: `RootSeparation::new` must not
+   rebuild the model and its ascents from nothing on a path that will be re-entered
+   every pass, and §131's second dual must not be bought where no search consumes
+   the packing.
+3. **The LP is now the whole of Group A's cost** — instance130 spends 8.24 s of
+   9.57 s in the simplex, instance192 36.9 s of 40.1 s. §136 shows the row count is
+   not the handle. What is left is the rebuild, one cold solve with presolve per
+   prune, on a crate that is being driven through a full model reconstruction where
+   an in-place row deletion would keep the basis.
+4. §120's two allocation rules are still evaluated after the budget they allocate
+   has been spent, and §127.1 still stands. §135 removes one candidate explanation:
+   the branch-and-cut's seconds are not the ones to move.
+5. §127's item 3 — the extended reduction's dispatch — was not touched.

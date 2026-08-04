@@ -805,6 +805,41 @@ fn round(
         }
     };
 
+    // ## The round's own clock, made visible to the loops inside its phases
+    //
+    // §111 installed the *solve's* deadline where the seconds are: the
+    // shortest-path heuristic's outer loop, the dual ascent's main loop, the
+    // key-path exchange, the local search's polish. Those are exactly the loops
+    // the three phases below call, and every one of them was therefore reading a
+    // clock that runs to the end of the whole solve while standing inside a phase
+    // whose own deadline is a fraction of it.
+    //
+    // What that costs is measurable and it is not small. PACE Track 2's
+    // instance101, five-second limit, phase attribution from `SJ_ROUND_TRACE`:
+    // greedy 0.84 s, ascents 1.37 s, iterated local search **2.21 s** — against a
+    // pass deadline of 2.50 s, which had already passed when the local search was
+    // entered. It ran zero iterations, because its own loop checks the round
+    // deadline; the *polish* in front of that loop does not take one, so it read
+    // the solve's five seconds and used what was left of them. The round returned
+    // at 5.00 s, the exact recombination and the growth step were cancelled, and
+    // the goal-directed search and the separation loop were handed `0.00 s`. The
+    // branch-and-cut solved zero LPs. On instance122 and instance137 the shape is
+    // the same and the local search costs 2.08 s and 2.24 s.
+    //
+    // The repair is the one §111 states: the loop must be able to read the
+    // deadline it is supposed to respect. `narrow` installs the earlier of the
+    // round's deadline and the solve's, so no inner loop is ever handed *more*
+    // clock than its caller has, and the guard is dropped before the elimination
+    // block below — which by its own header must run whatever the clock says.
+    //
+    // Nothing about this is a budget rule. Every reader may only stop early, each
+    // stop is a refusal the caller already tolerates (see
+    // [`crate::deadline`]'s proposition), and the phases behind it are the ones
+    // §119 measured as producing the improvements: the exact recombination costs
+    // three hundredths of a second on instance130 and takes the incumbent to the
+    // optimum.
+    let round_clock = crate::deadline::narrow(config.deadline);
+
     // A few greedy starts, mostly to populate the pool and to guarantee some
     // feasible tree exists before the ascents run.
     for s in heuristic_starts(terminals, config.heuristic_starts) {
@@ -936,6 +971,11 @@ fn round(
     // A round in which no tree was constructed at all has nothing to polish;
     // otherwise the incumbent is already a local optimum of that neighbourhood.
     mark("ils", &mut phase);
+
+    // The primal phases are done; the exact steps and the eliminations below run
+    // under the solve's clock again. See the elimination block's own header for
+    // why the deadline must not reach it at all.
+    drop(round_clock);
 
     // Recombination, solved exactly.
     //

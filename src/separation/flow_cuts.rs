@@ -43,6 +43,22 @@ pub struct FlowCutSeparator<'a> {
     pub violation_tolerance: f64,
     workspace: Option<MaxFlowWorkspace>,
     capacities: Vec<f64>,
+    /// Terminals whose Steiner cut was violated the last time this separator
+    /// looked at them. See [`FlowCutSeparator::find_violated_cuts`].
+    active: Vec<NodeId>,
+    /// What this separator's last *complete* sweep over the terminals cost, in
+    /// seconds, on this instance. Measured, not configured.
+    last_full_secs: f64,
+    /// What the LP solve that produced the point being separated cost, as the
+    /// caller measured it. Infinite — the default — makes the complete sweep
+    /// unconditionally the cheaper of the two and so reproduces the sweep this
+    /// separator has always done, exactly. A caller that does not measure its own
+    /// LP is therefore unchanged, which is what keeps the branch-and-cut (§135)
+    /// out of a trade nobody measured for it.
+    pub lp_secs: f64,
+    /// The last pass ran out of clock before it had looked at every terminal it
+    /// meant to. See [`FlowCutSeparator::was_truncated`].
+    truncated: bool,
 }
 
 /// Cuts emitted per terminal before moving on. Nested cuts are disjoint by
@@ -75,6 +91,10 @@ impl<'a> FlowCutSeparator<'a> {
             violation_tolerance: 1e-6,
             workspace: None,
             capacities: Vec::new(),
+            active: Vec::new(),
+            last_full_secs: 0.0,
+            lp_secs: f64::INFINITY,
+            truncated: false,
         }
     }
 
@@ -86,11 +106,162 @@ impl<'a> FlowCutSeparator<'a> {
     /// - Nested: when a terminal cut is found, also check sub-cuts within
     ///   the sink side for additional violated constraints
     pub fn find_violated_cuts(&mut self, lp_solution: &[f64]) -> Vec<SteinerCut> {
-        let mut violated_cuts = Vec::new();
-
+        // ## Why a round does not sweep every terminal
+        //
+        // A complete sweep is `|R|` max flows and it is what the loop spends its
+        // seconds on. PACE Track 2 instance096, root cut loop run to convergence
+        // with the dual simplex, per round from `lpstar_probe`:
+        //
+        // ```text
+        // round 15  cuts  4   lp 0.028  flow 0.197
+        // round 17  cuts  2   lp 0.026  flow 0.170
+        // round 19  cuts  4   lp 0.024  flow 0.179
+        // ```
+        //
+        // Every late round pays 305 max flows to find two to four violated cuts,
+        // and the flow separation is 3.88 s of the 5.56 s the loop takes to
+        // converge -- four times the LP it is feeding.
+        //
+        // > **Proposition (the short list cannot change what the loop proves).**
+        // > Let `A` be any set of terminals. A pass over `A` emits only rows it
+        // > has checked against the true LP values, so every row it emits is a
+        // > valid inequality violated by the point, whatever `A` is. And the only
+        // > conclusion the loop draws from an *empty* separation is that the point
+        // > is feasible for this family: that conclusion is reached here only
+        // > after a pass over **all** the terminals, because an empty short pass
+        // > is followed by the complete one before anything is returned. So the
+        // > short list changes which violated rows are found first, and never
+        // > which points are separable. QED
+        //
+        // The list is self-regulating rather than tuned: the first rounds violate
+        // hundreds of terminals and the pass is nearly complete; it thins as the
+        // point approaches feasibility, which is exactly where the seconds were.
+        //
+        // ## When the short list is *not* worth taking
+        //
+        // A short pass finds fewer rows than a complete one, so the loop needs
+        // more rounds, and a round costs an LP solve. That is a straight trade
+        // between two costs this loop measures on this instance: what a complete
+        // sweep costs it, and what the solve that produced this point cost it.
+        // Both are seconds already spent, neither is a share of any budget, and
+        // the comparison reads the same at a one-second limit and at a
+        // thousand-second one.
+        //
+        // Measured, converging the root cut loop to `BCR*` with the dual simplex,
+        // seconds in the LP against seconds in the separation:
+        //
+        // | instance | complete sweep | LP per solve | which dominates |
+        // |---|---|---|---|
+        // | instance130 |  0.01 s | 0.11 s | the LP -- sweep completely |
+        // | instance064 |  0.09 s | 0.03 s | the flow -- use the short list |
+        // | instance096 |  0.18 s | 0.04 s | the flow -- use the short list |
+        //
+        // and the short list unconditional costs instance130 111 extra solves
+        // while saving 0.2 s of flow, and saves instance096 2.5 s of 5.6 s.
         if self.workspace.is_none() {
             self.workspace = Some(MaxFlowWorkspace::new(self.graph));
         }
+
+        self.truncated = false;
+        let mut violated_cuts = Vec::new();
+        let mut short = Vec::new();
+        if !self.active.is_empty() && self.last_full_secs > self.lp_secs {
+            short = std::mem::take(&mut self.active);
+            violated_cuts = self.sweep(lp_solution, &short);
+        }
+        let mut complete = violated_cuts.is_empty();
+        if complete {
+            let all: &[NodeId] = self.terminals;
+            let t0 = std::time::Instant::now();
+            violated_cuts = self.sweep(lp_solution, all);
+            self.last_full_secs = t0.elapsed().as_secs_f64();
+        }
+        // A sweep the clock cut short has not looked at every terminal, so its
+        // emptiness proves nothing and the proposition above does not apply to
+        // it. `was_truncated` is what the caller must consult before reading an
+        // empty separation as convergence.
+        if self.truncated {
+            complete = false;
+        }
+
+        // The terminals this pass found something for are the ones worth asking
+        // again; the rest drop out, and a complete sweep is what puts any of them
+        // back. A truncated pass names nobody, because it did not look: the list
+        // it started from is kept intact instead.
+        if self.truncated {
+            for t in short {
+                if !self.active.contains(&t) {
+                    self.active.push(t);
+                }
+            }
+        } else {
+            self.active.clear();
+        }
+        for c in &violated_cuts {
+            if !self.active.contains(&c.separated_terminal) {
+                self.active.push(c.separated_terminal);
+            }
+        }
+
+        // "Back-cut" separation: for Steiner nodes with fractional incoming flow,
+        // check if the minimum cut separating them from the root is violated.
+        // This finds nested cuts that terminal separation alone would miss. It is
+        // asked only when a *complete* sweep over the terminals found nothing,
+        // which is the state it was written for.
+        if complete && violated_cuts.is_empty() {
+            let mut steiner_candidates: Vec<(NodeId, f64)> = Vec::new();
+            for node in &self.graph.nodes {
+                if self.terminals.contains(&node.id) || node.id == self.root {
+                    continue;
+                }
+                // Compute total incoming flow to this Steiner node
+                let in_flow: f64 = self.graph.delta_minus(node.id).iter()
+                    .map(|&(_, aid)| lp_solution.get(aid as usize).copied().unwrap_or(0.0))
+                    .sum();
+                if in_flow > 0.01 && in_flow < 0.999 {
+                    steiner_candidates.push((node.id, in_flow));
+                }
+            }
+
+            // Sort by fractionality (most fractional first)
+            steiner_candidates.sort_by(|a, b| {
+                let frac_a = (a.1 - 0.5).abs();
+                let frac_b = (b.1 - 0.5).abs();
+                frac_a.partial_cmp(&frac_b).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let ws = self.workspace.as_mut().unwrap();
+            for &(node, in_flow) in steiner_candidates.iter().take(10) {
+                let result = ws.compute(self.root, node, lp_solution, &self.graph.arcs);
+                if result.flow_value < in_flow - self.violation_tolerance {
+                    let violation = in_flow - result.flow_value;
+                    if violation > self.violation_tolerance {
+                        violated_cuts.push(SteinerCut {
+                            cut_set: result.source_side,
+                            cut_arcs: result.cut_arcs,
+                            separated_terminal: node,
+                            violation,
+                        });
+                    }
+                }
+            }
+        }
+
+        violated_cuts.sort_by(|a, b| b.violation.partial_cmp(&a.violation).unwrap_or(std::cmp::Ordering::Equal));
+
+        self.cuts_found = violated_cuts.len() as u32;
+        self.total_cuts_generated += self.cuts_found;
+
+        violated_cuts
+    }
+
+    /// One pass of nested-and-back cut separation over `order`.
+    ///
+    /// Capacities are rebuilt from the LP point at entry, so a pass never
+    /// inherits the saturations an earlier pass made in order to force nested
+    /// cuts out of the same flow.
+    fn sweep(&mut self, lp_solution: &[f64], order: &[NodeId]) -> Vec<SteinerCut> {
+        let mut violated_cuts = Vec::new();
         let num_arcs = self.graph.arcs.len();
         self.capacities.clear();
         self.capacities
@@ -102,9 +273,20 @@ impl<'a> FlowCutSeparator<'a> {
         let max_violated = 200;
         let mut seen: std::collections::HashSet<Vec<ArcId>> = std::collections::HashSet::new();
 
-        'terminals: for &terminal in self.terminals {
+        'terminals: for &terminal in order {
             if terminal == self.root {
                 continue;
+            }
+            // One max flow per terminal, and on the wide instances there are
+            // thousands of them: PACE Track 2's instance079 has 16,808 after a
+            // classical reduction that deletes nothing. Stopping returns the rows
+            // found so far, every one of them checked against the point, which is
+            // a refusal the caller already tolerates -- but it also means this
+            // pass is *not* the complete sweep the convergence test needs, and
+            // `truncated` is what says so. See [`crate::deadline`].
+            if crate::deadline::expired() {
+                self.truncated = true;
+                break 'terminals;
             }
 
             for _ in 0..MAX_NESTED {
@@ -156,54 +338,17 @@ impl<'a> FlowCutSeparator<'a> {
             }
         }
 
-        // "Back-cut" separation: for Steiner nodes with fractional incoming flow,
-        // check if the minimum cut separating them from the root is violated.
-        // This finds nested cuts that terminal separation alone would miss.
-        if violated_cuts.is_empty() {
-            let mut steiner_candidates: Vec<(NodeId, f64)> = Vec::new();
-            for node in &self.graph.nodes {
-                if self.terminals.contains(&node.id) || node.id == self.root {
-                    continue;
-                }
-                // Compute total incoming flow to this Steiner node
-                let in_flow: f64 = self.graph.delta_minus(node.id).iter()
-                    .map(|&(_, aid)| lp_solution.get(aid as usize).copied().unwrap_or(0.0))
-                    .sum();
-                if in_flow > 0.01 && in_flow < 0.999 {
-                    steiner_candidates.push((node.id, in_flow));
-                }
-            }
-
-            // Sort by fractionality (most fractional first)
-            steiner_candidates.sort_by(|a, b| {
-                let frac_a = (a.1 - 0.5).abs();
-                let frac_b = (b.1 - 0.5).abs();
-                frac_a.partial_cmp(&frac_b).unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            let ws = self.workspace.as_mut().unwrap();
-            for &(node, in_flow) in steiner_candidates.iter().take(10) {
-                let result = ws.compute(self.root, node, lp_solution, &self.graph.arcs);
-                if result.flow_value < in_flow - self.violation_tolerance {
-                    let violation = in_flow - result.flow_value;
-                    if violation > self.violation_tolerance {
-                        violated_cuts.push(SteinerCut {
-                            cut_set: result.source_side,
-                            cut_arcs: result.cut_arcs,
-                            separated_terminal: node,
-                            violation,
-                        });
-                    }
-                }
-            }
-        }
-
-        violated_cuts.sort_by(|a, b| b.violation.partial_cmp(&a.violation).unwrap_or(std::cmp::Ordering::Equal));
-
-        self.cuts_found = violated_cuts.len() as u32;
-        self.total_cuts_generated += self.cuts_found;
-
         violated_cuts
+    }
+
+    /// Whether the last separation ran out of clock before looking at every
+    /// terminal.
+    ///
+    /// An empty answer from a truncated pass says nothing about the point; a
+    /// caller that reads emptiness as "this family is satisfied" -- which is what
+    /// declaring a cut loop converged means -- must check this first.
+    pub fn was_truncated(&self) -> bool {
+        self.truncated
     }
 
     /// Separate cuts and return the number found.
@@ -224,6 +369,125 @@ impl<'a> Separator for FlowCutSeparator<'a> {
 mod tests {
     use super::*;
     use crate::graph::{DirectedGraph, NodeType};
+
+    /// A cheap deterministic generator: `seed` picks the graph and the point.
+    fn scramble(x: &mut u64) -> u64 {
+        *x ^= *x << 13;
+        *x ^= *x >> 7;
+        *x ^= *x << 17;
+        *x
+    }
+
+    /// The proposition the short list rests on, exercised rather than asserted.
+    ///
+    /// `find_violated_cuts` may look at a subset of the terminals, so the only
+    /// thing that must be protected is the meaning of an *empty* answer: when it
+    /// returns nothing, the point really does satisfy every terminal's Steiner
+    /// cut. This drives the separator through a sequence of points on random
+    /// graphs -- which is what builds up and thins out its active list -- and
+    /// checks each empty answer against an independent max flow per terminal.
+    ///
+    /// It also checks the other half: every row that *is* emitted is violated
+    /// under the true LP values, whichever pass produced it.
+    #[test]
+    fn an_empty_separation_means_every_terminal_is_covered() {
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let (mut checked_empty, mut checked_rows) = (0usize, 0usize);
+        for case in 0..120 {
+            let n = 6 + (scramble(&mut seed) % 9) as u32;
+            let mut g = DirectedGraph::new(n);
+            let mut terminals: Vec<NodeId> = Vec::new();
+            for v in 1..=n {
+                let terminal = v == 1 || scramble(&mut seed) % 3 == 0;
+                g.add_node(
+                    v,
+                    if terminal { NodeType::Terminal } else { NodeType::Steiner },
+                    0.0,
+                );
+                if terminal {
+                    terminals.push(v);
+                }
+            }
+            for u in 1..=n {
+                for v in 1..=n {
+                    if u != v && scramble(&mut seed) % 4 == 0 {
+                        g.add_arc(u, v, 1.0 + (scramble(&mut seed) % 5) as f64);
+                    }
+                }
+            }
+            if terminals.len() < 2 || g.arcs.is_empty() {
+                continue;
+            }
+            let root = terminals[0];
+            // A terminal the root cannot reach at all makes the instance
+            // infeasible, and the min cut separating it is the empty arc set --
+            // the row `0 >= 1`, which no separator here emits and which the
+            // formulation has no way to state. That is outside this separator's
+            // contract and outside the pipeline, whose graphs are connected by
+            // the time an LP is built, so those terminals are dropped.
+            let mut reach = vec![false; g.nodes.len() + 2];
+            let mut stack = vec![root];
+            reach[root as usize] = true;
+            while let Some(v) = stack.pop() {
+                for &(w, _) in g.delta_plus(v) {
+                    if !reach[w as usize] {
+                        reach[w as usize] = true;
+                        stack.push(w);
+                    }
+                }
+            }
+            terminals.retain(|&t| reach[t as usize]);
+            if terminals.len() < 2 {
+                continue;
+            }
+            let mut sep = FlowCutSeparator::new(&g, root, &terminals);
+            // A few points in a row, so the active list is carried between them
+            // exactly as the cut loop carries it between rounds.
+            for step in 0..6 {
+                let point: Vec<f64> = (0..g.arcs.len())
+                    .map(|_| match scramble(&mut seed) % 4 {
+                        0 => 0.0,
+                        1 => (scramble(&mut seed) % 100) as f64 / 100.0,
+                        _ => 1.0,
+                    })
+                    .collect();
+                // Both regimes of the measured dispatch get exercised.
+                sep.lp_secs = if step % 2 == 0 { 0.0 } else { f64::INFINITY };
+                let cuts = sep.find_violated_cuts(&point);
+                for c in &cuts {
+                    let load: f64 =
+                        c.cut_arcs.iter().map(|&a| point[a as usize]).sum();
+                    assert!(
+                        load < 1.0 + 1e-6,
+                        "case {case} step {step}: emitted a row of load {load}",
+                    );
+                    checked_rows += 1;
+                }
+                if !cuts.is_empty() {
+                    continue;
+                }
+                // Empty: verify independently that no terminal is separable.
+                let mut ws = crate::graph::algorithms::MaxFlowWorkspace::new(&g);
+                for &t in &terminals {
+                    if t == root {
+                        continue;
+                    }
+                    let f = ws.compute(root, t, &point, &g.arcs).flow_value;
+                    assert!(
+                        f >= 1.0 - 1e-6,
+                        "case {case} step {step}: separation was empty but the flow \
+                         to terminal {t} is {f}",
+                    );
+                }
+                checked_empty += 1;
+            }
+        }
+        assert!(
+            checked_empty > 20 && checked_rows > 200,
+            "the generator did not reach both outcomes: {checked_empty} empty \
+             separations and {checked_rows} emitted rows",
+        );
+    }
 
     fn build_stp_graph() -> DirectedGraph {
         // Simple graph:

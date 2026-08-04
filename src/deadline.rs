@@ -65,6 +65,31 @@ pub fn install(deadline: Option<Instant>) -> Guard {
     DEADLINE.with(|d| Guard(d.replace(deadline)))
 }
 
+/// The deadline currently installed, if any.
+///
+/// A caller narrowing the clock for one phase reads this so it can install the
+/// *earlier* of the two. Narrowing is the only admissible direction: a phase may
+/// be given less of the solve's clock than the solve has, never more.
+#[inline]
+pub fn current() -> Option<Instant> {
+    DEADLINE.with(|d| d.get())
+}
+
+/// Install the earlier of `deadline` and whatever is already installed.
+///
+/// This is what a stage-level deadline wants: `Guard`'s restore semantics with
+/// no way to hand an inner loop more clock than its caller has.
+#[must_use = "the deadline is uninstalled when the guard drops"]
+pub fn narrow(deadline: Option<Instant>) -> Guard {
+    let now = current();
+    let both = match (now, deadline) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, None) => a,
+        (None, b) => b,
+    };
+    install(both)
+}
+
 /// Whether the installed deadline has passed. `false` when none is installed.
 #[inline]
 pub fn expired() -> bool {
@@ -79,6 +104,37 @@ mod tests {
     #[test]
     fn no_deadline_never_expires() {
         assert!(!expired());
+    }
+
+    /// `narrow` is the only way a *stage* installs a clock, and the property it
+    /// has to have is that a stage can never be handed more of the solve than the
+    /// solve has left. Both directions are checked, including the one that would
+    /// be a silent overrun.
+    #[test]
+    fn narrowing_only_ever_shortens() {
+        let outer = Instant::now() + Duration::from_secs(3600);
+        let _g = install(Some(outer));
+        {
+            let earlier = Instant::now() + Duration::from_secs(60);
+            let _n = narrow(Some(earlier));
+            assert_eq!(current(), Some(earlier), "a shorter stage clock must win");
+        }
+        assert_eq!(current(), Some(outer));
+        {
+            let later = Instant::now() + Duration::from_secs(7200);
+            let _n = narrow(Some(later));
+            assert_eq!(current(), Some(outer), "a stage may not extend the solve");
+        }
+        {
+            let _n = narrow(None);
+            assert_eq!(current(), Some(outer), "no stage clock leaves the solve's");
+        }
+        // With nothing installed, a stage clock is the only one there is.
+        drop(_g);
+        assert_eq!(current(), None);
+        let only = Instant::now() + Duration::from_secs(5);
+        let _n = narrow(Some(only));
+        assert_eq!(current(), Some(only));
     }
 
     #[test]
