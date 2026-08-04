@@ -272,7 +272,47 @@ fn binom(n: usize, k: usize) -> f64 {
 /// caller can decide *before starting* whether an attempt fits in the time it
 /// has. That decision has to be made in advance — an attempt that runs out of
 /// clock costs its whole budget and returns nothing.
-pub const TD_UNITS_PER_SECOND: f64 = 2.0e7;
+///
+/// # The measurement
+///
+/// The old value, `2.0e7`, was taken before [`table_bound`] was corrected for
+/// the rank-based reduction, and it is wrong by an order of magnitude against
+/// the programme it now describes. Fifteen completed runs — every PACE Track 2
+/// instance the classical reduction leaves inside the width cap and the DP
+/// carries to a value, `td_census` with a sixty-second cap:
+///
+/// | work | seconds | units/s |
+/// |---|---|---|
+/// | 2.83e8 | 2.36 | 1.20e8 |
+/// | 2.94e8 | 1.81 | 1.62e8 |
+/// | 5.76e8 | 3.01 | 1.91e8 |
+/// | 6.41e8 | 3.68 | 1.74e8 |
+/// | 6.61e8 | 4.10 | 1.61e8 |
+/// | 1.16e9 | 8.98 | 1.29e8 |
+/// | 1.28e9 | 5.17 | 2.48e8 |
+/// | 1.39e9 | 7.37 | 1.89e8 |
+/// | 1.80e9 | 6.80 | 2.65e8 |
+/// | 2.01e9 | 10.42 | 1.93e8 |
+/// | 2.17e9 | 10.05 | 2.16e8 |
+/// | 3.16e9 | 15.78 | 2.00e8 |
+/// | 4.56e9 | 23.58 | 1.93e8 |
+/// | 6.15e9 | 44.67 | 1.38e8 |
+/// | 6.52e9 | 22.57 | 2.89e8 |
+///
+/// The range is `1.2e8` to `2.9e8` over a work range of twenty-three, median
+/// `1.9e8`. The value below is the **low end** of that range and not its median,
+/// because the two errors are not symmetric: under-stating the throughput only
+/// refuses an attempt that would have fitted, while over-stating it admits one
+/// that consumes the window and returns nothing.
+///
+/// What the estimate is loose *about* is a separate matter and is why this
+/// constant cannot be read as a prediction of any single run: [`table_bound`]
+/// counts representable signatures, and on a graph whose reachable signatures
+/// are a small fraction of those the ratio is not 1.5e8 but four orders of
+/// magnitude more. So `work / TD_UNITS_PER_SECOND <= window` is a *sufficient*
+/// condition for affordability and never a necessary one, and a caller may use
+/// it to grant an attempt but never to withdraw one.
+pub const TD_UNITS_PER_SECOND: f64 = 1.5e8;
 
 /// Rank-based reduction of a table's partitions.
 ///

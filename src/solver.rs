@@ -147,6 +147,9 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     // below is stated for `work_graph`; the bound for `instance` is this plus
     // that value, and the addition happens once, at the very end.
     let mut base_offset: Cost = 0.0;
+    // What the classical reduction spent on this graph. It is the allowance the
+    // ordering stage is held to; see [`width_plan`].
+    let mut classical_secs = std::time::Duration::ZERO;
     let (work_graph, terminals) = if config.preprocess {
         // Reduction gets at most a third of the budget. It is worth a lot, but a
         // dense instance can absorb the whole limit in one sweep and leave the
@@ -154,7 +157,9 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         let reduce_deadline = start + std::time::Duration::from_secs_f64(
             (config.time_limit_secs.max(0.001) / 3.0).max(0.05),
         );
+        let classical_from = Instant::now();
         let (rg, pr) = preprocess_until(instance, &graph, Some(reduce_deadline));
+        classical_secs = classical_from.elapsed();
         base_offset = pr.lower_bound_offset;
         let (ri, ru) = rg.to_instance();
         if config.verbose {
@@ -185,6 +190,53 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
         r.primal_bound += base_offset;
         r.dual_bound += base_offset;
         return r;
+    }
+
+    // What the width attempt already spent, and on which graph.
+    //
+    // A width attempt on a fixed graph is *dominated* by any earlier attempt with
+    // at least as much clock. The deterministic portfolio is the same four
+    // orderings in the same order; the seeded search that may follow it draws a
+    // fixed sequence and keeps the least-work draw, so with less clock it sees a
+    // **prefix** of that sequence and returns a plan no better than before; and
+    // the dynamic programme on a no-better plan with less clock gets no further.
+    // A later pass always has less clock, because the passes share one budget and
+    // the earlier one has already spent from it. Re-running is therefore not a
+    // second chance, and on the wide instances it consumes the entire window.
+    // PACE instance092 spends every pass inside a width attempt that cannot
+    // finish, which is why its branch-and-cut reports
+    // `Nodes: 0 | LPs: 0 | Time: 0.00s` while the root separation loop converges
+    // the same instance in 0.43 s at exactly its optimum.
+    //
+    // So the seconds it was granted are remembered together with the shape of the
+    // graph they were granted on, and the attempt is skipped only when both say it
+    // would repeat itself. A pass whose reduction shrank the graph gets a fresh
+    // attempt: that is a different computation. A pass that somehow has *more*
+    // clock gets one too.
+    //
+    // This is a refusal to repeat, not a refusal to try, and it can only move
+    // seconds from a stage that provably cannot use them to one that might. It
+    // never changes the answer of an attempt that ran.
+    let mut td_truncated: Option<(usize, usize, usize, f64)> = None;
+
+    // The all-or-nothing exact stage, granted the window its own work bound asks
+    // for, before the stages that produce the bounds it does not consume. See
+    // [`try_width_early`].
+    {
+        let (value, truncated) =
+            try_width_early(&work_graph, &terminals, deadline, classical_secs, config.verbose);
+        if let Some(value) = value {
+            // The DP proves the optimum of `work_graph`; the contraction lemma
+            // adds `base_offset` to reach the instance's own. There is no
+            // incumbent yet to reconcile it with, which is the whole point of
+            // running here — see [`exact_report`] for the reconciliation the late
+            // site needs and this one does not.
+            return trivial_result(start, value + base_offset, SolveMethod::TreeDecomposition);
+        }
+        if let Some(granted) = truncated {
+            td_truncated =
+                Some((work_graph.num_nodes as usize, work_graph.edges.len(), terminals.len(), granted));
+        }
     }
 
     // Ascend-and-prune, then branch-and-cut, then — if the search improved the
@@ -237,30 +289,6 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
     // search and the separation loop instead, so the two stages can be told
     // apart on a paired run. Nothing in the pipeline reads it by default.
     let mut branch_and_cut_works = std::env::var("SJ_BNC").as_deref() != Ok("0");
-    // What the width attempt already spent, and on which graph.
-    //
-    // [`try_decomposition`] is deterministic: the same graph, the same ordering
-    // portfolio, the same dynamic programme, in that order. An attempt cut off by
-    // the deadline is therefore cut off at exactly the same place when it is
-    // re-run on the same graph with *less* clock — and a later pass always has
-    // less, because the passes share one budget and the earlier one has already
-    // spent from it. Re-running it is not a second chance; it is a guaranteed
-    // repetition of a truncated computation, and on the wide instances it
-    // consumes the entire window. PACE instance092 spends every pass inside a
-    // width attempt that cannot finish, which is why its branch-and-cut reports
-    // `Nodes: 0 | LPs: 0 | Time: 0.00s` while the root separation loop converges
-    // the same instance in 0.43 s at exactly its optimum.
-    //
-    // So the seconds it was granted are remembered together with the shape of the
-    // graph they were granted on, and the attempt is skipped only when both say it
-    // would repeat itself. A pass whose reduction shrank the graph gets a fresh
-    // attempt: that is a different computation. A pass that somehow has *more*
-    // clock gets one too.
-    //
-    // This is a refusal to repeat, not a refusal to try, and it can only move
-    // seconds from a stage that provably cannot use them to one that might. It
-    // never changes the answer of an attempt that ran.
-    let mut td_truncated: Option<(usize, usize, usize, f64)> = None;
     // No pass has run, so no bound has been exhibited yet.
     let mut carried_primal_witnessed = false;
     // Dual bound per second, as the goal-directed search itself was observed to
@@ -399,6 +427,8 @@ pub fn solve(instance: &SteinerInstance, config: SolverConfig) -> SolveResult {
             &config,
             start,
             pass_deadline,
+            deadline,
+            classical_secs,
             &mut search_cache,
             &mut sep_cache,
             &mut carried_lower_bound,
@@ -631,6 +661,13 @@ fn finish(
     config: &SolverConfig,
     start: Instant,
     deadline: Instant,
+    // The solve's own deadline, which the pass window above is a share of. Only
+    // the all-or-nothing width attempt reads it, and only to ask for the window
+    // its own work bound needs; see [`try_decomposition`].
+    solve_deadline: Instant,
+    // What the classical reduction spent; the allowance the ordering stage is
+    // held to. See [`width_plan`].
+    classical_secs: std::time::Duration,
     search_cache: &mut Option<SteinerSearch>,
     sep_cache: &mut Option<RootSeparation>,
     carried_lower_bound: &mut Cost,
@@ -818,25 +855,15 @@ fn finish(
     // instances decompose at width 25 to 84. Only when the cheap ordering
     // proves the graph narrow is the slower minimum-fill ordering run to
     // sharpen it.
-    let td_shape = (work_graph.num_nodes as usize, work_graph.edges.len(), terminals.len());
-    let td_window = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
-    let td_repeats = td_truncated
-        .map(|(n, e, t, granted)| (n, e, t) == td_shape && td_window <= granted + 1e-9)
-        .unwrap_or(false);
-    if td_repeats {
-        if config.verbose {
-            eprintln!(
-                "[td] skipped: the same graph was already given {:.2}s and was cut off;                  {td_window:.2}s cannot get further",
-                td_truncated.map(|x| x.3).unwrap_or(0.0)
-            );
-        }
-    } else if let Some((value, secs)) = {
-        let (out, truncated) = try_decomposition(&work_graph, &terminals, deadline);
-        if truncated {
-            *td_truncated = Some((td_shape.0, td_shape.1, td_shape.2, td_window));
-        }
-        out
-    } {
+    if let Some((value, secs)) = try_decomposition(
+        &work_graph,
+        &terminals,
+        deadline,
+        solve_deadline,
+        classical_secs,
+        td_truncated,
+        config.verbose,
+    ) {
         if config.verbose {
             eprintln!("[td] exact by tree decomposition: {value:.1} in {secs:.2}s");
         }
@@ -1913,39 +1940,392 @@ const TD_STATE_BUDGET: usize = 40_000_000;
 /// the first oversized bag, it costs microseconds, and repeating it is free. A
 /// truncation is a property of the budget, repeats *expensively*, and is the only
 /// one worth remembering.
+/// The decomposition the width DP would run on, and the work it implies.
+///
+/// # One ordering may not veto the others
+///
+/// This used to run the cheap min-degree ordering *as the gate* — if that one
+/// ordering exceeded the cap the graph was declared too wide and the portfolio
+/// was never consulted. The reasoning was cost, and the cost was not there to
+/// save: [`decompose_with`] abandons an ordering at the first bag that exceeds
+/// the cap, so every member of the portfolio rejects a wide graph in
+/// microseconds, and `decompose_portfolio` stops early anyway once a
+/// decomposition meets `delta(G)` and is certified minimal.
+///
+/// What the pre-gate cost is instances. PACE Track 2's instance094 has 871
+/// vertices and 1,375 edges after the classical reduction; min-degree exceeds a
+/// cap of 13 on it and min-fill decomposes it at **width 10**, which the DP
+/// carries to the optimum in 3.68 s. The pre-gate refused it outright at every
+/// budget, and the same holds for instance099 and instance089. A refusal on
+/// width is supposed to be a statement about the graph; a statement about one
+/// elimination heuristic was standing in for it.
+/// # The tie-break is a search dimension nobody was searching
+///
+/// Each of the four orderings is one greedy, and the greedy's score ties by the
+/// dozen; which of the tied vertices goes first is decided by its index in the
+/// input file. [`decompose_seeded`] makes that a parameter, and re-drawing it is
+/// worth a great deal — measured on the PACE Track 2 instances the classical
+/// reduction leaves inside the cap, best-of-sampled against the deterministic
+/// portfolio, work in [`work_estimate`]'s units:
+///
+/// | instance | portfolio | sampled | factor | first improvement |
+/// |---|---|---|---|---|
+/// | instance040 | 5.76e8 | 6.61e7 | 8.7x | 0.05 s |
+/// | instance065 | 6.52e9 | 8.60e8 | 7.6x | 0.05 s |
+/// | instance099 | 2.01e9 | 5.68e8 | 3.5x | 0.05 s |
+/// | instance103 | 2.10e10 | 6.41e9 | 3.3x | 0.05 s |
+/// | instance086 | 3.16e9 | 1.10e9 | 2.9x | 0.05 s |
+/// | instance087 | 1.80e9 | 7.28e8 | 2.5x | 0.10 s |
+/// | instance096 | 2.17e9 | 9.84e8 | 2.2x | 0.25 s |
+/// | instance084 | 7.75e9 | 3.82e9 | 2.0x | 0.05 s |
+///
+/// A factor of three is one width, and one width is what separates an instance
+/// the DP closes from one it cannot. The searching is nothing but re-running a
+/// greedy that already exists, and every draw is a decomposition the validity
+/// theorem covers, so nothing is at stake but the time.
+///
+/// # What bounds the search
+///
+/// Two things, and neither is a share of the budget.
+///
+/// It does not start at all unless the deterministic plan **fails to fit** the
+/// clock the DP would have — when the portfolio's own answer is affordable there
+/// is nothing to buy — and it stops the moment a draw does fit. So on every
+/// instance the pipeline already closes, this code runs zero times.
+///
+/// When it does run it may spend **four times what deciding the ordering
+/// deterministically just cost**, a duration this graph produced in this run by
+/// the very stage being extended (the shape §103 gives every batch rule), capped
+/// by the clock that is left. Four, because the portfolio is four orderings: the
+/// search may double the ordering stage's worst case, which is the same bargain
+/// the portfolio itself makes against running one greedy.
+fn width_plan(
+    graph: &UndirectedGraph,
+    deadline: Instant,
+    ordering_budget: std::time::Duration,
+) -> Option<(crate::graph::algorithms::tree_decomposition::TreeDecomposition, f64)> {
+    use crate::graph::algorithms::steiner_td::{MAX_BAG, TD_UNITS_PER_SECOND};
+    use crate::graph::algorithms::tree_decomposition::{
+        decompose_portfolio, decompose_seeded, decompose_with, Ordering, ORDERINGS,
+    };
+
+    // One vertex of every bag is spent on the root terminal the DP pins there.
+    let cap = MAX_BAG - 2;
+    // Deciding the ordering is not the point of the solve, and on a graph no
+    // ordering can bring inside the cap it is pure overhead. Per ordering at the
+    // cap, measured — the pattern is the whole design:
+    //
+    // | graph | min-degree | the three fill orderings | outcome |
+    // |---|---|---|---|
+    // | instance094 | 0.001 s | 0.003 s each | width 10 |
+    // | instance099 | 0.001 s | 0.003 s each | width 11 |
+    // | SteinLib c18 | 0.001 s | 0.045 s each | refused |
+    // | SteinLib d19 | 0.001 s | 0.31 s each | refused |
+    // | SteinLib e19 | 0.001 s | **1.9 s each** | refused |
+    //
+    // A fill ordering that *succeeds* is milliseconds; one that fails runs a long
+    // way before the minimum degree finally exceeds the cap, and pays a densifying
+    // graph's fill computation for every step of it. So the stage is bounded, and
+    // bounded by what the classical reduction immediately before it just spent on
+    // this same graph — a duration this graph produced in this run, the shape §103
+    // gives every batch rule. It scales with the size of the graph, which is
+    // exactly the quantity that makes a fill ordering expensive.
+    let plan_deadline = (Instant::now() + ordering_budget).min(deadline);
+    let started = Instant::now();
+
+    // The gate: min-degree's width, computed *unbounded*, which bounds what the
+    // rest of the portfolio can reach.
+    //
+    // Min-degree is the one ordering with no fill computation, and run to
+    // completion rather than aborted at the cap it costs 1 to 135 ms on every
+    // graph in this benchmark. What it buys is a number that says whether
+    // consulting the expensive orderings can possibly pay. Measured, unbounded
+    // width per ordering:
+    //
+    // | graph | min-degree | best fill ordering | ratio |
+    // |---|---|---|---|
+    // | instance094 | 15 | **10** | 1.50 |
+    // | instance099 | 16 | **11** | 1.45 |
+    // | instance083 | 15 | 14 | 1.07 |
+    // | Track 1 instance193 | 31 | 29 | 1.07 |
+    // | SteinLib c18 | 195 | 186 | 1.05 |
+    // | Track 1 instance192 | 126 | 93 | 1.35 |
+    // | SteinLib d19 | 312 | 304 | 1.03 |
+    // | SteinLib e19 | 446 | — | — |
+    //
+    // No fill ordering has ever been observed to beat min-degree by as much as a
+    // factor of two, so a graph min-degree puts above **twice** the cap is out of
+    // reach and the expensive orderings are not run at all. The margin is wide in
+    // both directions: everything admitted here sits at 15 or 16 against a
+    // threshold of 26, and everything refused at 31 or more.
+    //
+    // This is what the old min-degree pre-gate should have been. That one used
+    // min-degree's *refusal at the cap* as a veto, which is a statement about one
+    // greedy; this uses its *width*, which bounds every greedy in the portfolio,
+    // and it is why instance094 (min-degree 15, min-fill 10) is admitted where the
+    // veto refused it. It is also what keeps the stage honest on the wide
+    // benchmarks: SteinLib d19's three fill orderings cost 0.31 s each when
+    // aborted at the cap and 8 to 65 s each when run out, and none of that is
+    // spent now.
+    let md = decompose_with(graph, Ordering::MinDegree, graph.num_nodes as usize, Some(plan_deadline));
+    match &md {
+        None => return None,
+        Some(td) if td.width > 2 * cap => return None,
+        _ => {}
+    }
+    let cheap = md.filter(|td| td.width <= cap && td.verify(graph)).map(|td| {
+        let w = crate::graph::algorithms::steiner_td::work_estimate(&td, graph.edges.len(), 1);
+        (td, w)
+    });
+    let rest = decompose_portfolio(graph, cap, Some(plan_deadline), &ORDERINGS[1..])
+        .filter(|(td, _)| td.verify(graph));
+    let best = match (cheap, rest) {
+        (Some(a), Some(b)) => Some(if b.1 <= a.1 { b } else { a }),
+        (a, b) => a.or(b),
+    };
+    let deterministic = started.elapsed();
+
+    let fits = |work: f64| work / TD_UNITS_PER_SECOND <= remaining(deadline);
+    // No incumbent means no ordering came inside the cap, and there is then
+    // nothing for the search below to improve *on* — only a hope that a permuted
+    // tie-break crosses a threshold every deterministic ordering missed. That
+    // hope is what cost SteinLib c18, d18, d19 and e19 their proofs: with no plan
+    // to fit, the search runs its whole budget on every wide graph in the
+    // benchmark. It searches from an incumbent or it does not search.
+    let Some((td, work)) = best else { return None };
+    if fits(work) {
+        return Some((td, work));
+    }
+    let mut best = Some((td, work));
+    let search_budget = (4 * deterministic)
+        .min(plan_deadline.saturating_duration_since(Instant::now()))
+        .min(deadline.saturating_duration_since(Instant::now()));
+    let search_from = Instant::now();
+    // Each draw carries the search's own deadline, not the solve's: the loop
+    // condition is only checked between draws, and one min-fill run on a large
+    // graph is a second. A draw the clock cuts short simply is not a candidate.
+    let search_until = (search_from + search_budget).min(deadline);
+    let orders = [Ordering::MinFill, Ordering::MinDegreeFill, Ordering::FillWeighted];
+    let mut draw = 0u64;
+    while Instant::now() < search_until {
+        draw += 1;
+        // Any odd multiplier gives each draw its own permutation; the constant is
+        // the golden-ratio one splitmix64 uses and carries no meaning here beyond
+        // spreading consecutive draws apart.
+        let seed = 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(draw) | 1;
+        let order = orders[(draw as usize - 1) % orders.len()];
+        let Some(cand) = decompose_seeded(graph, order, cap, Some(search_until), seed) else {
+            continue;
+        };
+        let cand_work = crate::graph::algorithms::steiner_td::work_estimate(
+            &cand,
+            graph.edges.len(),
+            1,
+        );
+        if best.as_ref().is_some_and(|&(_, w)| cand_work < w) && cand.verify(graph) {
+            let hit = fits(cand_work);
+            best = Some((cand, cand_work));
+            if hit {
+                break;
+            }
+        }
+    }
+    best
+}
+
+#[inline]
+fn remaining(deadline: Instant) -> f64 {
+    deadline.saturating_duration_since(Instant::now()).as_secs_f64()
+}
+
+/// The width attempt, taken before the machinery whose bounds it does not need.
+///
+/// # Why the stage was starved rather than slow
+///
+/// Every other stage of the finish produces something at every moment it runs:
+/// the goal-directed search advances a frontier, the separation loop raises a
+/// certified bound, the branch-and-cut moves a dual. The width DP produces
+/// *nothing at all* until its last node is retired, and then produces a complete
+/// proof. Splitting one budget between stages of those two kinds as though they
+/// were comparable gives the second kind a share, and a share of what an
+/// all-or-nothing stage needs is worth exactly zero.
+///
+/// Measured, PACE Track 2 at a five-second limit: instance064's DP needs 2.36 s
+/// and is handed 1.58 s, twice; instance040's needs 3.01 s and is handed 1.58 s;
+/// instance084's needs 1.81 s and is handed 1.61 s. All three sit inside the
+/// budget and none of them is ever given it, because the attempt lives after a
+/// tightening round that spends a third of the clock producing — on these
+/// instances — `kill 0n/0e` and a primal bound the DP has no use for.
+///
+/// So the rule is: **an all-or-nothing stage is granted either enough to finish
+/// or nothing at all**, and it is granted first, because it consumes no bound
+/// that anything else produces.
+///
+/// # What decides
+///
+/// [`work_estimate`] is a sound upper bound on the table entries the DP will
+/// touch, and [`TD_UNITS_PER_SECOND`] is how many of those a second buys — see
+/// that constant for the fifteen runs it is measured from. `work / rate <= left`
+/// is therefore a *sufficient* condition for the attempt to fit, and it is used
+/// only in that direction: it grants attempts, it never withdraws one, and the
+/// unconditional attempt inside [`try_decomposition`] stays exactly where it was.
+///
+/// The grant is capped at twice the predicted time. That cap is inert whenever
+/// the prediction is close to the whole window and protects the fall-through
+/// whenever it is not: at a thirty-second limit an attempt predicted to take
+/// eight seconds may not spend twenty-nine, because a work bound wrong by more
+/// than a factor of two is a wrong bound and the remaining stages should have
+/// the rest.
+///
+/// # It reads the same at every budget
+///
+/// At one second the condition admits almost nothing and the pipeline is what it
+/// was. At thirty it admits more. At a thousand it admits everything that
+/// decomposes — which is the right answer, since the DP is then a proof and the
+/// stages it displaces are approximations of one. Nothing here is a fraction of
+/// the budget, and the quantity compared against the clock is a work bound
+/// computed from this graph's own decomposition.
+fn try_width_early(
+    graph: &UndirectedGraph,
+    terminals: &[crate::graph::NodeId],
+    deadline: Instant,
+    ordering_budget: std::time::Duration,
+    verbose: bool,
+) -> (Option<Cost>, Option<f64>) {
+    use crate::graph::algorithms::steiner_td::{steiner_tree_over_decomposition, TD_UNITS_PER_SECOND};
+
+    if terminals.len() < 2 {
+        return (None, None);
+    }
+    let left = deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+    if left <= 0.0 {
+        return (None, None);
+    }
+    let planning = Instant::now();
+    let plan = width_plan(graph, deadline, ordering_budget);
+    let plan_secs = planning.elapsed().as_secs_f64();
+    let Some((td, work)) = plan else {
+        if verbose {
+            eprintln!("[td] no decomposition inside the encoding's cap ({plan_secs:.2}s of ordering)");
+        }
+        return (None, None);
+    };
+    // Against the clock as it stands *after* planning, which is the same quantity
+    // `width_plan` stopped its own search on. Deciding admission against the
+    // reading from before it would be the permissive direction, and on the two
+    // instances where the ordering costs seconds it would be permissive by
+    // seconds.
+    let left = remaining(deadline).min(left);
+    let predicted = work / TD_UNITS_PER_SECOND;
+    if predicted > left {
+        if verbose {
+            eprintln!(
+                "[td] early attempt refused: width {} implies {work:.2e} units = {predicted:.2}s against {left:.2}s left ({plan_secs:.2}s of ordering)",
+                td.width
+            );
+        }
+        return (None, None);
+    }
+    let granted = Instant::now() + std::time::Duration::from_secs_f64(2.0 * predicted);
+    let granted = granted.min(deadline);
+    let started = Instant::now();
+    let out = steiner_tree_over_decomposition(
+        graph,
+        terminals,
+        &td,
+        TD_STATE_BUDGET,
+        false,
+        Some(granted),
+    );
+    let spent = started.elapsed().as_secs_f64();
+    match out {
+        Some((cost, _)) => {
+            if verbose {
+                eprintln!(
+                    "[td] early: exact by tree decomposition, width {}, {cost:.1} in {spent:.2}s (predicted {predicted:.2}s)",
+                    td.width
+                );
+            }
+            (Some(cost), None)
+        }
+        None => {
+            if verbose {
+                eprintln!(
+                    "[td] early attempt cut off after {spent:.2}s of the {:.2}s its {work:.2e} units asked for",
+                    granted.saturating_duration_since(started).as_secs_f64()
+                );
+            }
+            // The decomposition was built, so the graph is narrow enough for the
+            // encoding and only the clock or the state budget stopped the run.
+            // Report the window it was given so a later attempt on the same graph
+            // knows whether it would be repeating itself.
+            (None, Some(granted.saturating_duration_since(started).as_secs_f64()))
+        }
+    }
+}
+
 fn try_decomposition(
     graph: &UndirectedGraph,
     terminals: &[crate::graph::NodeId],
     deadline: Instant,
-) -> (Option<(Cost, f64)>, bool) {
-    use crate::graph::algorithms::steiner_td::{steiner_tree_over_decomposition, MAX_BAG};
-    use crate::graph::algorithms::tree_decomposition::{
-        decompose_portfolio, decompose_with, Ordering, ORDERINGS,
+    solve_deadline: Instant,
+    ordering_budget: std::time::Duration,
+    memory: &mut Option<(usize, usize, usize, f64)>,
+    verbose: bool,
+) -> Option<(Cost, f64)> {
+    use crate::graph::algorithms::steiner_td::{
+        steiner_tree_over_decomposition, TD_UNITS_PER_SECOND,
     };
 
     if terminals.len() < 2 || Instant::now() >= deadline {
-        return (None, false);
+        return None;
     }
-    // One vertex of every bag is spent on the root terminal the DP pins there.
-    let cap = MAX_BAG - 2;
     let started = Instant::now();
-    // The cheap ordering is the gate: it abandons an ordering at the first bag
-    // that exceeds the cap, so a wide graph costs microseconds to reject. Only
-    // once it has shown the graph is narrow is the rest of the portfolio worth
-    // running, and the portfolio then chooses by the work each decomposition
-    // implies rather than by width alone.
-    let Some(cheap) = decompose_with(graph, Ordering::MinDegree, cap, Some(deadline)) else {
-        return (None, false);
+    let Some((td, work)) = width_plan(graph, deadline.max(solve_deadline), ordering_budget) else {
+        return None;
     };
-    let td = decompose_portfolio(graph, cap, Some(deadline), &ORDERINGS[1..])
-        .map(|(t, _)| t)
-        .filter(|t| {
-            use crate::graph::algorithms::steiner_td::work_estimate;
-            work_estimate(t, graph.edges.len(), 1) <= work_estimate(&cheap, graph.edges.len(), 1)
-        })
-        .unwrap_or(cheap);
-    if !td.verify(graph) {
-        return (None, false);
+
+    // The pass window is a *floor* on what this attempt may have, not a ceiling.
+    //
+    // The stage produces nothing until it finishes (see [`try_width_early`] for
+    // the argument), and the tightening that precedes it can shrink the graph
+    // enough to change the answer: PACE Track 2's instance084 decomposes at width
+    // 12 after the classical reduction and at width 10 after the tightening, where
+    // the DP needs 1.81 s and the pass window is 1.61 s. So when the work bound
+    // says the attempt fits in the clock the *solve* has left, it is granted that
+    // — capped, as early, at twice what it predicted, so a wrong bound cannot take
+    // the rest of the budget with it.
+    //
+    // The `max` is what makes this monotone: the window the stage had before is
+    // never taken away, only added to. When the work bound does not fit, this is
+    // the attempt exactly as it was.
+    let predicted = work / TD_UNITS_PER_SECOND;
+    let left = solve_deadline.saturating_duration_since(Instant::now()).as_secs_f64();
+    let deadline = if predicted <= left {
+        let asked = Instant::now() + std::time::Duration::from_secs_f64(2.0 * predicted);
+        deadline.max(asked.min(solve_deadline))
+    } else {
+        deadline
+    };
+    let granted = deadline.saturating_duration_since(started).as_secs_f64();
+
+    // A refusal to repeat, decided against the window this attempt would actually
+    // get rather than against the pass's share of the clock. The plan above is
+    // what makes that possible: it is deterministic and it is what fixes the
+    // grant, so "would this be the same computation, given no more clock than
+    // last time" is answerable before the DP starts. See the `td_truncated`
+    // comment in [`solve`].
+    if let Some((n, e, t, before)) = *memory {
+        if (n, e, t) == (graph.num_nodes as usize, graph.edges.len(), terminals.len())
+            && granted <= before + 1e-9
+        {
+            if verbose {
+                eprintln!(
+                    "[td] skipped: the same graph was already given {before:.2}s and was cut off;                  {granted:.2}s cannot get further"
+                );
+            }
+            return None;
+        }
     }
 
     // One attempt, bounded by the clock rather than by an estimate.
@@ -1984,9 +2364,15 @@ fn try_decomposition(
         // The decomposition was built, so the graph is narrow enough for the
         // encoding: what stopped the run was the clock or the state budget, and
         // both repeat on the same graph with less of the first.
-        return (None, true);
+        *memory = Some((
+            graph.num_nodes as usize,
+            graph.edges.len(),
+            terminals.len(),
+            granted,
+        ));
+        return None;
     };
-    (Some((cost, started.elapsed().as_secs_f64())), false)
+    Some((cost, started.elapsed().as_secs_f64()))
 }
 
 fn try_dreyfus_wagner(

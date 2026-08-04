@@ -62,9 +62,33 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use crate::graph::algorithms::steiner_td::{
-    steiner_tree_over_decomposition, work_estimate, TD_UNITS_PER_SECOND,
-};
+use crate::graph::algorithms::steiner_td::{steiner_tree_over_decomposition, work_estimate};
+
+/// Table entries a *recombination* step is charged per second of its allowance.
+///
+/// This is deliberately **not**
+/// [`crate::graph::algorithms::steiner_td::TD_UNITS_PER_SECOND`], and the reason
+/// is that the two gates are asking different questions of the same number.
+///
+/// The solver's width dispatch asks *will this finish inside the clock*, and an
+/// answer that is too pessimistic only refuses an attempt that would have fitted.
+/// So it wants the low end of the measured throughput, `1.5e8`.
+///
+/// This gate asks *may an optional primal improvement risk this much of the
+/// primal budget*, and there the errors reverse: a step that overruns spends
+/// seconds the stages after it needed, and the exact recombination is never
+/// necessary — the spanning-tree merge behind it always produces a tree. When the
+/// shared constant was corrected from `2.0e7` to the true `1.5e8` this gate
+/// became 7.5x more permissive as a side effect, and it cost SteinLib **C18,
+/// D18, D19 and E19** their proofs, which is §67's measurement arriving from the
+/// other direction ("gating on the width alone let the recombination spend 3.6 s
+/// inside a 5 s budget on instance175 and cost three instances their proof").
+///
+/// So the allowance keeps the throughput the gate was calibrated against. The
+/// value is a *risk budget in work units per second of allowance*, not a
+/// prediction of the DP's speed, and the factor of 7.5 between it and the true
+/// throughput is the margin an optional step is held to.
+const RECOMB_UNITS_PER_SECOND: f64 = 2.0e7;
 use crate::graph::algorithms::tree_decomposition::decompose;
 use crate::graph::algorithms::ArcIndex;
 use crate::graph::{ArcId, Cost, NodeId, NodeType, UndirectedGraph};
@@ -168,7 +192,7 @@ fn solve_ground_set(
     // The gate: what this decomposition will actually cost, not merely how wide
     // it is. One unit is one table entry touched.
     let work = work_estimate(&td, g.edges.len(), 1);
-    if work / TD_UNITS_PER_SECOND > max_secs {
+    if work / RECOMB_UNITS_PER_SECOND > max_secs {
         return None;
     }
     let local: Vec<NodeId> = terminals.iter().map(|t| inside[t]).collect();

@@ -308,6 +308,49 @@ pub fn decompose_with(
     max_width: usize,
     deadline: Option<Instant>,
 ) -> Option<TreeDecomposition> {
+    decompose_seeded(graph, order, max_width, deadline, 0)
+}
+
+/// Scramble a vertex index into a tie-break key. `seed == 0` is the identity, so
+/// [`decompose_with`] is exactly the ordering it always was.
+#[inline]
+fn tiebreak(v: u32, seed: u64) -> u64 {
+    if seed == 0 {
+        return v as u64;
+    }
+    // splitmix64 on the pair, which is a bijection for each fixed seed and so
+    // still gives every alive vertex a distinct key.
+    let mut z = (v as u64).wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(seed);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+/// [`decompose_with`] with the greedy's ties broken by a seeded permutation of
+/// the vertices instead of by their index.
+///
+/// # Why a tie-break is worth a whole extra dimension of search
+///
+/// Every ordering the portfolio runs is a *greedy* over a score that is very far
+/// from injective: on the reduced PACE graphs a min-fill step routinely has
+/// dozens of vertices at fill zero, and which of them is eliminated first is
+/// decided by nothing but the order the input file happened to list them in.
+/// That choice compounds — the elimination game rewrites the neighbourhoods of
+/// everything it touches — so two runs of *the same heuristic* differing only in
+/// tie-break can land one or two widths apart, and one width is a factor of
+/// three in [`crate::graph::algorithms::steiner_td::work_estimate`].
+///
+/// The validity theorem at the top of this module is stated for an arbitrary
+/// elimination ordering, so nothing about correctness depends on which
+/// permutation is used. A seeded run is a *different valid decomposition*, never
+/// a worse-formed one, and the caller keeps whichever implies the least work.
+pub fn decompose_seeded(
+    graph: &UndirectedGraph,
+    order: Ordering,
+    max_width: usize,
+    deadline: Option<Instant>,
+    seed: u64,
+) -> Option<TreeDecomposition> {
     let (index_to_node, node_to_index, mut adj) = dense_adjacency(graph);
     let n = index_to_node.len();
     if n == 0 {
@@ -323,9 +366,10 @@ pub fn decompose_with(
     // always holds an entry carrying each alive vertex's current score; a
     // popped entry whose score is stale-low is recomputed and re-pushed, which
     // makes the pop sequence exactly the greedy one.
-    let mut heap: BinaryHeap<Reverse<((u64, u64), u32)>> = BinaryHeap::with_capacity(n);
+    let mut heap: BinaryHeap<Reverse<((u64, u64), u64, u32)>> = BinaryHeap::with_capacity(n);
     for v in 0..n {
-        heap.push(Reverse((score(&adj, v as u32, order), v as u32)));
+        let v = v as u32;
+        heap.push(Reverse((score(&adj, v, order), tiebreak(v, seed), v)));
     }
 
     let mut eliminated = 0usize;
@@ -335,13 +379,13 @@ pub fn decompose_with(
         if ticks % 64 == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
             return None;
         }
-        let Some(Reverse((s, v))) = heap.pop() else { break };
+        let Some(Reverse((s, key, v))) = heap.pop() else { break };
         if !alive[v as usize] {
             continue;
         }
         let now = score(&adj, v, order);
         if now > s {
-            heap.push(Reverse((now, v)));
+            heap.push(Reverse((now, key, v)));
             continue;
         }
 
@@ -386,7 +430,7 @@ pub fn decompose_with(
         }
         for x in touched {
             if alive[x as usize] {
-                heap.push(Reverse((score(&adj, x, order), x)));
+                heap.push(Reverse((score(&adj, x, order), tiebreak(x, seed), x)));
             }
         }
     }
@@ -624,6 +668,105 @@ mod tests {
         }
         for i in 1..n {
             g.add_edge(i, i + 1, 1.0);
+        }
+        g
+    }
+
+    /// Seed zero is the ordering this module always ran.
+    ///
+    /// The tie-break enters the heap key, so a wrong identity here would silently
+    /// change every existing decomposition rather than only the sampled ones.
+    #[test]
+    fn seed_zero_is_the_deterministic_ordering() {
+        for n in [12u32, 25, 40] {
+            let g = random_graph(n, 0.25, n as u64 * 7 + 1);
+            for &order in ORDERINGS.iter() {
+                let a = decompose_with(&g, order, 32, None);
+                let b = decompose_seeded(&g, order, 32, None, 0);
+                match (a, b) {
+                    (Some(a), Some(b)) => {
+                        assert_eq!(a.width, b.width);
+                        assert_eq!(a.bags, b.bags);
+                        assert_eq!(a.children, b.children);
+                    }
+                    (None, None) => {}
+                    _ => panic!("seed 0 disagreed with the unseeded ordering on {order:?}"),
+                }
+            }
+        }
+    }
+
+    /// Every seed yields a *valid* decomposition, whatever its width.
+    ///
+    /// This is what lets the ordering search draw freely: the validity theorem at
+    /// the top of this module is stated for an arbitrary elimination ordering, and
+    /// a permuted tie-break is one. The test drives it over many seeds and orders
+    /// and checks the bags against the graph each time, because the search keeps
+    /// whichever draw implies least work and a malformed draw would be kept on
+    /// exactly the instances where it looked cheapest.
+    #[test]
+    fn every_seeded_ordering_is_a_valid_decomposition() {
+        let mut checked = 0;
+        for n in [10u32, 18, 30] {
+            for &p in &[0.15f64, 0.3, 0.5] {
+                let g = random_graph(n, p, n as u64 * 31 + (p * 100.0) as u64);
+                for &order in ORDERINGS.iter() {
+                    for seed in 1u64..8 {
+                        let seed = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+                        let Some(td) = decompose_seeded(&g, order, 64, None, seed) else {
+                            continue;
+                        };
+                        assert!(td.verify(&g), "seeded decomposition failed verify");
+                        assert!(td.width < n as usize);
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 100, "only {checked} seeded decompositions were exercised");
+    }
+
+    /// A cap refuses on width, whatever the seed. Sampling must not smuggle a bag
+    /// the DP's encoding cannot address past the cap the caller set.
+    #[test]
+    fn no_seed_exceeds_the_cap() {
+        for cap in [2usize, 4, 6] {
+            for seed in 0u64..12 {
+                let seed = seed.wrapping_mul(0x1234_5678_9ABC_DEF1);
+                let g = random_graph(22, 0.35, seed | 3);
+                for &order in ORDERINGS.iter() {
+                    if let Some(td) = decompose_seeded(&g, order, cap, None, seed) {
+                        assert!(td.width <= cap, "width {} exceeded cap {cap}", td.width);
+                        assert!(td.bags.iter().all(|b| b.len() <= cap + 1));
+                    }
+                }
+            }
+        }
+    }
+
+    fn random_graph(n: u32, p: f64, seed: u64) -> UndirectedGraph {
+        let mut state = seed | 1;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut g = UndirectedGraph::new(n);
+        for i in 1..=n {
+            g.add_node(i, NodeType::Steiner, 0.0);
+        }
+        // A spanning path first, so the graph is connected and every ordering has
+        // something to do.
+        for i in 1..n {
+            g.add_edge(i, i + 1, 1.0);
+        }
+        for i in 1..=n {
+            for j in i + 2..=n {
+                if next() < p {
+                    g.add_edge(i, j, 1.0);
+                }
+            }
         }
         g
     }

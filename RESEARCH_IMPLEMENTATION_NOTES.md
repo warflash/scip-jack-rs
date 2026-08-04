@@ -6398,3 +6398,402 @@ nothing else moving.
    has been spent, and §127.1 still stands. §135 removes one candidate explanation:
    the branch-and-cut's seconds are not the ones to move.
 5. §127's item 3 — the extended reduction's dispatch — was not touched.
+
+### 139. The control, and the question nobody had asked about the width DP
+
+HEAD `659e791` on `main`, copied aside as `control.exe` before anything was
+touched. Every paired comparison below runs both binaries in the same worker slot
+on the same instance, eight-way (§74).
+
+§138's list is about the LP and the wide group's root loop, and this round did
+not take it. What it took instead came out of one census. The unproved set at
+five seconds was 85 instances; `td_census` — the probe that reproduces the
+pipeline and then decomposes and runs the DP with a generous clock — was pointed
+at all 85, and the answer is not about the LP at all:
+
+| outcome | count |
+|---|---|
+| `refused` — no ordering brought the graph inside the encoding's cap | 56 |
+| `solved` — the DP carried it to the optimum | **15** |
+| `timeout` — decomposed, DP ran out of clock at 20–90 s | 14 |
+
+Fifteen unproved instances are *solved outright* by an exact stage the solver
+already owns, and five of them in under 4.1 s of a five-second budget:
+
+| instance | width | work | DP seconds | what the solver did at 5 s |
+|---|---|---|---|---|
+| instance084 | 10 | 2.94e8 | **1.81** | TimeLimit |
+| instance064 | 9 | 2.83e8 | **2.36** | TimeLimit |
+| instance040 | 10 | 5.76e8 | **3.01** | TimeLimit |
+| instance094 | 10 | 6.41e8 | **3.68** | TimeLimit |
+| instance085 | 10 | 6.61e8 | **4.10** | TimeLimit |
+| instance089 | 10 | 1.28e9 | 5.17 | TimeLimit |
+| instance087 | 11 | 1.80e9 | 6.80 | TimeLimit |
+| instance070 | 10 | 1.39e9 | 7.37 | TimeLimit |
+| instance095 | 10 | 1.16e9 | 8.98 | TimeLimit |
+| instance096 | 11 | 2.17e9 | 10.05 | TimeLimit |
+| instance099 | 11 | 2.01e9 | 10.42 | TimeLimit |
+| instance086 | 11 | 3.16e9 | 15.78 | TimeLimit |
+| instance065 | 12 | 6.52e9 | 22.57 | TimeLimit |
+| instance066 | 11 | 4.56e9 | 23.58 | TimeLimit |
+| instance075 | 12 | 6.15e9 | 44.67 | TimeLimit |
+
+The traces say why, and the reason is a scheduling defect rather than a
+mathematical one. instance064 at a five-second limit:
+
+```text
+[reduce] classical: 1273 -> 880 nodes, 1814 -> 1360 edges, 500 -> 301 terminals
+[round] greedy      0.792s
+[round] ascents     0.917s
+[round] ils 0.000s  recomb 0.000s  grow 0.000s  eliminate 0.000s
+[reduce] round 1: LB=101689685.0 UB=104175065.0 kill 0n/0e
+[time] pass 0: tighten took 1.71s, search gets 1.58s
+[td] skipped: the same graph was already given 1.58s and was cut off; 1.52s cannot get further
+```
+
+The DP needs 2.36 s. It is handed 1.58 s, then 1.52 s, and never the 3.17 s that
+are sitting in the budget — because the width attempt lives after a tightening
+round that spends a third of the clock producing `kill 0n/0e` and a primal bound
+2.4 % above the optimum, on an instance whose exact stage wants no primal bound at
+all. instance040 needs 3.01 s and is handed 1.58 s. instance084 needs 1.81 s and
+is handed 1.61 s.
+
+### 140. All-or-nothing stages may not be given a share
+
+The defect generalises past this stage, and it is the sharpest form §120's
+complaint has taken.
+
+> Every other stage of the finish produces something at every moment it runs: the
+> goal-directed search advances a frontier, the separation loop raises a certified
+> bound, the branch-and-cut moves a dual. The width DP produces **nothing at all**
+> until its last nice-tree node is retired, and then produces a complete proof.
+> Splitting one budget between stages of those two kinds as though they were
+> comparable gives the second kind a share, and a share of what an all-or-nothing
+> stage needs is worth exactly zero. So the rule is: *an all-or-nothing stage is
+> granted either enough to finish or nothing at all* — and it is granted first,
+> because it consumes no bound that anything else produces.
+
+Three things had to be true before that could be wired.
+
+**A throughput constant that describes the programme it is attached to.**
+`TD_UNITS_PER_SECOND` was `2.0e7`, set before `table_bound` was corrected for the
+rank-based reduction (§43), and wrong by an order of magnitude against the DP it
+now predicts. The fifteen completed runs above give `work / seconds` in the range
+`1.2e8` to `2.9e8` over a work range of twenty-three, median `1.9e8`. The constant
+is now `1.5e8` — the **low end** of the measured range and deliberately not its
+median, because the errors are not symmetric: under-stating throughput only
+refuses an attempt that would have fitted, while over-stating it admits one that
+consumes the window and returns nothing. The whole table is in the source beside
+the constant.
+
+**A condition used in one direction only.** `work_estimate` is a sound upper
+bound on the entries the DP touches, so `work / rate <= left` is a *sufficient*
+condition for affordability and never a necessary one — on a narrow graph whose
+reachable signatures are a small fraction of the representable ones the true ratio
+is four orders of magnitude out, which is the measurement §47 recorded and the
+reason the estimate was never used as an admission test. It is now used to
+**grant** attempts and never to withdraw one: the unconditional clock-bounded
+attempt stays exactly where it was, and the new rule can only add.
+
+**A grant a wrong bound cannot run away with.** The grant is capped at twice the
+predicted time. That cap is inert when the prediction is close to the whole window
+and protects the fall-through when it is not: at a thirty-second limit an attempt
+predicted to take eight seconds may not spend twenty-nine, because a work bound
+wrong by more than a factor of two is a wrong bound.
+
+The rule reads identically at every budget. At one second it admits almost
+nothing and the pipeline is what it was; at thirty it admits more; at a thousand
+it admits everything that decomposes, which is the right answer, since the DP is
+then a proof and the stages it would displace are approximations of one. Nothing
+in it is a fraction of the budget: the quantity compared against the clock is a
+work bound computed from this graph's own decomposition.
+
+It is wired at two points. Before the tightening, on the classically reduced
+graph, with the solve's whole clock. And at the existing late site, where the pass
+window becomes a *floor* on the grant rather than a ceiling —
+`max(window, min(solve deadline, 2 x predicted))` — because the tightening can
+shrink the graph enough to change the answer: instance084 decomposes at width 12
+after the classical reduction and at width 10 after the tightening. The truncation
+memory of §95 moved inside the attempt, so "would this repeat itself" is decided
+against the window the attempt would actually get rather than against the pass's
+share of the clock.
+
+### 141. One elimination heuristic was vetoing the other three
+
+The census and the solver disagreed about instance094, and the disagreement was
+the second finding. `td_census` decomposes it at **width 10** and the DP carries
+it to the optimum in 3.68 s; the solver refused it outright, at every budget.
+
+`try_decomposition` ran the cheap min-degree ordering *as the gate*: if that one
+ordering exceeded the cap the graph was declared too wide and the portfolio was
+never consulted. The stated reason was cost, and the cost is not there to save —
+`decompose_with` abandons an ordering at the first bag over the cap, so every
+member of the portfolio rejects a wide graph in microseconds, and
+`decompose_portfolio` stops early anyway once a candidate meets `delta(G)` and is
+certified minimal. Measured over all 200 Track 2 instances, the full portfolio
+costs under 0.1 s on 194 of them, at most 0.66 s on four more, and 3.0 s on
+exactly two — instance079 (36,415 vertices after a reduction that deletes nothing)
+and instance197 — both unproved at every budget from one second to thirty.
+
+What the pre-gate cost is instances. A refusal on width is supposed to be a
+statement about the graph; a statement about one greedy was standing in for it.
+It is gone.
+
+### 142. The tie-break was a search dimension nobody was searching
+
+Each ordering is a greedy over a score that is very far from injective: on these
+graphs a min-fill step routinely has dozens of vertices at fill zero, and which of
+them is eliminated first is decided by nothing but its index in the input file.
+That choice compounds, because the elimination game rewrites the neighbourhood of
+everything it touches. `decompose_seeded` makes the tie-break a parameter — a
+seeded permutation of the vertices in the heap key, seed zero being the identity,
+so every decomposition the module produced before is bit-for-bit what it was.
+
+`order_probe` (new, hard-capped) draws seeded orderings and keeps whichever
+implies least work. Against the deterministic portfolio, on the unproved instances
+that decompose:
+
+| instance | portfolio | sampled | factor | best reached by |
+|---|---|---|---|---|
+| instance040 | 5.76e8 | **6.61e7** | 8.7x | 0.05 s |
+| instance065 | 6.52e9 | **8.60e8** | 7.6x | 4.0 s |
+| instance099 | 2.01e9 | **5.68e8** | 3.5x | 0.05 s |
+| instance103 | 2.10e10 | 6.41e9 | 3.3x | 0.05 s |
+| instance086 | 3.16e9 | 1.10e9 | 2.9x | 2.0 s |
+| instance061 | 1.95e10 | 7.45e9 | 2.6x | — |
+| instance087 | 1.80e9 | 7.28e8 | 2.5x | 0.10 s |
+| instance096 | 2.17e9 | 9.84e8 | 2.2x | 4.0 s |
+| instance084 | 7.75e9 | 3.82e9 | 2.0x | 0.05 s |
+| instance095 | 1.17e9 | 7.34e8 | 1.6x | 2.0 s |
+
+A factor of three is one width, and one width is the difference between an
+instance the DP closes and one it cannot. The searching is nothing but re-running
+a greedy that already exists, and every draw is a decomposition the module's
+validity theorem covers — it is stated for an *arbitrary* elimination ordering —
+so nothing is at stake but the time.
+
+Two bounds keep the time honest and neither is a share of the budget.
+
+The search **does not start** unless the deterministic plan fails to fit the clock
+the DP would have, and it **stops the moment a draw does fit**. On every instance
+the pipeline already closes, this code runs zero times.
+
+When it runs it may spend **four times what deciding the ordering deterministically
+just cost** — a duration this graph produced in this run by the very stage being
+extended, the shape §103 gives every batch rule — capped by the clock that is
+left. Four, because the portfolio is four orderings: the search may double the
+ordering stage's worst case, which is the bargain the portfolio itself already
+makes against running one greedy. The budget is self-scaling in exactly the right
+way, including when the portfolio *refused*: a genuinely wide graph is refused in
+microseconds and the search gets microseconds, while a graph one bag over the cap
+costs a whole min-fill run to refuse and the search gets four of them.
+
+`every_seeded_ordering_is_a_valid_decomposition` drives seven seeds over four
+orderings over nine random graphs and re-verifies the bags against the graph every
+time; `seed_zero_is_the_deterministic_ordering` asserts the identity bag for bag
+and child list for child list; `no_seed_exceeds_the_cap` asserts no draw smuggles
+a bag past the caller's cap.
+
+### 143. What the ordering stage may spend, and the two bounds it took to find out
+
+The full portfolio and the tie-break search were shipped together in a first pass
+and **SteinLib regressed by four** — C18, D18, D19 and E19, paired, on the slice
+that had been neutral for eight rounds. The isolation is the interesting part
+because the first guess was wrong.
+
+*It is not the recombination.* Correcting `TD_UNITS_PER_SECOND` also loosens
+`exact_recombination`'s gate by the same factor of 7.5, which is §67's failure mode
+exactly ("gating on the width alone let the recombination spend 3.6 s inside a 5 s
+budget on instance175 and cost three instances their proof"). Pinning that gate to
+its calibrated `2.0e7` — as `RECOMB_UNITS_PER_SECOND`, with the argument for why
+the two callers want opposite ends of the same measurement written beside it —
+recovered **nothing**: the same four instances, twice. The pin is kept anyway,
+because the argument for it is sound whatever this benchmark says: the width
+dispatch asks *will this finish*, where pessimism only refuses, and the
+recombination gate asks *may an optional step risk this much of the primal
+budget*, where optimism spends seconds the stages after it needed.
+
+*It is the ordering.* The trace, and it is unambiguous:
+
+```text
+c18   [td] no decomposition inside the encoding's cap (0.68s of ordering)
+d18   [td] no decomposition inside the encoding's cap (2.82s of ordering)
+d19   [td] no decomposition inside the encoding's cap (4.69s of ordering)
+```
+
+4.69 s of a five-second budget spent deciding an elimination ordering for a
+dynamic programme that is then refused. Per ordering at the cap, measured:
+
+| graph | min-degree | each fill ordering | outcome |
+|---|---|---|---|
+| instance094 | 0.001 s | 0.003 s | width 10 |
+| instance099 | 0.001 s | 0.003 s | width 11 |
+| SteinLib c18 | 0.001 s | 0.045 s | refused |
+| SteinLib d19 | 0.001 s | 0.31 s | refused |
+| SteinLib e19 | 0.001 s | **1.9 s** | refused |
+
+A fill ordering that *succeeds* is milliseconds. One that fails runs a long way
+before the minimum degree finally exceeds the cap, paying a densifying graph's
+fill computation at every step. Two bounds fix it, and both are structural.
+
+**The search does not run without an incumbent.** With no plan to improve on there
+is only a hope that a permuted tie-break crosses a threshold every deterministic
+ordering missed, and that hope multiplies the refusal's cost by five on every wide
+graph in the benchmark — 0.135 s of portfolio became 0.68 s on c18, 0.94 s became
+4.69 s on d19. It searches from an incumbent or it does not search.
+
+**The expensive orderings are gated on min-degree's width, not on its refusal.**
+Min-degree has no fill computation and, run to completion instead of aborted at the
+cap, costs 1 to 135 ms on every graph here. Unbounded width per ordering:
+
+| graph | min-degree | best fill ordering | ratio |
+|---|---|---|---|
+| instance094 | 15 | **10** | 1.50 |
+| instance099 | 16 | **11** | 1.45 |
+| instance083 | 15 | 14 | 1.07 |
+| Track 1 instance193 | 31 | 29 | 1.07 |
+| SteinLib c18 | 195 | 186 | 1.05 |
+| Track 1 instance192 | 126 | 93 | 1.35 |
+| SteinLib d19 | 312 | 304 | 1.03 |
+| SteinLib e19 | 446 | — | — |
+
+No fill ordering has ever been observed to beat min-degree by as much as a factor
+of two, so a graph min-degree puts above **twice** the cap is out of reach and the
+expensive orderings are not run at all. The margin is wide in both directions:
+everything admitted sits at 15 or 16 against a threshold of 26, everything refused
+at 31 or more. This is what §141's pre-gate should have been — it used min-degree's
+*refusal at the cap*, a statement about one greedy, where the *width* bounds every
+greedy in the portfolio.
+
+A third bound is kept as a backstop: the whole ordering stage may spend no more
+than the classical reduction immediately before it just spent on this same graph,
+the shape §103 gives every batch rule and a duration that scales with the thing
+that makes a fill ordering expensive.
+
+The result, same instances, same traces:
+
+| graph | ordering, first pass | ordering, bounded |
+|---|---|---|
+| SteinLib c18 | 0.68 s | **0.01 s** |
+| SteinLib d19 | 4.69 s | **0.05 s** |
+| SteinLib e19 | — | 0.21 s |
+| Track 1 instance192 | 0.41 s | 0.06 s |
+| Track 1 instance193 | 0.02 s | 0.00 s |
+
+and every width gain intact: instance040, 064, 085, 094 and 099 still close on the
+early attempt, at widths 9 to 10, in 1.58 to 3.44 s.
+
+### 144. The matrix, and what shipped
+
+Five behavioural changes:
+
+1. `TD_UNITS_PER_SECOND` corrected from `2.0e7` to the measured `1.5e8` (§140),
+   with `RECOMB_UNITS_PER_SECOND` pinned at the old value where the risk reverses
+   (§143).
+2. The width attempt granted the window its own work bound asks for, capped at
+   twice the prediction, and taken **before** the tightening (§140).
+3. The pass window made a floor rather than a ceiling on the late attempt's grant,
+   and §95's truncation memory moved inside the attempt so it is decided against
+   the window the attempt would actually get (§140).
+4. Min-degree's *refusal* no longer vetoes the portfolio; its *width* gates it
+   (§141, §143).
+5. `decompose_seeded`, and a bounded search over the greedy's tie-break (§142,
+   §143).
+
+**Paired, control against shipped, both binaries in the same worker slot,
+eight-way:**
+
+| slice | control | shipped |
+|---|---|---|
+| Track 2 @1 s | 85 | **91** |
+| Track 2 @5 s | 117 | **124** (private 100: 49 → **54**) |
+| SteinLib B / C / D @5 s | 18 / 20 / 20 | 18 / 20 / 20 |
+| SteinLib E @20 s | 19 | 19 |
+| Track 1 [1..140] @3 s | 140 | 140 |
+| Track 1 [155..200] @5 s | 28 | 27 |
+
+Track 1's tail loses instance192, which the shipped binary proves solo and which
+§111 records as one of the two instances a per-path clock read cost their proofs;
+the slice has read 25, 26, 27, 28 across the last four rounds' measurements of it.
+
+**The budget matrix, `benchmarks/budget_matrix.sh` on each binary and
+`benchmarks/budget_gate.sh` over the pair, Track 2 `[1..200]`, eight-way:**
+
+| budget | control | shipped | delta | control private 100 | shipped private 100 | wall |
+|---|---|---|---|---|---|---|
+| 1 s | 82 | **91** | +9 | 37 | **40** | 170 s → 166 s |
+| 5 s | 113 | **124** | +11 | 49 | **54** | 613 s → 556 s |
+| 30 s | 149 | **151** | +2 | 70 | **73** | 2456 s → 2299 s |
+
+`budget gate: PASS` — **0 wrong on both sides at every budget**, monotone
+`1 s -> 5 s -> 30 s` on both sides, no budget trade, and less total wall time at
+every budget. At five seconds there are **eleven gains and no losses at all**:
+040, 064, 075, 077, 083, 085, 093, 094, 099, 120, 132. At thirty seconds the delta
+is smaller and it should be — the stage that was starved is the one a longer budget
+was already feeding — and it is five gains (070, 097, 168, 182, 192) against three
+losses (057, 103, 146) inside the finishing cluster the notes have called noisy
+since §74.
+
+| | private 100 |
+|---|---|
+| this solver @1 s | **40** |
+| this solver @5 s | **54** |
+| this solver @30 s | **73** |
+| best non-SCIP-Jack entrant, 1800 s | 77 |
+| SCIP-Jack, 2018 competition build, 1800 s | 92 |
+| SCIP-Jack, later build, ~25 s average | 99 |
+
+203 library tests, `cargo build --release --bins` clean.
+
+**The count moved, on every budget, and the five-second column has no losses.**
+
+
+### 145. Delivered, and what the round did not touch
+
+- **The count moved on the slice the brief names, at every budget, with the gate
+  passing and nothing else moving.** The mechanism is not a new relaxation or a
+  new reduction: it is that the one exact stage in this solver which produces
+  nothing until it finishes was being handed a third of the budget, and a third of
+  what an all-or-nothing stage needs is worth nothing.
+- **Six of the eleven five-second gains are primal**, not width: 083, 120 and 148
+  close through the goal-directed search and 075, 077 and 093 through the
+  branch-and-cut, and in every one of the six the incumbent reached the optimum
+  where the control sat 1 to 4 units above it. That is §118 — "half of Group A is
+  a primal deficit" — closing without anything in the primal machinery being
+  touched, and the mechanism is the corrected throughput constant reaching
+  `grow_and_solve` through `RECOMB_UNITS_PER_SECOND`'s *other* consumer. It is
+  recorded here as an observation with a named cause and not as a designed result.
+- §138's items 1 to 5 were **not** taken. The LP is still the whole of Group A's
+  cost, §120's two allocation rules are still evaluated after the budget they
+  allocate has been spent, and the extended reduction's dispatch is untouched.
+
+### 146. What the next round should take from this
+
+1. **56 of the 85 unproved instances are refused on width, at 14 to 60**, and that
+   is now the largest single block in the benchmark. Widths 14 to 16 are one to
+   three bags over `MAX_BAG = 15`; the encoding scales (the cut-vector words are
+   `2^(MAX_BAG-1-6)`) but `3^14` says the constant is not the binding thing. The
+   untried lever is *exact* treewidth preprocessing — simplicial and
+   almost-simplicial vertex elimination, which cannot raise the treewidth — in
+   front of the ordering, and it is the one direction that can move a refusal into
+   an admission without any heuristic at all.
+2. **The tie-break search is bounded by four times a portfolio that costs 4 ms**,
+   and §142's ladder shows instance065, 086, 095 and 096 still improving out to
+   2–4 seconds of sampling, by factors of 1.6 to 7.6. Those factors are exactly
+   what decides whether the DP fits at five seconds. What *should* bound a search
+   whose payoff is multiplicative in the stage it plans is an open question and the
+   current answer is a placeholder that happens to be safe.
+3. **Which graph the width attempt should see is now a real question with a
+   measured example.** instance084 decomposes at width 12 after the classical
+   reduction and at width 10 after the tightening, where the DP needs 1.81 s; at
+   five seconds the tightening never gets far enough to expose it. The early
+   attempt sees the first graph and the late attempt the second, and neither sees
+   the one that would prove it.
+4. **Class 1 is untouched and is the other large block**: roughly 34 instances on
+   graphs of 300 to 1200 vertices sitting 1 to 50 units from the optimum, at widths
+   14 to 60 so the DP cannot address them at all, with `BCR* = OPT` (§113) so the
+   root cut loop *is* the proof — and it converges in 9.6 s where it is given 5.
+   §138's items 3 and 4 are still the right list for it.
+5. The all-or-nothing argument of §140 was applied to one stage. The hypergraphic
+   certificate (`HYP_UNITS_PER_SECOND`, `|R| <= 20`) and Dreyfus-Wagner are the
+   same shape and nobody has asked the same question of them.
