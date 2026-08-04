@@ -5946,3 +5946,80 @@ Two things are closed by measurement and should not be re-attempted:
   better than the incumbent on that class, and unreachable on the other, because
   the certificate loop is behind the goal-directed search's 64-terminal gate
   (§122).
+
+### 128. §76 was wrong: the simplex does not stall, HiGHS's cost perturbation does
+
+This is the most important measurement in this session and it was taken in its
+last hour, so it is recorded here rather than acted on. **It is not finished and
+nothing in the pipeline has been changed by it.**
+
+§76 found that the dual simplex "does not terminate" on the cut LP, swept
+"primal simplex, two scaling strategies, Dantzig pricing on either side", found
+nothing, and made the interior point the algorithm for the root loop (§78 then
+closed the question). What that sweep never did was **read HiGHS's own log**.
+`SJ_LP_TRACE=2` now turns it on — `RowProblem::optimise` calls the crate's
+`make_quiet`, which clears `log_to_console` as well as `output_flag`, so both
+have to be re-set.
+
+The log names the mechanism outright. instance130, the solve that took 15.4 s:
+
+```
+Cost perturbation for
+   Initially have 1500 nonzero costs ( 80%) with min / average / max = 1 / 19072.9 / 100000
+   Large so set max_abs_cost = sqrt(sqrt(max_abs_cost)) = 17.7828
+   Perturbation column base = 8.8914e-06
+DuPh2      0   3.6030276932e+06  Pr: 24(0.800802)          No reason
+DuPh2   1593   3.6030281214e+06  Pr: 0(0); Du: 0(2.4e-07)  Possibly optimal
+DuPh2   1593   3.6005921370e+06  Pr: 0(0); Du: 330(1394.02) Perturbation cleanup
+HEkkDual:: Using primal simplex to try to clean up num / max / sum = 330 / 32.2614 / 1394.02
+PrPh2   1593   3.6005921370e+06  ...
+PrPh2   5522   3.6005919877e+06  Pr: 0(0); Du: 326(329.285) Synthetic clock
+```
+
+**The dual simplex converges in 1,593 iterations.** HiGHS then removes the
+anti-degeneracy cost perturbation it applied, that exposes 330 dual
+infeasibilities summing to 1394, it falls back to the *primal* simplex to clean
+them up, and the primal simplex makes no progress at all: from iteration 1,593 to
+5,522 the objective is frozen at `3.6005919877e+06` and the infeasibility count
+oscillates between 300 and 460. Those four thousand iterations are the fifteen
+seconds. The perturbation scale is the reason: HiGHS caps it at
+`max_abs_cost^(1/4) = 17.78` on a cost vector that runs to 100,000, so it is
+several orders of magnitude too small to be removable cleanly on this family.
+
+The option is `dual_simplex_cost_perturbation_multiplier` (advanced, default 1,
+`0 => no perturbation`). Set to zero, run to convergence, no clock cap:
+
+| instance | interior point (what §76 chose) | dual simplex, perturbation off | dual simplex, default |
+|---|---|---|---|
+| instance130 | 79 solves, **18.34 s** (LP 16.80) | 77 solves, **7.67 s** (LP 6.84) | stalls, 3600591.9 |
+| instance083 | 93 solves, **16.95 s** (LP 15.69) | 95 solves, **5.48 s** (LP 4.65) | stalls, 3200553.1 |
+| instance142 | 85 solves, **22.19 s** (LP 20.62) | 90 solves, **6.82 s** (LP 6.00) | stalls, 3000522.2 |
+
+Every one converges to `BCR*`, and every one of those `BCR*` values is the
+reference optimum exactly. Per solve on instance130: 35–115 ms against the
+interior point's 180–265 ms, and no solve anywhere near the 16.7 s outlier.
+
+**Two to three times on the whole loop, and it removes an algorithm choice rather
+than adding one.** §113 says the root cut loop reaching `BCR*` *is* the proof on
+Group A and §116 says it needs about 32 rounds at ~0.3 s against the 1–2 s it
+gets; a factor of two-and-a-half on the LP is most of that shortfall, and it
+applies to the branch-and-cut too, which already uses `LpMethod::Simplex` and
+which §120 shows spending 6.89 s of a 13.80 s window inside it.
+
+What is **not** established and must be before anything is wired:
+
+- whether the perturbation-free dual simplex is stable on the *rest* of the
+  benchmark — instance164 was still running when the session ended, and SteinLib
+  and Track 1 were not touched at all;
+- whether `LpMethod::InteriorPoint` should go away entirely or stay as the
+  fallback for models where the unperturbed dual simplex degenerates instead;
+- what it does to `RootSeparation`, which currently selects the interior point
+  for a reason §83 measured (an interior-point dual yields two to three times as
+  many packing sets at the same root value) — a faster simplex that produces a
+  *thinner* packing may be a worse potential even while being a better bound;
+- the paired A/B, which has not been run at any budget.
+
+The `SJ_PERTURB` hook that produced these numbers is committed as an instrument,
+defaulting to HiGHS's own 1.0, so the pipeline is unchanged. Wiring it is the
+first item of the next round and it is the largest measured multiplier this
+project has found since the LP was introduced.

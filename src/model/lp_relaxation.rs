@@ -504,7 +504,14 @@ impl LpRelaxation {
         }
 
         let mut model = pb.optimise(Sense::Minimise);
+        // `RowProblem::optimise` calls the crate's `make_quiet`, which turns off
+        // `log_to_console` as well as `output_flag`. Both have to come back on or
+        // HiGHS's own diagnosis of a solve is unreachable.
         model.set_option("output_flag", lp_trace_level() >= 2);
+        if lp_trace_level() >= 2 {
+            model.set_option("log_to_console", true);
+            model.set_option("log_dev_level", 1i32);
+        }
         self.cols = cols;
         self.model = Some(model);
         self.rebuilds += 1;
@@ -818,6 +825,13 @@ impl LpRelaxation {
                 LpMethod::Simplex => {
                     model.set_option("solver", "simplex");
                     model.set_option("run_crossover", "on");
+                    model.set_option(
+                        "dual_simplex_cost_perturbation_multiplier",
+                        std::env::var("SJ_PERTURB")
+                            .ok()
+                            .and_then(|v| v.parse::<f64>().ok())
+                            .unwrap_or(1.0),
+                    );
                 }
                 LpMethod::InteriorPoint => {
                     model.set_option("solver", "ipm");
