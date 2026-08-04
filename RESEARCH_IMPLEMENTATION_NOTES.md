@@ -5490,3 +5490,459 @@ processes from an earlier session were still running with 22,850, 13,185 and
 Unpaired: 116–117 / 200 proved, **0 wrong**, against the control's 114–118 / 200.
 198 library tests. The three remaining overruns are the honest residue and are
 not claimed to be fixed.
+
+## 2026-08-04 (sixteenth round): the class item 1 names has no integrality gap, so branching is not what closes it
+
+### 112. The control, and what was frozen
+
+HEAD `16c0c69` on `main`, copied aside as `control.exe` before anything was
+touched. Every paired comparison below runs both binaries in the same worker
+slot on the same instance.
+
+The round's brief names the branch-and-cut as "the largest untapped multiplier"
+and asks, in order, for two measurements before any change: where the LP seconds
+go, and how many nodes a second the tree opens. Both were taken. The first is
+answered. The second turned out not to be the question, and §113 is why.
+
+### 113. `BCR* = OPT` on the class item 1 was written for
+
+`lpstar_probe`, run to convergence with no clock cap — rounds continue until a
+round installs nothing, which by the probe's own proposition is the point at
+which the model's optimum *is* the root cut relaxation's optimum:
+
+| instance | V / E / R | ascent | `BCR*` (connectivity only) | rounds | wall | of which LP | `ALL*` (four families) | solves | wall | reference OPT |
+|---|---|---|---|---|---|---|---|---|---|---|
+| instance130 | 363 / 750 / 36 | 3600567 | **3600596** | 78 | 18.34 s | 16.80 s | 3600596 | 43 | 11.48 s | 3600596 |
+| instance146 | 453 / 931 / 41 | 4100664 | **4100695** | 110 | 33.36 s | 30.49 s | 4100695 | 57 | 20.93 s | 4100695 |
+| instance150 | 789 / 1587 / 71 | 7102315 | **7102320** | 10 | 3.92 s | 3.51 s | 7102320 | 12 | 4.14 s | 7102320 |
+| instance192 | 512 / 1040 / 40 | 4000729 | **4000758** | 293 | 119.20 s | 109.15 s | 4000758 | 63 | 28.12 s | 4000758 |
+
+On all four the root cut relaxation's optimum **equals the integer optimum
+exactly**. There is no integrality gap to branch on. A working branch-and-bound
+does not close this class; converging its root cut loop does, and the tree would
+have nothing left to do once the loop finished.
+
+That is the round's first finding and it withdraws the premise of item 1's third
+paragraph. It does not withdraw the first two, which asked for measurements —
+those are §114 to §116.
+
+### 114. Where the LP seconds go: the basis is being reused, and 243 ms is what the model costs
+
+`SJ_LP_TRACE` (new, off by default) prints per solve: elapsed, rows, columns,
+whether the model was cold, the status and the objective. On instance192's
+branch-and-cut at a thirty-second limit:
+
+```
+#1   10.2ms rows=2025 cols=2592 cold=true  obj=3800001.0
+#2   67.6ms rows=2423 cols=2592 cold=false obj=3900716.0
+#5  310.4ms rows=2694 cols=2592 cold=false obj=3900716.0
+#17 608.1ms rows=3206 cols=2592 cold=false obj=3900719.5
+#28 104.6ms rows=3408 cols=2592 cold=false obj=3900723.0
+```
+
+Exactly one solve is cold — the first — and the trace's `1 rebuilds` is that same
+build. Every later solve reuses the basis. **The hypothesis that the node and
+round LPs are re-solved from scratch is false**, so warm-starting is not the
+missing order of magnitude. The 243 ms average is what a 2,592-column,
+3,400-row bidirected cut model costs on this instance family.
+
+### 115. The cause: the dual simplex degrades catastrophically, and the objective is why
+
+The same instrument on the standalone convergence loop for instance130 with
+`SJ_LP_METHOD=simplex`, rows growing 2,026 to 3,818 over 30 solves:
+
+```
+#2  68ms   #5  404ms   #11  560ms   #22  715ms
+#25 1109ms #26 3265ms  #27  847ms   #28 16690ms
+```
+
+One solve of a 3,760-row model took **16.7 seconds**. The interior point on the
+identical sequence of models is flat at 180–265 ms for all 78 rounds. §76 and §78
+stand, and "the LP is slow" now has a shape: roughly thirty interior-point
+iterations refactorising a four-thousand-row model, once per round, with no basis
+to lose and nothing to warm-start.
+
+Why this family in particular. instance130 has 750 edges and **fifteen distinct
+costs**: 143 edges of cost exactly 100000 and the remaining 607 spread over 1–23.
+Its optimum is `3600596 = 36 x 100000 + 596`. The simplex is being asked to
+resolve differences of one unit inside an objective of 3.6 million — a relative
+scale of 3e-7, which is where a default feasibility tolerance lives. The cost
+structure is read off the instance's own edge list; it is a measured property,
+not a label attached to its provenance.
+
+### 116. Nodes per second, and where a converging root loop actually spends
+
+Item 1's second measurement. On Group A the branch-and-cut opens **one** node and
+its whole window goes to the root cut loop — instance192: 28 LPs, 6.89 s, 6.80 s
+of it LP; instance190: 20 LPs, 6.74 s, 6.70 s of it LP; instance130 at a
+five-second limit: 17 LPs, 0.97 s, 0.94 s of it LP. Nodes per second is 0.15, and
+by §113 it should be: there is nothing for the tree to prove.
+
+The round-level split, instance130, all four families, from `lpstar_probe`'s own
+trace: LP 0.18–0.23 s, connectivity separation 0.016 s, the other three
+separators 0.09–0.10 s, the dual harvest 0.00 s. The bound reaches the optimum at
+**round 32 of 42**; rounds 33–42 install two to seven rows each and move nothing —
+they are the convergence proof, not the bound. So a proof needs about 32 rounds at
+~0.3 s, roughly seven seconds standalone, against the 0.97 s the branch-and-cut is
+given at a five-second limit and the ~1.5 s the certificate loop gets. The gap
+between what the class needs and what it is given is a factor of five, and it is
+an allocation gap rather than a mathematical one.
+
+### 117. Item 4 measured on this class: the flow dual is inert
+
+`flowdual_probe`, blind (`SJ_FD_BLIND=1`, incumbent withheld), five-second cap:
+
+| instance | iterations | oracle calls | bound reached | plain dual ascent |
+|---|---|---|---|---|
+| instance130 | 5,248 | 183,680 | 3600557 | **3600567** |
+| instance146 | 3,784 | 151,360 | 4100661 | **4100664** |
+| instance150 | 1,568 | 109,760 | 7102312 | **7102315** |
+| instance192 | 3,288 | 128,232 | 4000720 | **4000729** |
+
+The bound never leaves its seed in five seconds of ascent, and the seed is *below*
+what one dual ascent produces in milliseconds. Whatever item 4's payoff is — §92
+measured it on the wide, many-terminal group — it is not on Group A. The
+wide-group experiment §92 leaves open was not reached this round; that is a
+session-budget outcome and not a closure.
+
+### 118. Group A is primal-short as often as it is dual-short
+
+Control, thirty seconds, eight-way:
+
+| instance | OPT | primal | dual | short by |
+|---|---|---|---|---|
+| instance130 | 3600596 | 3600596 | 3600596 | — proved |
+| instance146 | 4100695 | 4100695 | 4100685 | dual 10 |
+| instance150 | 7102320 | 7102321 | 7102320 | **primal 1** |
+| instance156 | 7402046 | 7402050 | 7402002 | primal 4, dual 44 |
+| instance172 | 6900841 | 6900845 | 6900825 | primal 4, dual 16 |
+| instance174 | 7202807 | 7202819 | 7202744 | primal 12, dual 63 |
+| instance188 | 6801753 | 6801754 | 6801708 | primal 1, dual 45 |
+| instance190 | 3900450 | 3900451 | 3900438 | primal 1, dual 12 |
+| instance192 | 4000758 | 4000758 | 4000754 | dual 4 |
+| instance200 | 3400646 | 3400650 | 3400633 | primal 4, dual 13 |
+
+**Six of ten carry a primal strictly above the optimum**, three of them by a single
+unit. instance150's dual bound already *equals* the optimum: it is one tree away
+from a proof and nothing whatever about the relaxation is missing. Solo and
+unloaded the control proves 150, and reports 3900451 against a dual of 3900450 on
+190.
+
+The brief describes Group A as "the last few units on small graphs" and prescribes
+branch-and-bound. Half of it is a primal deficit, which no amount of branching
+addresses, and §86's "the wide group is primal-limited" turns out to describe this
+group too.
+
+### 119. Where a tightening round's seconds go
+
+`SJ_ROUND_TRACE` (new, off by default) attributes a round of `root_reduce::round`
+to its six phases. At a five-second limit:
+
+| instance | greedy | ascents | ils | recomb | grow | eliminate | round | what it found |
+|---|---|---|---|---|---|---|---|---|
+| instance130 | 0.165 | 0.151 | **0.688** | 0.029 | 0.013 | 0.000 | 1.06 s | ils 50 iters, **0 gains**; recomb 3600597 -> **3600596** |
+| instance146 | 0.221 | 0.214 | **0.915** | 0.028 | 0.016 | 0.000 | 1.39 s | ils 50 iters, **0 gains** |
+| instance192 | 0.374 | 0.332 | **1.038** | 0.000 | 0.000 | 0.000 | 1.74 s | ils 37 iters, **0 gains**; recomb and grow **cancelled by the round deadline** |
+
+The largest phase reports no gain on all three. The phase that actually finds the
+optimum — the exact recombination — costs three hundredths of a second on
+instance130, and on instance192 it is cancelled by the deadline the phase before
+it consumed. (At thirty seconds instance192's recombination does run, and takes
+3900752 to 3900751, which is the optimum.) The iterated local search is bounded by
+the round's own deadline while the constructions above it are bounded by a
+`primal_deadline`; it is the one primal phase outside that bound.
+
+This is recorded and not acted on, because the obvious repair is not obviously
+right: `ils_ws.pool()` supplies every distinct local optimum the loop visited, and
+the exact recombination selects its parents from that pool — 101 entries on
+instance130. Cutting the phase that measures zero also cuts the input to the phase
+that measures positive. Separating the two is the experiment, not the conclusion.
+
+### 120. Two rules that decide after the budget they are deciding has been spent
+
+Both were found with a temporary instrument; both are stated here as measurements
+and neither is repaired.
+
+**The certificate loop's repayment test never repays.** `run_search` alternates a
+search slice with at most one separation batch, and the slice **doubles** every
+time. On instance192 at thirty seconds, pass 1's window is 13.80 s and its slices
+run 0.06, 0.09, 0.19, 0.35, 0.72, 1.93 and 4.39 seconds; the separation increment
+then costs 1.77 s; and the test
+
+```
+(rate_after - rate_before) * horizon  >=  rate_before * spent
+```
+
+is evaluated with `horizon = deadline - now = 0.00 s` and `window - now = 0.00 s`.
+It fails for any positive `spent`. The same on instance130 at five seconds:
+`spent = 0.46 s`, `horizon = 0.00 s`. The test is not mis-parameterised — it is
+evaluated *after* the budget it is deciding how to spend has been spent, so it
+reports "does not repay" on every instance at every budget. §111's rule that a
+clock must be read where the seconds are has an exact analogue: a decision must be
+taken where the seconds still are.
+
+**The branch-and-cut's measured rate is zero by construction.** It is seeded with
+`root_lower_bound`, which already contains the goal-directed search's frontier,
+and then scored by `(dual - root_lower_bound) / bnc_secs` where `dual` is the
+maximum over every stage. On instance192 its own LP bound rises 3900716 to
+3900723 in 6.89 s while the seed it is measured against is already 3900726, so it
+scores `0.00/s`, is defunded, and receives `0.00 s` in pass 1 — after consuming
+6.89 s of pass 0's 13.80 s window and producing nothing. instance190: 6.74 s,
+`0.00/s`. instance130 at five seconds: 0.97 s, `0.00/s`. A stage cannot be
+measured against a bound it was handed.
+
+### 121. Built, measured, removed: funding the separation by the bound it certifies
+
+The certificate loop emits two objects and only one of them was ever funded.
+`cert.packing` is a potential for the search, and every test scores a batch by
+what it did to the *frontier's* rate. `cert.lp_bound` is a certified lower bound on
+the optimum of the same instance, and the solver already reports
+`max(frontier, lp_bound)`. By §113 it is, on this class, the whole proof. So the
+rule was changed: a batch keeps the window when the separation's own certified
+bound is rising faster, in units per second, than the frontier is — both measured
+on this instance in this pass over the seconds each stage actually ran, neither a
+fraction of any clock, and the comparison fires identically at any budget.
+
+The rule fires and says so. instance192 at thirty seconds:
+
+```
+[certify] the separation is producing 8.14 units of certified bound a second
+          against the frontier's 2.04: it keeps the window
+```
+
+**Paired, thirty seconds, Group A, both binaries in the same worker slot:**
+identical status and dual bound on eight of ten, `+9` units of dual on
+instance190, and it **loses instance130** (Optimal -> TimeLimit, dual 3600591).
+Net −1, no gains. Removed.
+
+The mechanism is §120: the rule is correct and it is evaluated at the moment the
+window ends, so it keeps a window that no longer exists. A variant that also reset
+the search's slice schedule when the separation led — so the comparison could
+actually act — is worse, and instructively so: instance192's dual falls 4000753 to
+4000748, because the extra batch returns a **weaker** packing (3900622.5 over 603
+sets against 3900730.4 over 1138) and displaces the one that takes the frontier's
+rate from 0.2/s to 15.8/s. The doubling slice is not an accident of the schedule;
+it is the measurement that reveals what a packing bought, and shortening it
+destroys the only evidence the allocation has.
+
+The correct version needs the decision taken early *and* the packing's effect
+measured over a slice long enough to show it. Those two requirements are in
+tension and this round did not resolve them. That is the honest state: a
+diagnosed defect with a rejected repair, not a closed direction.
+
+### 122. Built, measured, removed: the relaxation's primal point, read where it converges
+
+§97's threshold ladder — `{a : x_a >= theta}` over a descending theta, each level
+spanned by `mst_prune` and polished by key-path exchange — lives in the
+branch-and-cut's root node, which by §116 is not where the relaxation converges.
+It was moved into the certificate loop, which is the resumable one and is carried
+across attempts and passes.
+
+Instrumented to print every read against the incumbent it was compared with:
+
+| instance | reads | incumbent |
+|---|---|---|
+| instance190 | 3800365, 3800349, 3800445 | 3800346 |
+| instance146 | 4100709, 4100709, 4101081 | 4100695 |
+| instance192 | 3900797, 3900773 | 3900751 |
+
+Never better, on any read, on any Group A instance. And on Group B it never runs
+at all: `run_search` returns before the certificate loop when the terminal set
+exceeds the goal-directed search's 64, and Group B has `|R|` from 470 to 2402.
+
+§97's measurement — exact on 19 of 65, improves the incumbent on 49 — was taken in
+the opposite regime, on instances where the incumbent sits 0.1 % to 3 % above
+`LP*`. It does not transfer to one where the incumbent is already within units of
+the optimum and the LP point is four solves old. Removed.
+
+One consequence is worth recording separately because it bounds a whole family of
+ideas: **the certificate loop and the goal-directed search are behind the same
+gate.** Nothing placed inside `run_search` can reach an instance with more than 64
+terminals — which is exactly Group B.
+
+### 123. Item 2: the trade reverses with the budget, and what loses is the cost
+
+§68 and §72 measured the extended reduction of `extended.rs` at one budget, found
+Track 2 falling from 110–111 to 106, and closed it. §111 built the instrument that
+did not exist then. Re-measured at three budgets, paired, both binaries in the
+same worker slot, wired at exactly the point §72 names and given the classical
+stage's own deadline — which is what §68 did:
+
+| Track 2 [1..200], paired | reduction off | reduction on |
+|---|---|---|
+| 1 s | **82** | 75 |
+| 5 s | **117** | 111 |
+| 30 s | 146 | **149** |
+
+At thirty seconds it **loses nothing at all**: instance065 closes in 18.81 s where
+the control times out, instance149 in 27.17 s, instance180 in 27.49 s, and
+instance098 acquires a tree it did not have. On the private hundred it is 71
+against 70. §68's verdict was correct at §68's budget and is wrong at three times
+it — which is exactly the failure mode §98 warned about, found in a rule that had
+been *switched off* rather than switched on.
+
+**What loses at one and five seconds is not the mathematics.** The instances it
+costs are a different set every time — 022, 038, 057, 060, 074, 082, 116 at one
+second; 075, 077, 093, 117, 144, 194 at five — and every one is an instance the
+pipeline was proving *fast*: 075 in 3.53 s of five, 117 in 2.44 s, 144 in 2.51 s.
+An unbounded enumeration was being inserted in front of stages that needed the
+seconds, on instances that did not need the enumeration.
+
+**Two budget rules were built on that reading and neither survived its own A/B.**
+
+*Bounded by what the classical fixpoint it follows just spent* — a duration this
+graph produced, in this run, by the very stage the enumeration is added to; the
+rule §103 states for the separation batches. It holds the cost exactly as
+designed, measured on `[time] classical reduction took`:
+
+| instance | control | bounded | what the enumeration deleted |
+|---|---|---|---|
+| instance075 | 0.04 s | 0.09 s | nothing |
+| instance077 | 0.97 s | 1.15 s | 2 nodes, 4 edges |
+| instance093 | 0.06 s | 0.12 s | 1 node, 2 edges |
+| instance150 | 0.05 s | 0.09 s | nothing |
+| instance148 | 0.03 s | 0.05 s | nothing |
+
+0.02 s to 0.18 s, never a share of the budget. Paired: 1 s **80** vs 82, 5 s
+**115** vs 117 *twice*, 30 s **146** vs 146. It takes the short-budget loss from
+−6 to −2 and erases the whole of the thirty-second gain. It also introduced an
+overrun — instance103 at 34.13 s against a thirty-second limit, where the control
+proves it in 15.35 s.
+
+*Doubling batches, each granted only because the one before it deleted* — §103's
+own shape, total bounded by twice the useful part. Paired at five seconds: **114**
+vs 117.
+
+So the +3 at thirty seconds survives only when the enumeration runs to its own
+fixpoint, and every rule that stops it early takes the gain with it. The deciding
+quantity is therefore not how much time the enumeration is given; it is whether
+the *downstream* had a use for the seconds. That is what §72 said, and it is still
+the measurement nobody has.
+
+One dispatch was tested and rejected on the data rather than on principle: the
+refused, many-terminal regime. It does not separate the two sets. Winners at
+thirty seconds have `|R|` = 53, 64, 88 and 1748; losers have 32, 49, 250, 400,
+417, 1577 and 7397.
+
+**Shipped state**: `extended.rs` stays off, now behind `SJ_EXTENDED` so the next
+round re-measures instead of re-arguing. This is a *stronger* claim than §72's,
+not a weaker one: the reduction is now known to pay +3 at thirty seconds against
+no losses, and the obstacle is named and is not the enumeration's correctness.
+
+### 124. Item 3: the wrong answer did not reproduce this session
+
+§100 records PACE Track 2's instance154 reporting `Optimal 6001785` against a
+reference of 6001782, 3/3 at a thirty-second limit and 1/3 at twenty. On the
+frozen control, on this machine, today:
+
+| build | limit | runs | result |
+|---|---|---|---|
+| control (`16c0c69`) | 30 s | 3 | 6001782, 6001782, 6001782 |
+| control | 20 s | 3 | 6001782, 6001782, 6001782 |
+| shipped | 30 s | 3 | 6001782, 6001782, 6001782 |
+| shipped, inside the eight-way 30 s matrix | 30 s | 1 | 6001782, `Optimal`, Dreyfus-Wagner, 13.96 s |
+
+It does not fire. That is consistent with §100's own bisection rather than against
+it — the discriminating trace is a contraction of 300,063 that appears *only when
+`tighten` gets enough clock to reach a second round*, so whether it fires is a
+function of how fast the machine is that day. It is not fixed and must not be
+recorded as fixed; what changed is only that the direct reproduction §100 relied
+on is not available, which leaves the generator §110 asks for as the only route.
+The whole 200-instance thirty-second matrix reports **0 wrong**.
+
+### 125. The matrix, and what shipped
+
+What ships is three measurement instruments and nothing else: `SJ_LP_TRACE`
+(per-solve cost, rows, columns, cold/warm, status — §114, §115), `SJ_ROUND_TRACE`
+(phase attribution for a tightening round — §119), and `SJ_EXTENDED` (§123). All
+three are off unless the variable is set, and the two behavioural changes this
+round built were both removed (§121, §122).
+
+**Paired, control against shipped, both binaries in the same worker slot:**
+
+| slice | control | shipped |
+|---|---|---|
+| Track 2 @1 s | 82 | 82 (private 100: 38 vs 38) |
+| Track 2 @5 s, run 1 | 116 | 118 (private 100: 51 vs 51) |
+| Track 2 @5 s, run 2 | 119 | 116 (private 100: 51 vs 49) |
+| Track 1 [1..140] @3 s | 140 | 139 |
+| Track 1 [155..200] @5 s | 25 | 26 |
+| SteinLib B / C / D @5 s | 18 / 20 / 20 | 18 / 20 / 20 |
+| SteinLib E @20 s | 19 | 19 |
+
+Neutral within the one-instance band on every slice, which is what a set of
+instruments should be.
+
+**Unpaired, shipped, Track 2 @30 s, eight-way**: 150/200 proved, **0 wrong**,
+2483 s total. Private hundred: **73**.
+
+| | private 100 |
+|---|---|
+| this solver @1 s | 38 |
+| this solver @5 s | 49–51 |
+| this solver @30 s | **73** |
+| best non-SCIP-Jack entrant, 1800 s | 77 |
+| SCIP-Jack, 2018 competition build, 1800 s | 92 |
+| SCIP-Jack, later build, ~25 s average | 99 |
+
+198 library tests, `cargo build --release --all-targets` clean.
+
+### 126. Delivered in full, in part, and not at all
+
+- **Item 1, the two measurements: in full.** The LP is warm-started and the
+  basis is reused (§114); the cost is the interior point on a four-thousand-row
+  model and the dual simplex's collapse is why it is the interior point (§115);
+  the node rate is 0.15/s and §113 says it should be. **Item 1, the target
+  — Group A at five seconds: not delivered, and the reason is mathematical.**
+  There is no integrality gap to branch on. Even a perfect allocation of the
+  whole budget to the root separation converges on only 130, 146 and 150 inside
+  thirty seconds (§113's wall times against §119's tightening cost), and six of
+  the ten also need a better tree (§118). The target as stated cannot be met by
+  the mechanism it names.
+- **Item 2: the measurement in full, the wiring not at all.** §123 has the
+  three-budget answer, the two budget rules that failed, and the dispatch that
+  the data rejects. The reason it is not wired is a measured budget trade, not a
+  proof gap — and it is now a *narrower* obstacle than §72 left it.
+- **Item 3: not delivered, and the reason is that it did not reproduce** (§124).
+  Six runs of the frozen control across two limits and a 200-instance matrix all
+  report the correct value. Nothing was repaired and nothing is claimed.
+- **Item 4: measured on Group A and inert there** (§117). The wide-group
+  experiment §92 leaves open — the flow dual as a bound and as a source of arc
+  prices between passes — was not reached. That is session budget, not a closure.
+
+**The count did not move.** That is three rounds at +0 and it is stated plainly
+rather than dressed. What this round produced instead is the reason the last two
+did not move either: item 1 was aimed at a tree that has nothing to prove (§113),
+the two allocation rules that decide between the stages are both evaluated after
+the budget they are deciding has been spent (§120), and the primal is half the
+deficit on the class everyone has been treating as a dual problem (§118).
+
+### 127. What the next round should take from this
+
+1. **§120 is the round.** Two rules — the certificate loop's repayment test and
+   the branch-and-cut's rate — are dead for the same reason, and the fix is one
+   idea: the decision must be taken while the seconds it allocates still exist,
+   and a stage may not be scored against a bound it was handed. §121 shows the
+   naive version of each fails, and says exactly why: the doubling search slice is
+   simultaneously the thing that consumes the window and the only measurement that
+   reveals what a packing bought. A version that keeps the measurement and moves
+   the decision earlier is the open problem, and it is worth roughly half of pass 0
+   on every Group A instance (6.89 s of 13.80 s on instance192, producing nothing).
+2. **The primal, on Group A** (§118). Three instances are one tree from a proof
+   and one of them already has a dual bound equal to the optimum. §119 says where
+   the seconds are and §122 says where they are *not* — the relaxation's primal
+   point is not the source in this regime.
+3. **Item 2's dispatch** (§123), which is now one measurement away: whether the
+   downstream can use the seconds. Everything else about the extended reduction
+   is settled, including that it is worth +3 at thirty seconds.
+4. Item 3 needs the generator, and §124 removes the direct reproduction as an
+   option.
+
+Two things are closed by measurement and should not be re-attempted:
+
+- the flow dual on the small, few-terminal, tight-gap class — it does not leave
+  its seed in five seconds and its seed is below a dual ascent's (§117);
+- reading the relaxation's primal point inside the certificate loop — never
+  better than the incumbent on that class, and unreachable on the other, because
+  the certificate loop is behind the goal-directed search's 64-terminal gate
+  (§122).

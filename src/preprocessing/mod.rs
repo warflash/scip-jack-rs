@@ -540,6 +540,52 @@ pub fn preprocess_bounded(
         // downstream cannot use the time — the refused, many-terminal regime of
         // §47 — which needs the decomposition width measured *before* the
         // reduction, and that measurement does not belong in this function.
+        //
+        // §68 and §72 measured the trade at one budget and read the result as a
+        // verdict on the mathematics. Re-measured at three, paired, both binaries
+        // in the same worker slot, it **reverses**:
+        //
+        // | Track 2, 200 instances | reduction off | reduction on |
+        // |---|---|---|
+        // | 1 s  | **82** | 75 |
+        // | 5 s  | **117** | 111 |
+        // | 30 s | 146 | **149** |
+        //
+        // and at thirty seconds it loses nothing at all — 065, 149 and 180 close
+        // that did not, and 098 acquires a tree it did not have. The instances it
+        // costs at one and five seconds are a different set every time and every
+        // one of them is an instance the pipeline was proving *fast*: 075 in
+        // 3.53 s, 117 in 2.44 s, 144 in 2.51 s. Nothing was wrong with the
+        // deletions. What was wrong is that an unbounded enumeration was inserted
+        // in front of stages that needed the seconds, on instances that did not
+        // need the enumeration.
+        //
+        // Two budget rules were built on top of that reading and neither survived
+        // its own A/B: bounding the enumeration by **what the classical fixpoint
+        // it follows just spent** holds the cost to 0.02–0.18 s and takes the 5 s
+        // loss from −6 to −2, but it also erases the 30 s gain (146 vs 146); and
+        // letting the batches **double while they keep deleting** — §103's own
+        // shape — is −3 at 5 s. The +3 at thirty seconds survives only when the
+        // enumeration runs to its own fixpoint. So the deciding quantity is not
+        // how much time the enumeration is given; it is whether the *downstream*
+        // had a use for the seconds, which is what §72 said and is still the
+        // measurement nobody has.
+        //
+        // `SJ_EXTENDED` runs it, so the trade can be re-measured rather than
+        // re-argued. It is an instrument and not a dispatch: off by default, it
+        // takes no decision from the instance and nothing downstream reads it.
+        // §123 has the three-budget answer it produced, and the two budget rules
+        // that were tried on top of it and did not survive their own A/B.
+        if std::env::var_os("SJ_EXTENDED").is_some() {
+            let (removed, _) = extended::extended_reductions(
+                &mut rg,
+                extended::ExtendedLimits::default(),
+                deadline,
+            );
+            if removed > 0 && !expired() {
+                continue;
+            }
+        }
         break;
     }
 

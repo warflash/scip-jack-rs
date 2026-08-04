@@ -746,6 +746,25 @@ fn round(
         }
     };
 
+    // Phase attribution. A round is six phases and "the round took 2.3 s" is not
+    // a statement anything can act on until it says which. Off unless
+    // `SJ_ROUND_TRACE` is set; the clock reads cost one `Instant::now()` per
+    // phase, not per inner iteration.
+    let trace = std::env::var_os("SJ_ROUND_TRACE").is_some();
+    let round_start = Instant::now();
+    let mut phase = round_start;
+    let mark = |name: &str, phase: &mut Instant| {
+        if trace {
+            let now = Instant::now();
+            eprintln!(
+                "[round] {name:<10} {:6.3}s  (cumulative {:6.3}s)",
+                now.duration_since(*phase).as_secs_f64(),
+                now.duration_since(round_start).as_secs_f64(),
+            );
+            *phase = now;
+        }
+    };
+
     let expired = || config.deadline.is_some_and(|d| Instant::now() >= d);
     // The construction phase will use every second it is given: one run is
     // `|R|` Dijkstras and the key-path exchange on top of it costs about as much
@@ -799,6 +818,8 @@ fn round(
             offer(r, primary, &mut pool, &mut best_solution);
         }
     }
+
+    mark("greedy", &mut phase);
 
     // The ascents. Certificates are kept so the eliminations can run afterwards,
     // once the upper bound has finished improving.
@@ -864,6 +885,8 @@ fn round(
         }
     }
 
+    mark("ascents", &mut phase);
+
     // Iterated local search from the best tree anyone found, guided or not.
     let mut ils_ws = IlsWorkspace::new(num_arcs);
     let mut ils_stats = IlsStats::default();
@@ -912,6 +935,7 @@ fn round(
     // every local optimum outright.
     // A round in which no tree was constructed at all has nothing to polish;
     // otherwise the incumbent is already a local optimum of that neighbourhood.
+    mark("ils", &mut phase);
 
     // Recombination, solved exactly.
     //
@@ -999,6 +1023,8 @@ fn round(
         }
     }
 
+    mark("recomb", &mut phase);
+
     // Grow the exact neighbourhood until the width cap binds.
     //
     // The recombination above is limited by what the local search happened to
@@ -1048,6 +1074,8 @@ fn round(
             }
         }
     }
+
+    mark("grow", &mut phase);
 
     // Eliminate last, against the bound every phase above has been improving.
     //
@@ -1137,6 +1165,8 @@ fn round(
     // names those arcs is still in scope. Doing it later — from an arc list and
     // a graph that have drifted apart — is precisely §61's failure.
     let incumbent_edges = witness_arcs.as_ref().and_then(|a| arcs_to_edges(graph, &idx, a));
+
+    mark("eliminate", &mut phase);
 
     RoundOutcome {
         lower_bound,

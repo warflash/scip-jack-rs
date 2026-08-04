@@ -19,6 +19,23 @@
 use crate::graph::{ArcId, Cost, DirectedGraph, NodeId};
 use highs::{Col, HighsModelStatus, Model as HModel, RowProblem, Sense};
 
+/// Per-solve tracing, off unless `SJ_LP_TRACE` is set in the environment.
+///
+/// A measurement instrument: it prints what each `solve()` cost against the size
+/// of the model it was handed and whether the model was cold, which is the only
+/// way to tell a slow warm start from a warm start that is not happening.
+fn lp_trace_level() -> u32 {
+    use std::sync::OnceLock;
+    static ON: OnceLock<u32> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("SJ_LP_TRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+    })
+}
+
+fn lp_trace_on() -> bool {
+    lp_trace_level() > 0
+}
+
 /// A row: `lo <= sum coeff * x <= hi`, with infinite bounds allowed.
 #[derive(Debug, Clone)]
 struct RowData {
@@ -487,7 +504,7 @@ impl LpRelaxation {
         }
 
         let mut model = pb.optimise(Sense::Minimise);
-        model.set_option("output_flag", false);
+        model.set_option("output_flag", lp_trace_level() >= 2);
         self.cols = cols;
         self.model = Some(model);
         self.rebuilds += 1;
@@ -755,10 +772,23 @@ impl LpRelaxation {
 
     pub fn solve(&mut self) -> f64 {
         let timer = std::time::Instant::now();
+        let cold = self.cold;
         let value = self.solve_inner();
         let secs = timer.elapsed().as_secs_f64();
         self.solve_time_secs += secs;
         self.model_solve_secs += secs;
+        if lp_trace_on() {
+            eprintln!(
+                "[lptrace] #{} {:.1}ms rows={} cols={} cold={} status={:?} obj={:.1}",
+                self.solve_count,
+                secs * 1000.0,
+                self.num_constraints(),
+                self.col_cost.len(),
+                cold,
+                self.status,
+                self.dual_bound,
+            );
+        }
         value
     }
 
