@@ -1,4 +1,5 @@
 use super::tree::BbNode;
+use crate::graph::cmp_cost;
 
 /// Node selection strategy for the branch-and-bound tree.
 ///
@@ -36,9 +37,7 @@ impl NodeSelector {
                 open.iter()
                     .copied()
                     .min_by(|&a, &b| {
-                        nodes[a as usize].dual_bound
-                            .partial_cmp(&nodes[b as usize].dual_bound)
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                        cmp_cost(nodes[a as usize].dual_bound, nodes[b as usize].dual_bound)
                     })
             }
             NodeSelector::DepthFirst => {
@@ -54,16 +53,12 @@ impl NodeSelector {
                 } else if *counter % *best_bound_frequency == 0 {
                     // Best-bound phase
                     open.iter().copied().min_by(|&a, &b| {
-                        nodes[a as usize].dual_bound
-                            .partial_cmp(&nodes[b as usize].dual_bound)
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                        cmp_cost(nodes[a as usize].dual_bound, nodes[b as usize].dual_bound)
                     })
                 } else {
                     // Best-estimate phase (approximate: use dual_bound as estimate for now)
                     open.iter().copied().min_by(|&a, &b| {
-                        nodes[a as usize].dual_bound
-                            .partial_cmp(&nodes[b as usize].dual_bound)
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                        cmp_cost(nodes[a as usize].dual_bound, nodes[b as usize].dual_bound)
                     })
                 }
             }

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, BinaryHeap, VecDeque};
 use std::cmp::Ordering;
 use super::PrimalHeuristic;
-use crate::graph::{DirectedGraph, NodeId, ArcId, Cost};
+use crate::graph::{cmp_cost, DirectedGraph, NodeId, ArcId, Cost};
 use crate::model::SteinerSolution;
 
 /// Local search improvement heuristic combining three moves (Uchoa & Werneck, 2010):
@@ -104,7 +104,7 @@ impl TreeStructure {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 struct DijkState {
     cost: Cost,
     node: NodeId,
@@ -114,8 +114,7 @@ impl Eq for DijkState {}
 
 impl Ord for DijkState {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.cost.partial_cmp(&self.cost)
-            .unwrap_or(Ordering::Equal)
+        cmp_cost(other.cost, self.cost)
             .then_with(|| self.node.cmp(&other.node))
     }
 }

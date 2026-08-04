@@ -155,7 +155,7 @@
 use std::collections::HashMap;
 
 use crate::graph::algorithms::tree_decomposition::TreeDecomposition;
-use crate::graph::{Cost, EdgeId, NodeId, UndirectedGraph};
+use crate::graph::{cmp_cost, Cost, EdgeId, NodeId, UndirectedGraph};
 
 /// Largest bag the encoding admits. A signature packs one 4-bit block index per
 /// bag position into a `u64`, and 15 is reserved to mean "not in `S`".
@@ -410,7 +410,7 @@ pub const TD_UNITS_PER_SECOND: f64 = 2.0e7;
 /// was correct by accident, on a hash order. Correctness that depends on hash
 /// order is not correctness, which is the whole reason the filter is gone.
 mod rankreduce {
-    use super::{Cost, MAX_BAG, OUT};
+    use super::{cmp_cost, Cost, MAX_BAG, OUT};
 
     /// Words of `u64` a cut vector needs for a bag position count of `b`.
     /// Capped so that `MAX_BAG` positions stay addressable.
@@ -564,7 +564,7 @@ mod rankreduce {
     /// Weight-ordered indices, cheapest first.
     pub fn by_cost(costs: &[Cost]) -> Vec<usize> {
         let mut order: Vec<usize> = (0..costs.len()).collect();
-        order.sort_by(|&a, &b| costs[a].partial_cmp(&costs[b]).unwrap_or(std::cmp::Ordering::Equal));
+        order.sort_by(|&a, &b| cmp_cost(costs[a], costs[b]));
         order
     }
 

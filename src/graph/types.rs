@@ -1,9 +1,26 @@
+use std::cmp::Ordering;
 use std::fmt;
 
 pub type NodeId = u32;
 pub type ArcId = u32;
 pub type EdgeId = u32;
 pub type Cost = f64;
+
+/// Compare costs without the `Option` created by `partial_cmp`.
+///
+/// The equal fallback intentionally preserves the solver's existing behavior
+/// for an accidental NaN, while also handling `INFINITY == INFINITY` without
+/// ever evaluating an invalid subtraction.
+#[inline]
+pub fn cmp_cost(a: Cost, b: Cost) -> Ordering {
+    if a < b {
+        Ordering::Less
+    } else if a > b {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeType {

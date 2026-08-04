@@ -39,7 +39,7 @@ use std::time::Instant;
 use crate::graph::algorithms::{
     dual_ascent_masked, reduced_cost_distances, reduced_cost_fixings, ArcIndex, DualAscentResult,
 };
-use crate::graph::{costs_are_integral, tighten_dual, Cost, DirectedGraph, NodeId, NodeType, UndirectedGraph};
+use crate::graph::{cmp_cost, costs_are_integral, tighten_dual, Cost, DirectedGraph, NodeId, NodeType, UndirectedGraph};
 use crate::heuristics::key_path::{key_path_exchange, KeyPathWorkspace};
 use crate::heuristics::key_vertex::KeyVertexWorkspace;
 use crate::heuristics::sph::{shortest_path_heuristic, SphResult, SphWorkspace};
@@ -997,7 +997,7 @@ fn round(
     // for the unions that decompose too wide.
     let mut grown: Option<SphResult> = None;
     if pool.len() >= 2 {
-        pool.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        pool.sort_by(|a, b| cmp_cost(a.0, b.0));
         pool.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-9 && a.1 == b.1);
         let parents: Vec<SphResult> = pool
             .iter()

@@ -17,7 +17,7 @@
 //! genuine partition of the feasible set and cannot lose a solution, and per-arc
 //! fractionality is zero exactly when the arc is integral.
 
-use crate::graph::ArcId;
+use crate::graph::{cmp_cost, ArcId};
 
 /// Values within this of an integer are treated as integral.
 pub const INTEGRALITY_TOL: f64 = 1e-6;
@@ -149,7 +149,7 @@ pub fn fractional_candidates(lp_solution: &[f64], num_arcs: usize) -> Vec<(ArcId
             (f > INTEGRALITY_TOL).then_some((i as ArcId, f))
         })
         .collect();
-    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| cmp_cost(b.1, a.1));
     out
 }
 

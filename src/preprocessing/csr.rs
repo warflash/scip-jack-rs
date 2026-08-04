@@ -13,7 +13,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use crate::graph::{Cost, EdgeId, NodeId};
+use crate::graph::{cmp_cost, Cost, EdgeId, NodeId};
 
 use super::ReducibleGraph;
 
@@ -66,37 +66,35 @@ impl Csr {
     pub fn build(graph: &ReducibleGraph) -> Self {
         let num_nodes = graph.nodes.iter().map(|n| n.id as usize).max().unwrap_or(0) + 1;
         let mut degree = vec![0u32; num_nodes + 1];
-        let live: Vec<(NodeId, NodeId, Cost, EdgeId)> = graph
-            .edges
-            .iter()
-            .filter(|e| {
-                graph.is_edge_valid(e.id) && graph.is_node_valid(e.src) && graph.is_node_valid(e.dst)
-            })
-            .map(|e| (e.src, e.dst, e.cost, e.id))
-            .collect();
-        for &(a, b, _, _) in &live {
-            degree[a as usize + 1] += 1;
-            degree[b as usize + 1] += 1;
+        for e in &graph.edges {
+            if graph.is_edge_valid(e.id) && graph.is_node_valid(e.src) && graph.is_node_valid(e.dst) {
+                degree[e.src as usize + 1] += 1;
+                degree[e.dst as usize + 1] += 1;
+            }
         }
         for i in 0..num_nodes {
             degree[i + 1] += degree[i];
         }
         let start = degree.clone();
         let mut fill = start.clone();
-        let mut head = vec![0u32; live.len() * 2];
-        let mut cost = vec![0.0; live.len() * 2];
-        let mut edge = vec![0u32; live.len() * 2];
-        for &(a, b, c, id) in &live {
-            let ia = fill[a as usize] as usize;
-            head[ia] = b;
-            cost[ia] = c;
-            edge[ia] = id;
-            fill[a as usize] += 1;
-            let ib = fill[b as usize] as usize;
-            head[ib] = a;
-            cost[ib] = c;
-            edge[ib] = id;
-            fill[b as usize] += 1;
+        let incidence = degree[num_nodes] as usize;
+        let mut head = vec![0u32; incidence];
+        let mut cost = vec![0.0; incidence];
+        let mut edge = vec![0u32; incidence];
+        for e in &graph.edges {
+            if !graph.is_edge_valid(e.id) || !graph.is_node_valid(e.src) || !graph.is_node_valid(e.dst) {
+                continue;
+            }
+            let ia = fill[e.src as usize] as usize;
+            head[ia] = e.dst;
+            cost[ia] = e.cost;
+            edge[ia] = e.id;
+            fill[e.src as usize] += 1;
+            let ib = fill[e.dst as usize] as usize;
+            head[ib] = e.src;
+            cost[ib] = e.cost;
+            edge[ib] = e.id;
+            fill[e.dst as usize] += 1;
         }
         let masked = vec![false; num_nodes];
         Self { num_nodes, start, head, cost, edge, masked }
@@ -183,12 +181,16 @@ impl Csr {
     }
 }
 
-#[derive(PartialEq, PartialOrd)]
+#[derive(PartialEq)]
 pub struct Ordered(pub Cost);
 impl Eq for Ordered {}
-#[allow(clippy::derive_ord_xor_partial_ord)]
 impl Ord for Ordered {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+        cmp_cost(self.0, other.0)
+    }
+}
+impl PartialOrd for Ordered {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }

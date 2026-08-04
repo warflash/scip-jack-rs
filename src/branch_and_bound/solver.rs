@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use crate::graph::{costs_are_integral, tighten_dual, DirectedGraph, NodeId, ArcId, Cost};
+use crate::graph::{cmp_cost, costs_are_integral, tighten_dual, DirectedGraph, NodeId, ArcId, Cost};
 use crate::graph::algorithms::{
     dual_ascent_cuts, dual_ascent_masked, reduced_cost_distances, reduced_cost_fixable_arcs,
     reduced_cost_fixings, ArcIndex,
@@ -106,7 +106,9 @@ pub struct BranchAndCutSolver {
     /// Canonical signatures for deduplication (sorted arc list as key).
     cut_signatures: HashSet<Vec<ArcId>>,
     /// Arcs fixed to 0 by reduced-cost fixing (valid globally).
-    fixed_zero_arcs: HashSet<ArcId>,
+    fixed_zero_arcs: Vec<bool>,
+    fixed_zero_count: usize,
+    node_active: Vec<bool>,
     /// DA reduced costs (from root dual ascent), used for LP-bound-based arc fixing.
     da_reduced_costs: Vec<f64>,
     /// Recombination heuristic with solution pool
@@ -118,6 +120,7 @@ pub struct BranchAndCutSolver {
     /// Heuristic scratch space, kept so the node heuristics allocate nothing.
     sph_ws: Option<SphWorkspace>,
     kp_ws: Option<KeyPathWorkspace>,
+    lp_guided_ws: LpGuidedWorkspace,
     /// Running statistics
     total_cuts_added: u64,
     total_lp_solves: u64,
@@ -135,6 +138,33 @@ pub struct BranchAndCutSolver {
     /// LPs, so a between-nodes check alone lets one node overrun the budget by
     /// an order of magnitude.
     deadline: Option<Instant>,
+}
+
+/// Reusable buffers for the LP-guided rounding pass.
+///
+/// This pass is invoked several times while a node's LP is tightened. Keeping
+/// the vectors with the solver avoids allocator traffic in the inner cut loop;
+/// their contents are still rebuilt in exactly the same order on every call.
+struct LpGuidedWorkspace {
+    active: Vec<bool>,
+    active_fixed_count: usize,
+    weights: Vec<Cost>,
+    support: Vec<NodeId>,
+    kept: Vec<bool>,
+    verts: Vec<NodeId>,
+}
+
+impl LpGuidedWorkspace {
+    fn new(num_arcs: usize) -> Self {
+        Self {
+            active: vec![true; num_arcs],
+            active_fixed_count: 0,
+            weights: Vec::with_capacity(num_arcs),
+            support: Vec::new(),
+            kept: vec![false; num_arcs],
+            verts: Vec::new(),
+        }
+    }
 }
 
 impl BranchAndCutSolver {
@@ -172,12 +202,15 @@ impl BranchAndCutSolver {
             da_reduced_costs: Vec::new(),
             base_lp: None,
             cut_signatures: HashSet::new(),
-            fixed_zero_arcs: HashSet::new(),
+            fixed_zero_arcs: vec![false; num_arcs as usize],
+            fixed_zero_count: 0,
+            node_active: vec![true; num_arcs as usize],
             recombination,
             arc_index: None,
             is_terminal,
             sph_ws: None,
             kp_ws: None,
+            lp_guided_ws: LpGuidedWorkspace::new(num_arcs as usize),
             total_cuts_added: 0,
             total_lp_solves: 0,
             da_prunes: 0,
@@ -262,7 +295,11 @@ impl BranchAndCutSolver {
 
         if self.tree.global_primal_bound < f64::INFINITY {
             for arc_id in reduced_cost_fixable_arcs(&da_result, self.tree.global_primal_bound) {
-                self.fixed_zero_arcs.insert(arc_id);
+                let slot = &mut self.fixed_zero_arcs[arc_id as usize];
+                if !*slot {
+                    *slot = true;
+                    self.fixed_zero_count += 1;
+                }
             }
         }
 
@@ -273,10 +310,11 @@ impl BranchAndCutSolver {
             &self.terminals,
             &self.steiner_nodes,
         );
-        let mut sorted_fixed: Vec<ArcId> = self.fixed_zero_arcs.iter().copied().collect();
-        sorted_fixed.sort();
-        for &arc_id in &sorted_fixed {
-            lp.fix_variable(arc_id, 0.0);
+        lp.set_capture_row_duals(false);
+        for (arc_id, &fixed) in self.fixed_zero_arcs.iter().enumerate() {
+            if fixed {
+                lp.fix_variable(arc_id as ArcId, 0.0);
+            }
         }
 
         // Install the ascent's own cut packing. These rows make the ascent's dual
@@ -286,28 +324,24 @@ impl BranchAndCutSolver {
         // way back up one max-flow at a time.
         let mut seeded = 0usize;
         for cut in &da_result.cuts {
-            if cut.iter().any(|a| self.fixed_zero_arcs.contains(a)) {
+            if cut.iter().any(|&a| self.fixed_zero_arcs[a as usize]) {
                 // A cut whose arcs this solver has already deleted is still valid,
                 // but its row would be over variables pinned to zero.
                 let live: Vec<ArcId> = cut
                     .iter()
                     .copied()
-                    .filter(|a| !self.fixed_zero_arcs.contains(a))
+                    .filter(|&a| !self.fixed_zero_arcs[a as usize])
                     .collect();
                 if live.is_empty() {
                     continue;
                 }
-                let mut sig = live.clone();
-                sig.sort_unstable();
-                if self.cut_signatures.insert(sig) {
+                if self.cut_signatures.insert(live.clone()) {
                     lp.add_lazy_steiner_cut(&live);
                     seeded += 1;
                 }
                 continue;
             }
-            let mut sig = cut.clone();
-            sig.sort_unstable();
-            if self.cut_signatures.insert(sig) {
+            if self.cut_signatures.insert(cut.clone()) {
                 lp.add_lazy_steiner_cut(cut);
                 seeded += 1;
             }
@@ -320,7 +354,7 @@ impl BranchAndCutSolver {
         if self.config.verbose {
             eprintln!(
                 "[B&C] Initial primal: {:.1} | DA lower bound: {:.1} | Fixed arcs: {} | Seeded cuts: {}",
-                self.tree.global_primal_bound, da_result.lower_bound, self.fixed_zero_arcs.len(),
+                self.tree.global_primal_bound, da_result.lower_bound, self.fixed_zero_count,
                 seeded,
             );
         }
@@ -488,29 +522,36 @@ impl BranchAndCutSolver {
     /// millisecond against roughly a hundred for an LP solve.
     ///
     /// Returns the bound and the arcs its reduced costs rule out at this node.
-    fn node_dual_ascent(&mut self, fixings: &[(ArcId, f64)]) -> (f64, Vec<ArcId>) {
+    fn node_dual_ascent(&mut self, node_id: Option<u64>) -> (f64, Vec<ArcId>) {
         let idx = match self.arc_index.as_ref() {
             Some(i) => i,
             None => return (f64::NEG_INFINITY, Vec::new()),
         };
-        let mut active = vec![true; idx.num_arcs()];
-        for &a in &self.fixed_zero_arcs {
-            active[a as usize] = false;
+        let fixings = node_id
+            .map(|id| self.tree.nodes[id as usize].fixings.as_slice())
+            .unwrap_or(&[]);
+        self.node_active.fill(true);
+        for (a, &fixed) in self.fixed_zero_arcs.iter().enumerate() {
+            if fixed {
+                self.node_active[a] = false;
+            }
         }
         for &(a, v) in fixings {
             if v == 0.0 {
-                active[a as usize] = false;
+                self.node_active[a as usize] = false;
             }
         }
 
-        let da = dual_ascent_masked(idx, self.root, &self.terminals, &active);
+        let da = dual_ascent_masked(idx, self.root, &self.terminals, &self.node_active);
         let cutoff = self.tree.global_primal_bound;
         if !cutoff.is_finite() {
             return (da.lower_bound, Vec::new());
         }
-        let dists = reduced_cost_distances(idx, self.root, &self.terminals, &da.reduced_costs, &active);
+        let dists = reduced_cost_distances(
+            idx, self.root, &self.terminals, &da.reduced_costs, &self.node_active,
+        );
         let fix = reduced_cost_fixings(
-            idx, self.root, &self.terminals, &da, &dists, &active, cutoff,
+            idx, self.root, &self.terminals, &da, &dists, &self.node_active, cutoff,
         );
         (da.lower_bound, fix.arcs)
     }
@@ -526,13 +567,11 @@ impl BranchAndCutSolver {
 
 
     fn process_node(&mut self, node_id: u64) -> NodeResult {
-        let node = &self.tree.nodes[node_id as usize];
-        let fixings = node.fixings.clone();
-        let is_root_node = node.depth == 0;
+        let is_root_node = self.tree.nodes[node_id as usize].depth == 0;
 
         // Cheap dual bound first: if the ascent already reaches the cutoff there
         // is no reason to touch the LP at all.
-        let (da_bound, da_fixable) = self.node_dual_ascent(&fixings);
+        let (da_bound, da_fixable) = self.node_dual_ascent(Some(node_id));
         let da_bound = self.lift(da_bound);
         if da_bound >= self.tree.global_primal_bound - self.config.gap_tolerance {
             self.tree.nodes[node_id as usize].dual_bound = da_bound;
@@ -543,7 +582,7 @@ impl BranchAndCutSolver {
         {
             let lp = self.base_lp.as_mut().unwrap();
             lp.reset_to_base();
-            for &(arc_id, value) in &fixings {
+            for &(arc_id, value) in &self.tree.nodes[node_id as usize].fixings {
                 lp.fix_variable(arc_id, value);
             }
             // Node-local eliminations from the ascent's reduced costs. These are
@@ -553,7 +592,11 @@ impl BranchAndCutSolver {
             }
         }
 
-        let mut lp_solution: Vec<f64> = Vec::new();
+        let solution_capacity = self
+            .base_lp
+            .as_ref()
+            .map_or(0, |lp| lp.get_solution().len());
+        let mut lp_solution: Vec<f64> = Vec::with_capacity(solution_capacity);
         let mut node_dual_bound = f64::NEG_INFINITY;
 
         // Cuts separated anywhere are globally valid and stay in the pool, so
@@ -684,7 +727,8 @@ impl BranchAndCutSolver {
                 stall_rounds = 0;
             }
 
-            lp_solution = self.base_lp.as_ref().unwrap().get_solution().to_vec();
+            lp_solution.clear();
+            lp_solution.extend_from_slice(self.base_lp.as_ref().unwrap().get_solution());
             rounds_done += 1;
 
             // Round the current point into a tree as the relaxation tightens,
@@ -701,6 +745,8 @@ impl BranchAndCutSolver {
                     &self.is_terminal,
                     self.root,
                     &lp_solution,
+                    self.fixed_zero_count,
+                    &mut self.lp_guided_ws,
                     self.sph_ws.as_mut().unwrap(),
                     self.kp_ws.as_mut().unwrap(),
                 );
@@ -779,7 +825,7 @@ impl BranchAndCutSolver {
 
             // Sort flow cuts by violation (most violated first) and limit per round
             let mut sorted_flow = flow_cuts;
-            sorted_flow.sort_by(|a, b| b.violation.partial_cmp(&a.violation).unwrap_or(std::cmp::Ordering::Equal));
+            sorted_flow.sort_by(|a, b| cmp_cost(b.violation, a.violation));
 
             let mut new_cut_arcs: Vec<Vec<ArcId>> = Vec::new();
             // Install everything the nested separator found. Generating a family
@@ -788,9 +834,7 @@ impl BranchAndCutSolver {
             // are not the near-duplicates that a cap is meant to suppress.
             let max_cuts_per_round = 200;
             for cut in sorted_flow.iter().take(max_cuts_per_round) {
-                let mut sig = cut.cut_arcs.clone();
-                sig.sort();
-                if self.cut_signatures.insert(sig) {
+                if self.cut_signatures.insert(cut.cut_arcs.clone()) {
                     new_cut_arcs.push(cut.cut_arcs.clone());
                     self.total_cuts_added += 1;
                 }
@@ -798,9 +842,7 @@ impl BranchAndCutSolver {
 
             let mut new_cycle_pairs: Vec<Vec<(ArcId, ArcId)>> = Vec::new();
             for ccut in &cycle_cuts {
-                let mut sig = ccut.arc_ids.clone();
-                sig.sort();
-                if self.cut_signatures.insert(sig) {
+                if self.cut_signatures.insert(ccut.arc_ids.clone()) {
                     let pairs: Vec<(ArcId, ArcId)> = ccut.edge_indices.iter()
                         .map(|&ei| (2 * ei as ArcId, 2 * ei as ArcId + 1))
                         .collect();
@@ -812,9 +854,7 @@ impl BranchAndCutSolver {
             // Add partition cuts
             let mut new_partition_cuts: Vec<(Vec<ArcId>, f64)> = Vec::new();
             for pcut in &partition_cuts {
-                let mut sig = pcut.crossing_arcs.clone();
-                sig.sort();
-                if self.cut_signatures.insert(sig) {
+                if self.cut_signatures.insert(pcut.crossing_arcs.clone()) {
                     new_partition_cuts.push((pcut.crossing_arcs.clone(), pcut.rhs));
                     self.total_cuts_added += 1;
                 }
@@ -824,11 +864,10 @@ impl BranchAndCutSolver {
             // In directed model: sum boundary arcs - 2*(y_fwd_e + y_rev_e) >= 0
             let mut new_tf_cuts: Vec<(Vec<ArcId>, Vec<f64>)> = Vec::new();
             for tcut in &tf_cuts {
-                let mut sig: Vec<ArcId> = tcut.boundary_arcs.iter()
+                let sig: Vec<ArcId> = tcut.boundary_arcs.iter()
                     .flat_map(|&(f, r)| [f, r])
                     .chain([tcut.edge_arc_pair.0, tcut.edge_arc_pair.1])
                     .collect();
-                sig.sort();
                 if self.cut_signatures.insert(sig) {
                     let mut arcs: Vec<ArcId> = Vec::new();
                     let mut coeffs: Vec<f64> = Vec::new();
@@ -933,7 +972,8 @@ impl BranchAndCutSolver {
             if node_dual_bound >= self.tree.global_primal_bound - self.config.gap_tolerance {
                 return NodeResult::Pruned;
             }
-            lp_solution = self.base_lp.as_ref().unwrap().get_solution().to_vec();
+            lp_solution.clear();
+            lp_solution.extend_from_slice(self.base_lp.as_ref().unwrap().get_solution());
         }
 
         // Both bounds are valid for this node, so the node's bound is the better
@@ -1027,11 +1067,12 @@ impl BranchAndCutSolver {
                 let mut lp_fixed_count = 0usize;
 
                 for a in 0..num_arcs {
-                    if self.fixed_zero_arcs.contains(&(a as ArcId)) {
+                    if self.fixed_zero_arcs[a] {
                         continue;
                     }
                     if sol[a] < 1e-6 && rc[a] > gap + 1e-4 {
-                        self.fixed_zero_arcs.insert(a as ArcId);
+                        self.fixed_zero_arcs[a] = true;
+                        self.fixed_zero_count += 1;
                         lp_fixed_count += 1;
                     }
                 }
@@ -1045,16 +1086,19 @@ impl BranchAndCutSolver {
                 // caveat that applies across roots.
                 let mut ascent_fixed = 0usize;
                 loop {
-                    let before = self.fixed_zero_arcs.len();
-                    let (da_bound, da_fixable) = self.node_dual_ascent(&[]);
+                    let before = self.fixed_zero_count;
+                    let (da_bound, da_fixable) = self.node_dual_ascent(None);
                     let da_bound = self.lift(da_bound);
                     if da_bound > self.tree.global_dual_bound {
                         self.tree.global_dual_bound = da_bound;
                     }
                     for a in da_fixable {
-                        self.fixed_zero_arcs.insert(a);
+                        if !self.fixed_zero_arcs[a as usize] {
+                            self.fixed_zero_arcs[a as usize] = true;
+                            self.fixed_zero_count += 1;
+                        }
                     }
-                    let gained = self.fixed_zero_arcs.len() - before;
+                    let gained = self.fixed_zero_count - before;
                     ascent_fixed += gained;
                     if gained == 0 || self.out_of_time() {
                         break;
@@ -1063,8 +1107,10 @@ impl BranchAndCutSolver {
 
                 if lp_fixed_count + ascent_fixed > 0 {
                     let lp = self.base_lp.as_mut().unwrap();
-                    for &arc_id in &self.fixed_zero_arcs {
-                        lp.fix_variable(arc_id, 0.0);
+                    for (arc_id, &fixed) in self.fixed_zero_arcs.iter().enumerate() {
+                        if fixed {
+                            lp.fix_variable(arc_id as ArcId, 0.0);
+                        }
                     }
                     lp.snapshot_base();
                     if self.config.verbose {
@@ -1171,6 +1217,8 @@ impl BranchAndCutSolver {
             &self.is_terminal,
             self.root,
             lp_solution,
+            self.fixed_zero_count,
+            &mut self.lp_guided_ws,
             self.sph_ws.as_mut()?,
             self.kp_ws.as_mut()?,
         )?;
@@ -1197,22 +1245,39 @@ impl BranchAndCutSolver {
 #[allow(clippy::too_many_arguments)]
 fn lp_guided_tree(
     idx: &ArcIndex,
-    fixed_zero: &HashSet<ArcId>,
+    fixed_zero: &[bool],
     terminals: &[NodeId],
     is_terminal: &[bool],
     root: NodeId,
     lp_solution: &[f64],
+    fixed_zero_count: usize,
+    gws: &mut LpGuidedWorkspace,
     sws: &mut SphWorkspace,
     kws: &mut KeyPathWorkspace,
 ) -> Option<SteinerSolution> {
         let num_arcs = idx.num_arcs();
-        let mut active = vec![true; num_arcs];
-        for &a in fixed_zero {
-            active[a as usize] = false;
+        if gws.active.len() < num_arcs {
+            gws.active.resize(num_arcs, true);
+            gws.kept.resize(num_arcs, false);
         }
+        if gws.active_fixed_count != fixed_zero_count {
+            let active = &mut gws.active[..num_arcs];
+            active.fill(true);
+            for (a, &fixed) in fixed_zero.iter().enumerate().take(num_arcs) {
+                if fixed {
+                    active[a] = false;
+                }
+            }
+            gws.active_fixed_count = fixed_zero_count;
+        }
+        let active = &mut gws.active[..num_arcs];
 
-        let mut support: Vec<NodeId> = vec![root];
-        let mut weights: Vec<Cost> = Vec::with_capacity(num_arcs);
+        let support = &mut gws.support;
+        support.clear();
+        support.push(root);
+        let weights = &mut gws.weights;
+        weights.clear();
+        weights.reserve(num_arcs.saturating_sub(weights.capacity()));
         for a in 0..num_arcs {
             let arc = a as ArcId;
             let c = idx.cost(arc);
@@ -1234,7 +1299,7 @@ fn lp_guided_tree(
         };
 
         if support.len() > 1 {
-            if let Some(rebuilt) = mst_prune(idx, &active, root, &support, is_terminal, sws) {
+            if let Some(rebuilt) = mst_prune(idx, active, root, support, is_terminal, sws) {
                 if !rebuilt.arcs.is_empty() {
                     offer(rebuilt, &mut best);
                 }
@@ -1263,8 +1328,11 @@ fn lp_guided_tree(
         // An undirected edge survives when either orientation does: the tree does
         // not know which way the arborescence will run it.
         for theta in [0.99, 0.9, 0.75, 0.5, 0.25] {
-            let mut kept = vec![false; num_arcs];
-            let mut verts: Vec<NodeId> = vec![root];
+            let kept = &mut gws.kept[..num_arcs];
+            kept.fill(false);
+            let verts = &mut gws.verts;
+            verts.clear();
+            verts.push(root);
             let mut any = false;
             for a in 0..num_arcs {
                 if !active[a] {
@@ -1288,7 +1356,7 @@ fn lp_guided_tree(
             // masking the arcs below the threshold is exactly "Prim over the kept
             // subgraph". Costs are the true ones throughout; `theta` selects a
             // subgraph and never prices anything.
-            if let Some(t) = mst_prune(idx, &kept, root, &verts, is_terminal, sws) {
+            if let Some(t) = mst_prune(idx, kept, root, verts, is_terminal, sws) {
                 if !t.arcs.is_empty() {
                     offer(t, &mut best);
                 }
@@ -1300,7 +1368,7 @@ fn lp_guided_tree(
         for i in 0..starts {
             let start = terminals[i * terminals.len() / starts];
             if let Some(r) = shortest_path_heuristic(
-                idx, &active, &weights, root, start, terminals, is_terminal, sws,
+                idx, active, weights, root, start, terminals, is_terminal, sws,
             ) {
                 offer(r, &mut best);
             }

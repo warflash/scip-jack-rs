@@ -37,7 +37,7 @@
 //! instances the last fraction of a percent is not worth the remaining time.
 
 use crate::graph::algorithms::ArcIndex;
-use crate::graph::{ArcId, Cost, NodeId};
+use crate::graph::{cmp_cost, ArcId, Cost, NodeId};
 
 use super::sph::{mst_prune, SphResult, SphWorkspace};
 
@@ -47,6 +47,8 @@ const NO_ARC: u32 = u32::MAX;
 pub struct KeyPathWorkspace {
     adj: Vec<Vec<(NodeId, ArcId)>>,
     degree: Vec<u32>,
+    build_stamp: Vec<u32>,
+    build_epoch: u32,
     side: Vec<u8>,
     side_stamp: Vec<u32>,
     dist: Vec<Cost>,
@@ -55,14 +57,24 @@ pub struct KeyPathWorkspace {
     epoch: u32,
     heap: std::collections::BinaryHeap<Entry>,
     stack: Vec<NodeId>,
+    path_arcs: Vec<ArcId>,
+    paths: Vec<KeyPath>,
+    vertices: Vec<NodeId>,
+    edges: Vec<ArcId>,
+    edge_stamp: Vec<u32>,
+    edge_epoch: u32,
+    removed_stamp: Vec<u32>,
+    removed_epoch: u32,
+    side_nodes: [Vec<NodeId>; 2],
+    reconnect: Vec<ArcId>,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 struct Entry(Cost, NodeId);
 impl Eq for Entry {}
 impl Ord for Entry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.0.partial_cmp(&self.0).unwrap_or(std::cmp::Ordering::Equal)
+        cmp_cost(other.0, self.0)
     }
 }
 impl PartialOrd for Entry {
@@ -76,6 +88,8 @@ impl KeyPathWorkspace {
         Self {
             adj: vec![Vec::new(); num_nodes],
             degree: vec![0; num_nodes],
+            build_stamp: vec![0; num_nodes],
+            build_epoch: 0,
             side: vec![0; num_nodes],
             side_stamp: vec![0; num_nodes],
             dist: vec![Cost::INFINITY; num_nodes],
@@ -84,6 +98,16 @@ impl KeyPathWorkspace {
             epoch: 0,
             heap: std::collections::BinaryHeap::new(),
             stack: Vec::new(),
+            path_arcs: Vec::new(),
+            paths: Vec::new(),
+            vertices: Vec::new(),
+            edges: Vec::new(),
+            edge_stamp: Vec::new(),
+            edge_epoch: 0,
+            removed_stamp: Vec::new(),
+            removed_epoch: 0,
+            side_nodes: [Vec::new(), Vec::new()],
+            reconnect: Vec::new(),
         }
     }
 }
@@ -102,7 +126,12 @@ pub fn key_path_exchange(
     kws: &mut KeyPathWorkspace,
     sws: &mut SphWorkspace,
 ) -> Option<SphResult> {
-    let mut edges: Vec<ArcId> = solution.arcs.clone();
+    // The exchange mutates a temporary arc list, but the same workspace serves
+    // every construction start. Reusing its capacity removes one heap
+    // allocation per polished tree without changing the sequence of moves.
+    let mut edges = std::mem::take(&mut kws.edges);
+    edges.clear();
+    edges.extend_from_slice(&solution.arcs);
     let mut improved = false;
 
     for _pass in 0..max_passes {
@@ -113,29 +142,31 @@ pub fn key_path_exchange(
         if crate::deadline::expired() {
             break;
         }
-        let Some(next) = one_pass(idx, active, root, &edges, is_terminal, kws) else {
+        if !one_pass(idx, active, root, &mut edges, is_terminal, kws) {
             break;
-        };
-        edges = next;
+        }
         improved = true;
     }
 
     if !improved {
+        kws.edges = edges;
         return None;
     }
 
     // Re-derive the tree from its vertex set: the MST of the induced subgraph is
     // never worse than the exchange sequence that produced it, and the prune step
     // removes any Steiner leaf the exchanges left behind.
-    let mut nodes: Vec<NodeId> = Vec::with_capacity(edges.len() + 1);
-    nodes.push(root);
+    kws.vertices.clear();
+    kws.vertices.push(root);
     for &a in &edges {
-        nodes.push(idx.tail(a));
-        nodes.push(idx.head(a));
+        kws.vertices.push(idx.tail(a));
+        kws.vertices.push(idx.head(a));
     }
-    nodes.sort_unstable();
-    nodes.dedup();
-    let rebuilt = mst_prune(idx, active, root, &nodes, is_terminal, sws)?;
+    kws.vertices.sort_unstable();
+    kws.vertices.dedup();
+    let rebuilt = mst_prune(idx, active, root, &kws.vertices, is_terminal, sws);
+    kws.edges = edges;
+    let rebuilt = rebuilt?;
     (rebuilt.cost < solution.cost - 1e-9).then_some(rebuilt)
 }
 
@@ -148,24 +179,23 @@ fn one_pass(
     idx: &ArcIndex,
     active: &[bool],
     root: NodeId,
-    edges: &[ArcId],
+    edges: &mut Vec<ArcId>,
     is_terminal: &[bool],
     ws: &mut KeyPathWorkspace,
-) -> Option<Vec<ArcId>> {
-    let mut edges: Vec<ArcId> = edges.to_vec();
+) -> bool {
     let mut any = false;
 
     loop {
         build_tree(idx, &edges, ws);
-        let paths = key_paths(root, &edges, idx, is_terminal, ws);
+        key_paths(root, &edges, idx, is_terminal, ws);
         let mut applied = false;
 
         // Most expensive first: those have the most room to be beaten and the
         // widest Dijkstra cutoff, so they pay for themselves earliest.
-        let mut paths = paths;
-        paths.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal));
+        ws.paths.sort_by(|a, b| cmp_cost(b.cost, a.cost));
 
-        for (path_i, path) in paths.iter().enumerate() {
+        for path_i in 0..ws.paths.len() {
+            let path = ws.paths[path_i];
             // Each key path is a bounded Dijkstra, and a tree with thousands of
             // terminals has thousands of key paths, so the clock is read here and
             // not only once per pass: on PACE instance079 a *single* pass measured
@@ -186,16 +216,15 @@ fn one_pass(
             if path.cost <= 1e-9 {
                 continue;
             }
-            let Some(replacement) = cheapest_reconnect(idx, active, path, ws) else {
+            let Some(replacement_cost) = cheapest_reconnect(idx, active, &path, ws) else {
                 continue;
             };
-            if replacement.1 >= path.cost - 1e-9 {
+            if replacement_cost >= path.cost - 1e-9 {
                 continue;
             }
-            let removed: std::collections::HashSet<ArcId> =
-                path.arcs.iter().flat_map(|&a| [a, a ^ 1]).collect();
-            edges.retain(|a| !removed.contains(a));
-            edges.extend(replacement.0);
+            let removed_epoch = ws.removed_epoch;
+            edges.retain(|a| ws.removed_stamp[*a as usize] != removed_epoch);
+            edges.extend_from_slice(&ws.reconnect);
             applied = true;
             any = true;
             break;
@@ -206,11 +235,13 @@ fn one_pass(
         }
     }
 
-    any.then_some(edges)
+    any
 }
 
+#[derive(Clone, Copy)]
 struct KeyPath {
-    arcs: Vec<ArcId>,
+    start: usize,
+    end: usize,
     cost: Cost,
     /// The two key vertices the path runs between. The arcs are oriented away
     /// from the tree root, not along the walk, so the endpoints have to be
@@ -218,12 +249,29 @@ struct KeyPath {
     ends: (NodeId, NodeId),
 }
 
+impl KeyPath {
+    #[inline]
+    fn arcs<'a>(&self, storage: &'a [ArcId]) -> &'a [ArcId] {
+        &storage[self.start..self.end]
+    }
+}
+
 /// Undirected adjacency and degrees of the current tree.
 fn build_tree(idx: &ArcIndex, edges: &[ArcId], ws: &mut KeyPathWorkspace) {
+    ws.build_epoch = ws.build_epoch.wrapping_add(1);
+    if ws.build_epoch == 0 {
+        ws.build_stamp.fill(0);
+        ws.build_epoch = 1;
+    }
+    let epoch = ws.build_epoch;
     for &a in edges {
         for v in [idx.tail(a), idx.head(a)] {
-            ws.adj[v as usize].clear();
-            ws.degree[v as usize] = 0;
+            let i = v as usize;
+            if ws.build_stamp[i] != epoch {
+                ws.build_stamp[i] = epoch;
+                ws.adj[i].clear();
+                ws.degree[i] = 0;
+            }
         }
     }
     for &a in edges {
@@ -246,31 +294,40 @@ fn key_paths(
     idx: &ArcIndex,
     is_terminal: &[bool],
     ws: &mut KeyPathWorkspace,
-) -> Vec<KeyPath> {
-    let mut seen: std::collections::HashSet<ArcId> = std::collections::HashSet::new();
-    let mut out = Vec::new();
-
-    let mut vertices: Vec<NodeId> = Vec::with_capacity(edges.len() * 2 + 1);
-    vertices.push(root);
-    for &a in edges {
-        vertices.push(idx.tail(a));
-        vertices.push(idx.head(a));
+) {
+    if ws.edge_stamp.len() < idx.num_arcs() {
+        ws.edge_stamp.resize(idx.num_arcs(), 0);
     }
-    vertices.sort_unstable();
-    vertices.dedup();
+    ws.edge_epoch = ws.edge_epoch.wrapping_add(1);
+    if ws.edge_epoch == 0 {
+        ws.edge_stamp.fill(0);
+        ws.edge_epoch = 1;
+    }
+    let seen = ws.edge_epoch;
+    ws.path_arcs.clear();
+    ws.paths.clear();
+    ws.vertices.clear();
+    ws.vertices.push(root);
+    for &a in edges {
+        ws.vertices.push(idx.tail(a));
+        ws.vertices.push(idx.head(a));
+    }
+    ws.vertices.sort_unstable();
+    ws.vertices.dedup();
 
-    for &start in &vertices {
+    for &start in &ws.vertices {
         if !is_key(start, root, is_terminal, ws) {
             continue;
         }
-        let outgoing: Vec<(NodeId, ArcId)> = ws.adj[start as usize].clone();
-        for (mut next, mut arc) in outgoing {
-            if seen.contains(&arc) {
+        for i in 0..ws.adj[start as usize].len() {
+            let (mut next, mut arc) = ws.adj[start as usize][i];
+            if ws.edge_stamp[arc as usize] == seen {
                 continue;
             }
-            let mut arcs = vec![arc];
+            let path_start = ws.path_arcs.len();
+            ws.path_arcs.push(arc);
             let mut cost = idx.cost(arc);
-            seen.insert(arc);
+            ws.edge_stamp[arc as usize] = seen;
             while !is_key(next, root, is_terminal, ws) {
                 // Interior of a key path: degree two and not a key vertex, so
                 // exactly one incident edge other than the one we arrived on.
@@ -279,16 +336,20 @@ fn key_paths(
                 else {
                     break;
                 };
-                seen.insert(a2);
-                arcs.push(a2);
+                ws.edge_stamp[a2 as usize] = seen;
+                ws.path_arcs.push(a2);
                 cost += idx.cost(a2);
                 next = further;
                 arc = a2;
             }
-            out.push(KeyPath { arcs, cost, ends: (start, next) });
+            ws.paths.push(KeyPath {
+                start: path_start,
+                end: ws.path_arcs.len(),
+                cost,
+                ends: (start, next),
+            });
         }
     }
-    out
 }
 
 /// Cheapest path reconnecting the two components left by deleting `path`.
@@ -299,9 +360,20 @@ fn cheapest_reconnect(
     active: &[bool],
     path: &KeyPath,
     ws: &mut KeyPathWorkspace,
-) -> Option<(Vec<ArcId>, Cost)> {
-    let removed: std::collections::HashSet<ArcId> =
-        path.arcs.iter().flat_map(|&a| [a, a ^ 1]).collect();
+) -> Option<Cost> {
+    if ws.removed_stamp.len() < idx.num_arcs() {
+        ws.removed_stamp.resize(idx.num_arcs(), 0);
+    }
+    ws.removed_epoch = ws.removed_epoch.wrapping_add(1);
+    if ws.removed_epoch == 0 {
+        ws.removed_stamp.fill(0);
+        ws.removed_epoch = 1;
+    }
+    let removed = ws.removed_epoch;
+    for &a in path.arcs(&ws.path_arcs) {
+        ws.removed_stamp[a as usize] = removed;
+        ws.removed_stamp[(a ^ 1) as usize] = removed;
+    }
 
     // Side 1 = component of the first endpoint, side 2 = the other.
     let (anchor_a, anchor_b) = path.ends;
@@ -311,7 +383,8 @@ fn cheapest_reconnect(
 
     ws.epoch += 1;
     let epoch = ws.epoch;
-    let mut sides: [Vec<NodeId>; 2] = [Vec::new(), Vec::new()];
+    ws.side_nodes[0].clear();
+    ws.side_nodes[1].clear();
     for (i, anchor) in [anchor_a, anchor_b].into_iter().enumerate() {
         ws.stack.clear();
         ws.stack.push(anchor);
@@ -319,10 +392,10 @@ fn cheapest_reconnect(
         ws.side_stamp[anchor as usize] = epoch;
         ws.side[anchor as usize] = i as u8 + 1;
         while let Some(v) = ws.stack.pop() {
-            sides[i].push(v);
+            ws.side_nodes[i].push(v);
             for k in 0..ws.adj[v as usize].len() {
                 let (u, a) = ws.adj[v as usize][k];
-                if removed.contains(&a) || ws.stamp[u as usize] == epoch {
+                if ws.removed_stamp[a as usize] == removed || ws.stamp[u as usize] == epoch {
                     continue;
                 }
                 ws.stamp[u as usize] = epoch;
@@ -336,7 +409,8 @@ fn cheapest_reconnect(
     ws.epoch += 1;
     let visit = ws.epoch;
     ws.heap.clear();
-    for &v in &sides[0] {
+    for i in 0..ws.side_nodes[0].len() {
+        let v = ws.side_nodes[0][i];
         ws.dist[v as usize] = 0.0;
         ws.parent[v as usize] = NO_ARC;
         ws.stamp[v as usize] = visit;
@@ -356,7 +430,7 @@ fn cheapest_reconnect(
             break;
         }
         for &a in idx.outgoing(v) {
-            if !active[a as usize] || removed.contains(&a) {
+            if !active[a as usize] || ws.removed_stamp[a as usize] == removed {
                 continue;
             }
             let u = idx.head(a);
@@ -374,13 +448,13 @@ fn cheapest_reconnect(
     }
 
     let (mut v, cost) = target?;
-    let mut arcs = Vec::new();
+    ws.reconnect.clear();
     while ws.parent[v as usize] != NO_ARC {
         let a = ws.parent[v as usize];
-        arcs.push(a);
+        ws.reconnect.push(a);
         v = idx.tail(a);
     }
-    Some((arcs, cost))
+    Some(cost)
 }
 
 #[cfg(test)]

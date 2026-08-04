@@ -176,7 +176,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::time::Instant;
 
-use crate::graph::{Cost, EdgeId, NodeId};
+use crate::graph::{cmp_cost, Cost, EdgeId, NodeId};
 
 use super::csr::{Csr, Ordered};
 use super::ReducibleGraph;
@@ -220,12 +220,8 @@ pub fn implied_profits(graph: &ReducibleGraph, csr: &Csr) -> ImpliedProfits {
         })
         .map(|e| e.id)
         .collect();
-    order.sort_by(|&a, &b| {
-        graph.edges[a as usize]
-            .cost
-            .partial_cmp(&graph.edges[b as usize].cost)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.cmp(&b))
+        order.sort_by(|&a, &b| {
+        cmp_cost(graph.edges[a as usize].cost, graph.edges[b as usize].cost).then(a.cmp(&b))
     });
 
     let n = csr.num_nodes;

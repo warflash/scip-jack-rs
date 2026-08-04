@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use crate::graph::{DirectedGraph, NodeId, ArcId};
+use crate::graph::{cmp_cost, DirectedGraph, NodeId, ArcId};
 use crate::graph::algorithms::MaxFlowWorkspace;
 
 /// Partition inequality separator.
@@ -122,8 +122,13 @@ impl<'a> PartitionSeparator<'a> {
         {
             let ws = self.workspace.as_mut().unwrap();
             for &t in &non_root_terminals {
-                let result = ws.compute(self.root, t, lp_solution, &self.graph.arcs);
-                terminal_cuts.push((t, result.flow_value, result.source_side, result.cut_arcs));
+                let result = ws.compute_view_without_sink(self.root, t, lp_solution, &self.graph.arcs);
+                terminal_cuts.push((
+                    t,
+                    result.flow_value,
+                    result.source_side.to_vec(),
+                    result.cut_arcs.to_vec(),
+                ));
             }
         }
 
@@ -156,7 +161,7 @@ impl<'a> PartitionSeparator<'a> {
         // if the sum of minimum crossing flows is < k-1.
         self.separate_multiway_partitions(lp_solution, &non_root_terminals, &terminal_cuts, &mut violated);
 
-        violated.sort_by(|a, b| b.violation.partial_cmp(&a.violation).unwrap_or(std::cmp::Ordering::Equal));
+        violated.sort_by(|a, b| cmp_cost(b.violation, a.violation));
         self.cuts_found = violated.len() as u32;
         violated
     }
@@ -192,7 +197,7 @@ impl<'a> PartitionSeparator<'a> {
             }
             let cut_value: f64 = cut_arcs
                 .iter()
-                .map(|&aid| lp_solution.get(aid as usize).copied().unwrap_or(0.0))
+                .map(|&aid| lp_solution[aid as usize])
                 .sum();
             if cut_value < 1.0 - self.violation_tolerance {
                 violated.push(PartitionCut {
@@ -258,8 +263,8 @@ impl<'a> PartitionSeparator<'a> {
         {
             let ws = self.workspace.as_mut().unwrap();
             for &t in target_terminals {
-                let result = ws.compute(self.root, t, lp_solution, &self.graph.arcs);
-                let source: HashSet<NodeId> = result.source_side.into_iter().collect();
+                let result = ws.compute_view_without_sink(self.root, t, lp_solution, &self.graph.arcs);
+                let source: HashSet<NodeId> = result.source_side.iter().copied().collect();
                 root_side = Some(match root_side {
                     None => source,
                     Some(existing) => existing.intersection(&source).copied().collect(),
@@ -312,7 +317,7 @@ impl<'a> PartitionSeparator<'a> {
                 for &(head, arc) in self.graph.delta_plus(x) {
                     if !root_component.contains(&head)
                         && !visited[head as usize]
-                        && lp_solution.get(arc as usize).copied().unwrap_or(0.0) > 1e-8
+                        && lp_solution[arc as usize] > 1e-8
                     {
                         visited[head as usize] = true;
                         queue.push_back(head);
@@ -321,7 +326,7 @@ impl<'a> PartitionSeparator<'a> {
                 for &(tail, arc) in self.graph.delta_minus(x) {
                     if !root_component.contains(&tail)
                         && !visited[tail as usize]
-                        && lp_solution.get(arc as usize).copied().unwrap_or(0.0) > 1e-8
+                        && lp_solution[arc as usize] > 1e-8
                     {
                         visited[tail as usize] = true;
                         queue.push_back(tail);
@@ -353,7 +358,7 @@ impl<'a> PartitionSeparator<'a> {
                 continue;
             }
             crossing_arcs.push(arc.id);
-            lhs += lp_solution.get(arc.id as usize).copied().unwrap_or(0.0);
+            lhs += lp_solution[arc.id as usize];
         }
 
         if lhs >= rhs - self.violation_tolerance {

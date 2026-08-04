@@ -56,7 +56,7 @@
 use std::collections::VecDeque;
 
 use crate::graph::directed::DirectedGraph;
-use crate::graph::{ArcId, Cost, NodeId};
+use crate::graph::{cmp_cost, ArcId, Cost, NodeId};
 
 /// Arcs with reduced cost at or below this are treated as free (already saturated).
 const ZERO_TOL: Cost = 1e-9;
@@ -121,8 +121,8 @@ impl ArcIndex {
         let num_nodes = graph.num_nodes as usize + 1;
         let num_arcs = graph.arcs.len();
 
-        let mut in_count = vec![0u32; num_nodes + 1];
-        let mut out_count = vec![0u32; num_nodes + 1];
+        let mut in_start = vec![0u32; num_nodes + 1];
+        let mut out_start = vec![0u32; num_nodes + 1];
         let mut tail = vec![0u32; num_arcs];
         let mut head = vec![0u32; num_arcs];
         let mut cost = vec![0.0; num_arcs];
@@ -131,16 +131,14 @@ impl ArcIndex {
             tail[i] = arc.tail;
             head[i] = arc.head;
             cost[i] = arc.cost;
-            in_count[arc.head as usize + 1] += 1;
-            out_count[arc.tail as usize + 1] += 1;
+            in_start[arc.head as usize + 1] += 1;
+            out_start[arc.tail as usize + 1] += 1;
         }
         for v in 0..num_nodes {
-            in_count[v + 1] += in_count[v];
-            out_count[v + 1] += out_count[v];
+            in_start[v + 1] += in_start[v];
+            out_start[v + 1] += out_start[v];
         }
 
-        let in_start = in_count.clone();
-        let out_start = out_count.clone();
         let mut in_arcs = vec![0u32; num_arcs];
         let mut out_arcs = vec![0u32; num_arcs];
         let mut in_fill = in_start.clone();
@@ -662,13 +660,17 @@ fn dijkstra(
     dist
 }
 
-#[derive(PartialEq, PartialOrd)]
+#[derive(PartialEq)]
 struct OrderedCost(Cost);
 impl Eq for OrderedCost {}
-#[allow(clippy::derive_ord_xor_partial_ord)]
 impl Ord for OrderedCost {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+        cmp_cost(self.0, other.0)
+    }
+}
+impl PartialOrd for OrderedCost {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 

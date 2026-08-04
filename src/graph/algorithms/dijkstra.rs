@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use crate::graph::{NodeId, ArcId, Cost};
+use crate::graph::{cmp_cost, NodeId, ArcId, Cost};
 use crate::graph::directed::DirectedGraph;
 
 const INF: Cost = f64::INFINITY;
@@ -53,7 +53,7 @@ impl ShortestPathResult {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 struct State {
     cost: Cost,
     node: NodeId,
@@ -63,8 +63,7 @@ impl Eq for State {}
 
 impl Ord for State {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.cost.partial_cmp(&self.cost)
-            .unwrap_or(Ordering::Equal)
+        cmp_cost(other.cost, self.cost)
             .then_with(|| self.node.cmp(&other.node))
     }
 }

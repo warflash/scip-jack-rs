@@ -74,7 +74,7 @@
 //! is what makes the work bound in [`SdClosure::affordable`] a matter of speed
 //! rather than of correctness.
 
-use crate::graph::{Cost, NodeId};
+use crate::graph::{cmp_cost, Cost, NodeId};
 
 /// Minimum spanning tree of a metric closure on `k` items, as an edge list
 /// sorted by weight.
@@ -115,7 +115,7 @@ pub fn closure_mst(k: usize, w: impl Fn(usize, usize) -> Cost) -> Vec<(Cost, usi
             }
         }
     }
-    mst.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    mst.sort_by(|a, b| cmp_cost(a.0, b.0));
     mst
 }
 

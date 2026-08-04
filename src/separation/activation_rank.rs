@@ -85,7 +85,7 @@
 //! would each cost another max flow for a strictly smaller violation, so this
 //! separator anchors on terminals only.
 
-use crate::graph::{ArcId, DirectedGraph, NodeId};
+use crate::graph::{cmp_cost, ArcId, DirectedGraph, NodeId};
 
 /// A violated activation-rank row, kept as the set that proves it.
 #[derive(Debug, Clone)]
@@ -187,7 +187,7 @@ impl<'a> ActivationRankSeparator<'a> {
             }
             out.push(ArCut { vertices, anchor: a, violation });
         }
-        out.sort_by(|p, q| q.violation.partial_cmp(&p.violation).unwrap_or(std::cmp::Ordering::Equal));
+        out.sort_by(|p, q| cmp_cost(q.violation, p.violation));
         out
     }
 

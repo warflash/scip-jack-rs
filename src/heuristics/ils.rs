@@ -164,7 +164,7 @@ impl IlsWorkspace {
 
     /// Offer a tree to the pool, keeping it sorted and deduplicated.
     fn remember(&mut self, r: &SphResult, idx: &ArcIndex) {
-        let key = fingerprint(idx, &r.arcs);
+        let key = fingerprint(idx, &r.arcs, &mut self.nodes);
         if self.seen.contains(&key) {
             return;
         }
@@ -179,7 +179,7 @@ impl IlsWorkspace {
         if self.pool.len() > POOL_CAPACITY {
             let dropped = self.pool.pop();
             if let Some(d) = dropped {
-                let k = fingerprint(idx, &d.arcs);
+                let k = fingerprint(idx, &d.arcs, &mut self.nodes);
                 self.seen.retain(|&x| x != k);
             }
         }
@@ -192,16 +192,16 @@ impl IlsWorkspace {
 /// ground set they contribute is their vertices and their edges, and a tree is
 /// determined by its vertices up to which spanning tree of the induced subgraph
 /// it happens to be, which the exact recombination re-optimises anyway.
-fn fingerprint(idx: &ArcIndex, arcs: &[ArcId]) -> u64 {
+fn fingerprint(idx: &ArcIndex, arcs: &[ArcId], nodes: &mut Vec<NodeId>) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut nodes: Vec<NodeId> = Vec::with_capacity(arcs.len() * 2);
+    nodes.clear();
     for &a in arcs {
         nodes.push(idx.tail(a));
         nodes.push(idx.head(a));
     }
     nodes.sort_unstable();
     nodes.dedup();
-    for v in nodes {
+    for &v in nodes.iter() {
         h ^= v as u64;
         h = h.wrapping_mul(0x100_0000_01b3);
     }
@@ -374,7 +374,7 @@ fn polish(
         // reconnect through the rest of the graph, or route through one more
         // vertex. Both are strict improvements when they fire.
         let move_ = key_vertex_elimination(idx, active, root, &cur, is_terminal, vws, sws)
-            .or_else(|| vertex_insertion(idx, active, root, &cur, is_terminal, sws));
+            .or_else(|| vertex_insertion(idx, active, root, &cur, is_terminal, vws, sws));
         match move_ {
             Some(better) if better.cost < cur.cost - 1e-9 => cur = better,
             _ => break,

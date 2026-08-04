@@ -74,7 +74,7 @@
 //! key-path exchange holds fixed.
 
 use crate::graph::algorithms::ArcIndex;
-use crate::graph::{ArcId, Cost, NodeId};
+use crate::graph::{cmp_cost, ArcId, Cost, NodeId};
 
 use super::sph::{mst_prune, SphResult, SphWorkspace};
 
@@ -93,14 +93,24 @@ pub struct KeyVertexWorkspace {
     heap: std::collections::BinaryHeap<Entry>,
     queue: Vec<NodeId>,
     seeds: Vec<NodeId>,
+    candidates: Vec<NodeId>,
+    neighbours: Vec<NodeId>,
+    members: Vec<NodeId>,
+    nodes: Vec<NodeId>,
+    union: Vec<u32>,
+    touched: Vec<NodeId>,
+    insertion_inside: Vec<bool>,
+    insertion_base: Vec<NodeId>,
+    insertion_contacts: Vec<u32>,
+    insertion_nodes: Vec<NodeId>,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 struct Entry(Cost, NodeId);
 impl Eq for Entry {}
 impl Ord for Entry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.0.partial_cmp(&self.0).unwrap_or(std::cmp::Ordering::Equal)
+        cmp_cost(other.0, self.0)
     }
 }
 impl PartialOrd for Entry {
@@ -123,6 +133,16 @@ impl KeyVertexWorkspace {
             heap: std::collections::BinaryHeap::new(),
             queue: Vec::new(),
             seeds: Vec::new(),
+            candidates: Vec::new(),
+            neighbours: Vec::new(),
+            members: Vec::new(),
+            nodes: Vec::new(),
+            union: Vec::new(),
+            touched: Vec::new(),
+            insertion_inside: vec![false; num_nodes],
+            insertion_base: Vec::new(),
+            insertion_contacts: vec![0; num_nodes],
+            insertion_nodes: Vec::new(),
         }
     }
 }
@@ -154,14 +174,16 @@ pub fn key_vertex_elimination(
         ws.degree[h as usize] += 1;
     }
 
-    let candidates: Vec<NodeId> = (0..n as NodeId)
-        .filter(|&v| {
-            v != root && !is_terminal[v as usize] && ws.degree[v as usize] >= 3
-        })
-        .collect();
+    ws.candidates.clear();
+    for v in 0..n as NodeId {
+        if v != root && !is_terminal[v as usize] && ws.degree[v as usize] >= 3 {
+            ws.candidates.push(v);
+        }
+    }
 
     let mut best: Option<SphResult> = None;
-    for v in candidates {
+    for i in 0..ws.candidates.len() {
+        let v = ws.candidates[i];
         if let Some(r) = eliminate_one(idx, active, root, solution, is_terminal, v, ws, sws) {
             if best.as_ref().is_none_or(|b| r.cost < b.cost - 1e-9) {
                 best = Some(r);
@@ -192,9 +214,11 @@ fn eliminate_one(
     ws.component[v as usize] = NO_COMPONENT;
     ws.stamp[v as usize] = epoch;
     let mut num_components = 0u32;
-    let neighbours: Vec<NodeId> = ws.adj[v as usize].iter().map(|&(u, _)| u).collect();
-    let mut members: Vec<NodeId> = Vec::new();
-    for start in neighbours {
+    ws.neighbours.clear();
+    ws.neighbours.extend(ws.adj[v as usize].iter().map(|&(u, _)| u));
+    ws.members.clear();
+    for i in 0..ws.neighbours.len() {
+        let start = ws.neighbours[i];
         if ws.stamp[start as usize] == epoch {
             continue;
         }
@@ -205,7 +229,7 @@ fn eliminate_one(
         ws.queue.clear();
         ws.queue.push(start);
         while let Some(x) = ws.queue.pop() {
-            members.push(x);
+            ws.members.push(x);
             for i in 0..ws.adj[x as usize].len() {
                 let (y, _) = ws.adj[x as usize][i];
                 if ws.stamp[y as usize] == epoch {
@@ -222,10 +246,12 @@ fn eliminate_one(
     }
 
     // Every vertex of the surviving tree, plus whatever the reconnections use.
-    let mut nodes: Vec<NodeId> = members.clone();
+    ws.nodes.clear();
+    ws.nodes.extend_from_slice(&ws.members);
 
     // Greedy merge. `union` maps a component id to its current group.
-    let mut union: Vec<u32> = (0..num_components).collect();
+    ws.union.clear();
+    ws.union.extend(0..num_components);
     fn find(u: &mut [u32], x: u32) -> u32 {
         let mut r = x;
         while u[r as usize] != r {
@@ -257,14 +283,15 @@ fn eliminate_one(
     for _ in 1..num_components {
         ws.seeds.clear();
         ws.heap.clear();
-        for &x in &nodes {
+        for &x in &ws.nodes {
             ws.dist[x as usize] = 0.0;
             ws.parent[x as usize] = u32::MAX;
-            ws.origin[x as usize] = find(&mut union, ws.component[x as usize]);
+            ws.origin[x as usize] = find(&mut ws.union, ws.component[x as usize]);
             ws.seeds.push(x);
             ws.heap.push(Entry(0.0, x));
         }
-        let mut touched: Vec<NodeId> = ws.seeds.clone();
+        ws.touched.clear();
+        ws.touched.extend_from_slice(&ws.seeds);
 
         while let Some(Entry(d, x)) = ws.heap.pop() {
             if d > ws.dist[x as usize] + 1e-12 {
@@ -283,7 +310,7 @@ fn eliminate_one(
                     continue;
                 }
                 if !ws.dist[y as usize].is_finite() {
-                    touched.push(y);
+                    ws.touched.push(y);
                 }
                 ws.dist[y as usize] = nd;
                 ws.parent[y as usize] = a;
@@ -293,7 +320,8 @@ fn eliminate_one(
         }
 
         let mut link: Option<(Cost, ArcId)> = None;
-        for &x in &touched {
+        for i in 0..ws.touched.len() {
+            let x = ws.touched[i];
             if !ws.dist[x as usize].is_finite() {
                 continue;
             }
@@ -317,8 +345,8 @@ fn eliminate_one(
 
         let Some((_, join)) = link else {
             // The components cannot be reconnected without `v`; the move fails.
-            for x in touched {
-                ws.dist[x as usize] = Cost::INFINITY;
+            for i in 0..ws.touched.len() {
+                ws.dist[ws.touched[i] as usize] = Cost::INFINITY;
             }
             return None;
         };
@@ -328,34 +356,34 @@ fn eliminate_one(
             ws.origin[idx.tail(join) as usize],
             ws.origin[idx.head(join) as usize],
         );
-        let (ra, rb) = (find(&mut union, ga), find(&mut union, gb));
-        union[ra as usize] = rb;
+        let (ra, rb) = (find(&mut ws.union, ga), find(&mut ws.union, gb));
+        ws.union[ra as usize] = rb;
         // The interior of the joining path is now part of the merged group, and
-        // the next round seeds from `nodes`, so every vertex added here needs a
+        // the next round seeds from `ws.nodes`, so every vertex added here needs a
         // component of its own.
         for x in ends.iter_mut() {
             let mut cur = *x;
-            nodes.push(cur);
+            ws.nodes.push(cur);
             ws.component[cur as usize] = rb;
             while ws.parent[cur as usize] != u32::MAX {
                 cur = idx.tail(ws.parent[cur as usize]);
-                nodes.push(cur);
+                ws.nodes.push(cur);
                 ws.component[cur as usize] = rb;
             }
         }
 
-        for x in touched {
-            ws.dist[x as usize] = Cost::INFINITY;
+        for i in 0..ws.touched.len() {
+            ws.dist[ws.touched[i] as usize] = Cost::INFINITY;
         }
     }
 
-    nodes.push(root);
-    nodes.sort_unstable();
-    nodes.dedup();
+    ws.nodes.push(root);
+    ws.nodes.sort_unstable();
+    ws.nodes.dedup();
     // `v` must not creep back in through the induced subgraph: the whole point of
     // the move is to test the tree without it.
-    nodes.retain(|&x| x != v);
-    let rebuilt = mst_prune(idx, active, root, &nodes, is_terminal, sws)?;
+    ws.nodes.retain(|&x| x != v);
+    let rebuilt = mst_prune(idx, active, root, &ws.nodes, is_terminal, sws)?;
     (rebuilt.cost < solution.cost - 1e-9).then_some(rebuilt)
 }
 
@@ -371,41 +399,52 @@ pub fn vertex_insertion(
     root: NodeId,
     solution: &SphResult,
     is_terminal: &[bool],
+    ws: &mut KeyVertexWorkspace,
     sws: &mut SphWorkspace,
 ) -> Option<SphResult> {
     let n = idx.num_nodes();
-    let mut inside = vec![false; n];
-    inside[root as usize] = true;
-    for &a in &solution.arcs {
-        inside[idx.tail(a) as usize] = true;
-        inside[idx.head(a) as usize] = true;
+    if ws.insertion_inside.len() < n {
+        ws.insertion_inside.resize(n, false);
+        ws.insertion_contacts.resize(n, 0);
     }
-    let base: Vec<NodeId> = (0..n as NodeId).filter(|&v| inside[v as usize]).collect();
+    ws.insertion_inside[..n].fill(false);
+    ws.insertion_inside[root as usize] = true;
+    for &a in &solution.arcs {
+        ws.insertion_inside[idx.tail(a) as usize] = true;
+        ws.insertion_inside[idx.head(a) as usize] = true;
+    }
+    ws.insertion_base.clear();
+    for v in 0..n as NodeId {
+        if ws.insertion_inside[v as usize] {
+            ws.insertion_base.push(v);
+        }
+    }
 
     // Two contacts is the least that can ever help: one contact makes `w` a
     // Steiner leaf, which `mst_prune` immediately strips again.
-    let mut contacts = vec![0u32; n];
-    for &v in &base {
+    ws.insertion_contacts[..n].fill(0);
+    for &v in &ws.insertion_base {
         for &a in idx.outgoing(v) {
             if active[a as usize] {
                 let h = idx.head(a);
-                if !inside[h as usize] {
-                    contacts[h as usize] += 1;
+                if !ws.insertion_inside[h as usize] {
+                    ws.insertion_contacts[h as usize] += 1;
                 }
             }
         }
     }
 
     let mut best: Option<SphResult> = None;
-    let mut nodes = Vec::with_capacity(base.len() + 1);
+    ws.insertion_nodes.clear();
+    ws.insertion_nodes.reserve(ws.insertion_base.len() + 1);
     for w in 0..n as NodeId {
-        if inside[w as usize] || contacts[w as usize] < 2 {
+        if ws.insertion_inside[w as usize] || ws.insertion_contacts[w as usize] < 2 {
             continue;
         }
-        nodes.clear();
-        nodes.extend_from_slice(&base);
-        nodes.push(w);
-        let Some(r) = mst_prune(idx, active, root, &nodes, is_terminal, sws) else { continue };
+        ws.insertion_nodes.clear();
+        ws.insertion_nodes.extend_from_slice(&ws.insertion_base);
+        ws.insertion_nodes.push(w);
+        let Some(r) = mst_prune(idx, active, root, &ws.insertion_nodes, is_terminal, sws) else { continue };
         if r.cost < solution.cost - 1e-9
             && best.as_ref().is_none_or(|b| r.cost < b.cost - 1e-9)
         {
@@ -511,7 +550,7 @@ mod tests {
             checked += 1;
             for out in [
                 key_vertex_elimination(&idx, &active, 1, &start, &is_terminal, &mut kws, &mut sws),
-                vertex_insertion(&idx, &active, 1, &start, &is_terminal, &mut sws),
+                vertex_insertion(&idx, &active, 1, &start, &is_terminal, &mut kws, &mut sws),
             ]
             .into_iter()
             .flatten()

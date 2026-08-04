@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use super::PrimalHeuristic;
 use super::constructive::ConstructiveHeuristic;
 use super::local_search::LocalSearchHeuristic;
-use crate::graph::{DirectedGraph, NodeId, ArcId, Cost, NodeType};
+use crate::graph::{cmp_cost, DirectedGraph, NodeId, ArcId, Cost, NodeType};
 use crate::model::SteinerSolution;
 
 /// Recombination heuristic (Rothberg, 2007 / SCIP-Jack):
@@ -39,9 +39,7 @@ impl RecombinationHeuristic {
     pub fn add_solution(&mut self, solution: SteinerSolution) {
         self.solution_pool.push(solution);
         // Keep pool sorted by objective value
-        self.solution_pool.sort_by(|a, b| {
-            a.objective_value.partial_cmp(&b.objective_value).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        self.solution_pool.sort_by(|a, b| cmp_cost(a.objective_value, b.objective_value));
         // Trim to max size
         self.solution_pool.truncate(self.max_pool_size);
     }

@@ -67,7 +67,7 @@ use crate::graph::algorithms::steiner_td::{
 };
 use crate::graph::algorithms::tree_decomposition::decompose;
 use crate::graph::algorithms::ArcIndex;
-use crate::graph::{ArcId, Cost, NodeId, NodeType, UndirectedGraph};
+use crate::graph::{cmp_cost, ArcId, Cost, NodeId, NodeType, UndirectedGraph};
 
 use super::sph::SphResult;
 
@@ -380,9 +380,7 @@ pub fn grow_and_solve(
             cands.push(a);
         }
     }
-    cands.sort_by(|&x, &y| {
-        guide[x as usize].partial_cmp(&guide[y as usize]).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    cands.sort_by(|&x, &y| cmp_cost(guide[x as usize], guide[y as usize]));
 
     // Find the longest affordable prefix, cheap probes first.
     //

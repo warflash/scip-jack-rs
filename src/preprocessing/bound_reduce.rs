@@ -197,7 +197,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use crate::graph::{Cost, NodeId};
+use crate::graph::{cmp_cost, Cost, NodeId};
 
 use super::csr::{Csr, DijkstraWorkspace, Ordered};
 use super::ReducibleGraph;
@@ -299,7 +299,7 @@ fn region_radii(
 
 /// Sorted prefix sums of the radii: `prefix[j]` is the sum of the `j` smallest.
 fn radius_prefix(mut radius: Vec<Cost>) -> Vec<Cost> {
-    radius.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    radius.sort_by(|a, b| cmp_cost(*a, *b));
     let mut prefix = Vec::with_capacity(radius.len() + 1);
     prefix.push(0.0);
     let mut acc = 0.0;

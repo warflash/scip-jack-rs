@@ -202,7 +202,7 @@ use std::collections::BinaryHeap;
 use std::time::Instant;
 
 use crate::graph::algorithms::{dual_ascent_cuts, ArcIndex};
-use crate::graph::{ArcId, Cost, NodeId};
+use crate::graph::{cmp_cost, ArcId, Cost, NodeId};
 use crate::model::lp_packing::CertifiedPacking;
 
 /// Arc entries the seeding ascent may record. A truncated record yields a weaker
@@ -792,8 +792,8 @@ impl FlowDual {
                     }
                 }
             }
-            finite.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            finite.sort_unstable_by(|a, b| cmp_cost(*a, *b));
+            vals.sort_unstable_by(|a, b| cmp_cost(*a, *b));
             vals.dedup();
             let mut prev = 0.0;
             for &v in vals.iter() {
@@ -805,7 +805,7 @@ impl FlowDual {
                 }
             }
         }
-        cand.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        cand.sort_unstable_by(|a, b| cmp_cost(b.0, a.0));
         let mut used = 0usize;
         let mut value = 0.0;
         for &(w, kk, thr, size) in cand.iter() {
@@ -872,7 +872,7 @@ fn project_all(lam: &mut [Cost], cost: &[Cost], load: &mut [Cost], m: usize, k: 
 /// Standard: sort descending, take the largest `rho` with
 /// `z_(rho) - (S_rho - cap)/rho > 0`. `z` is consumed (sorted in place).
 fn simplex_threshold(z: &mut [Cost], cap: Cost) -> Cost {
-    z.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    z.sort_unstable_by(|a, b| cmp_cost(*b, *a));
     let mut sum = 0.0;
     let mut theta = 0.0;
     for i in 0..z.len() {

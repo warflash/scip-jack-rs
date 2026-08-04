@@ -119,7 +119,7 @@ use std::time::Instant;
 
 use highs::{HighsModelStatus, RowProblem, Sense};
 
-use crate::graph::{Cost, NodeId, UndirectedGraph};
+use crate::graph::{cmp_cost, Cost, NodeId, UndirectedGraph};
 
 /// Signature classes the pricing oracle will address. The table is `2^h n`
 /// wide and the merge step `3^h n`.
@@ -677,8 +677,8 @@ fn relax(graph: &UndirectedGraph, row: &mut [Cost], heap: &mut BinaryHeap<Entry>
         if v >= row.len() || cost > row[v] + 1e-10 {
             continue;
         }
-        for &(u, eid) in graph.neighbors(node) {
-            let next = cost + graph.edges[eid as usize].cost;
+        for (u, edge_cost) in graph.neighbors_with_cost(node) {
+            let next = cost + edge_cost;
             if (u as usize) < row.len() && next < row[u as usize] - 1e-10 {
                 row[u as usize] = next;
                 heap.push(Entry { cost: next, node: u });
@@ -687,7 +687,7 @@ fn relax(graph: &UndirectedGraph, row: &mut [Cost], heap: &mut BinaryHeap<Entry>
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 struct Entry {
     cost: Cost,
     node: NodeId,
@@ -695,7 +695,7 @@ struct Entry {
 impl Eq for Entry {}
 impl Ord for Entry {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.cost.partial_cmp(&self.cost).unwrap_or(Ordering::Equal)
+        cmp_cost(other.cost, self.cost)
     }
 }
 impl PartialOrd for Entry {

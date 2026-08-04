@@ -1,6 +1,6 @@
 use std::collections::BinaryHeap;
 use std::cmp::Ordering;
-use crate::graph::{DirectedGraph, NodeId, ArcId};
+use crate::graph::{cmp_cost, DirectedGraph, NodeId, ArcId};
 
 /// Cycle closure separator for the Forest-Closed BCR relaxation.
 ///
@@ -26,14 +26,46 @@ pub struct CycleCutSeparator<'a> {
     graph: &'a DirectedGraph,
     pub cuts_found: u32,
     pub violation_tolerance: f64,
+    x: Vec<f64>,
+    adj: Vec<Vec<(NodeId, usize, f64)>>,
+    node_flow: Vec<(NodeId, f64)>,
+    used_edges: Vec<bool>,
+    dijkstra: CycleDijkstraWorkspace,
+}
+
+struct CycleDijkstraWorkspace {
+    dist: Vec<f64>,
+    prev: Vec<Option<(NodeId, usize)>>,
+    heap: BinaryHeap<DEntry>,
+    sorted_neighbors: Vec<(NodeId, usize, f64)>,
+    path: Vec<usize>,
+}
+
+impl CycleDijkstraWorkspace {
+    fn new(num_nodes: usize) -> Self {
+        Self {
+            dist: vec![f64::INFINITY; num_nodes],
+            prev: vec![None; num_nodes],
+            heap: BinaryHeap::new(),
+            sorted_neighbors: Vec::new(),
+            path: Vec::new(),
+        }
+    }
 }
 
 impl<'a> CycleCutSeparator<'a> {
     pub fn new(graph: &'a DirectedGraph) -> Self {
+        let max_node = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) as usize;
+        let num_edges = graph.arcs.len() / 2;
         Self {
             graph,
             cuts_found: 0,
             violation_tolerance: 1e-4,
+            x: Vec::with_capacity(num_edges),
+            adj: vec![Vec::new(); max_node + 1],
+            node_flow: Vec::with_capacity(max_node + 1),
+            used_edges: vec![false; num_edges],
+            dijkstra: CycleDijkstraWorkspace::new(max_node + 1),
         }
     }
 
@@ -41,57 +73,55 @@ impl<'a> CycleCutSeparator<'a> {
         let num_arcs = self.graph.arcs.len();
         let num_edges = num_arcs / 2;
 
-        let mut x: Vec<f64> = vec![0.0; num_edges];
+        self.x.resize(num_edges, 0.0);
         for i in 0..num_edges {
-            let fwd = lp_solution.get(2 * i).copied().unwrap_or(0.0);
-            let rev = lp_solution.get(2 * i + 1).copied().unwrap_or(0.0);
-            x[i] = fwd + rev;
+            self.x[i] = lp_solution[2 * i] + lp_solution[2 * i + 1];
         }
 
         // Build undirected adjacency with edge weights w_e = 1 - x_e.
         // Only include edges in the fractional support (x_e > 0).
         let max_node = self.graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) as usize;
-        let mut adj: Vec<Vec<(NodeId, usize, f64)>> = vec![Vec::new(); max_node + 1];
+        if self.adj.len() <= max_node {
+            self.adj.resize_with(max_node + 1, Vec::new);
+        }
+        for neighbours in &mut self.adj {
+            neighbours.clear();
+        }
 
         for i in 0..num_edges {
-            if x[i] < 1e-8 { continue; }
+            if self.x[i] < 1e-8 { continue; }
             let arc = &self.graph.arcs[2 * i];
-            let w = (1.0 - x[i]).max(0.0);
-            adj[arc.tail as usize].push((arc.head, i, w));
-            adj[arc.head as usize].push((arc.tail, i, w));
+            let w = (1.0 - self.x[i]).max(0.0);
+            self.adj[arc.tail as usize].push((arc.head, i, w));
+            self.adj[arc.head as usize].push((arc.tail, i, w));
         }
 
         // Collect nodes in the fractional support, sorted by total incident
         // fractional flow (highest first - these are most likely part of
         // violated cycles).
-        let mut node_flow: Vec<(NodeId, f64)> = Vec::new();
+        self.node_flow.clear();
         for node in &self.graph.nodes {
             let v = node.id as usize;
-            if adj[v].is_empty() { continue; }
-            let total: f64 = adj[v].iter().map(|&(_, ei, _)| x[ei]).sum();
-            node_flow.push((node.id, total));
+            if self.adj[v].is_empty() { continue; }
+            let total: f64 = self.adj[v].iter().map(|&(_, ei, _)| self.x[ei]).sum();
+            self.node_flow.push((node.id, total));
         }
-        node_flow.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        self.node_flow.sort_by(|a, b| cmp_cost(b.1, a.1));
 
         // For each candidate node, find the shortest cycle through it.
         // A cycle through v consists of an edge (v, u) plus a path from u back to v
         // not using v as an intermediate.
         let mut violated_cuts: Vec<CycleCut> = Vec::new();
-        let mut used_edges: Vec<bool> = vec![false; num_edges];
+        self.used_edges.fill(false);
 
         // Limit the number of Dijkstra runs based on graph density
-        let max_source_nodes = 100.min(node_flow.len());
+        let max_source_nodes = 100.min(self.node_flow.len());
 
-        for &(v, _) in node_flow.iter().take(max_source_nodes) {
+        for &(v, _) in self.node_flow.iter().take(max_source_nodes) {
             if violated_cuts.len() >= 30 { break; }
 
-            let neighbors: Vec<(NodeId, usize, f64)> = adj[v as usize].clone();
+            let neighbors = &self.adj[v as usize];
             if neighbors.len() < 2 { continue; }
-
-            // Run Dijkstra from v in the graph with v removed.
-            // This gives shortest paths from v's neighbors back to each other.
-            // A cycle through v = edge(v,u) + shortest_path(u, w, avoiding v) + edge(w,v)
-            let _dist = dijkstra_from_node_avoiding(v, &adj, max_node);
 
             // For each pair of neighbors (u, w), the cycle v-u-...-w-v has weight
             // w(v,u) + dist[u->w without v] + w(w,v). Since the graph is undirected,
@@ -114,18 +144,24 @@ impl<'a> CycleCutSeparator<'a> {
 
             // Even better: run Dijkstra from ALL neighbors of v simultaneously with
             // source labels, find the shortest path between two DIFFERENT neighbors.
-            let cycle_result = find_shortest_cycle_through(v, &neighbors, &adj, max_node, &x);
+            let cycle_result = find_shortest_cycle_through(
+                v,
+                neighbors,
+                &self.adj,
+                max_node,
+                &mut self.dijkstra,
+            );
 
             if let Some((cost, edges)) = cycle_result {
                 if cost < 1.0 - self.violation_tolerance {
                     let violation = 1.0 - cost;
                     let mut all_new = true;
                     for &e in &edges {
-                        if used_edges[e] { all_new = false; break; }
+                        if self.used_edges[e] { all_new = false; break; }
                     }
                     if !all_new && violation < 0.05 { continue; }
 
-                    for &e in &edges { used_edges[e] = true; }
+                    for &e in &edges { self.used_edges[e] = true; }
 
                     let mut arc_ids: Vec<ArcId> = Vec::with_capacity(edges.len() * 2);
                     let edge_indices: Vec<u32> = edges.iter().map(|&e| e as u32).collect();
@@ -152,7 +188,7 @@ impl<'a> CycleCutSeparator<'a> {
             }
         }
 
-        violated_cuts.sort_by(|a, b| b.violation.partial_cmp(&a.violation).unwrap_or(Ordering::Equal));
+        violated_cuts.sort_by(|a, b| cmp_cost(b.violation, a.violation));
         self.cuts_found = violated_cuts.len() as u32;
         violated_cuts
     }
@@ -202,7 +238,7 @@ fn find_shortest_cycle_through(
     neighbors: &[(NodeId, usize, f64)],
     adj: &[Vec<(NodeId, usize, f64)>],
     max_node: usize,
-    _x: &[f64],
+    ws: &mut CycleDijkstraWorkspace,
 ) -> Option<(f64, Vec<usize>)> {
     // For efficiency, we use a multi-source Dijkstra: start from all neighbors
     // of v simultaneously, labeling each with its source identity. When we reach
@@ -219,31 +255,32 @@ fn find_shortest_cycle_through(
     let max_neighbor_runs = 12.min(neighbors.len());
 
     let mut best_cost = f64::INFINITY;
-    let mut best_path: Option<Vec<usize>> = None;
+    let mut best_found = false;
     let mut best_first_edge: Option<usize> = None;
     let mut best_last_edge: Option<usize> = None;
 
     // Sort neighbors by edge weight (smallest first for early termination)
-    let mut sorted_neighbors = neighbors.to_vec();
-    sorted_neighbors.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal));
+    ws.sorted_neighbors.clear();
+    ws.sorted_neighbors.extend_from_slice(neighbors);
+    ws.sorted_neighbors.sort_by(|a, b| cmp_cost(a.2, b.2));
 
     for i in 0..max_neighbor_runs {
-        let (u, ei, wi) = sorted_neighbors[i];
+        let (u, ei, wi) = ws.sorted_neighbors[i];
 
         // Early termination: if wi alone >= best_cost, skip
         if wi >= best_cost { break; }
 
         // Dijkstra from u, avoiding v
-        let (dist, prev) = dijkstra_from_avoiding(u, v, adj, max_node);
+        dijkstra_from_avoiding(u, v, adj, max_node, ws);
 
         // Check all other neighbors of v
         for j in 0..neighbors.len() {
-            if i == j && sorted_neighbors[i].0 == neighbors[j].0 { continue; }
+            if i == j && ws.sorted_neighbors[i].0 == neighbors[j].0 { continue; }
             let (w, ej, wj) = neighbors[j];
             if w == u && ei == ej { continue; }
             if w == u { continue; }
 
-            let d = dist[w as usize];
+            let d = ws.dist[w as usize];
             if d >= f64::INFINITY / 2.0 { continue; }
 
             let cycle_cost = wi + d + wj;
@@ -251,27 +288,46 @@ fn find_shortest_cycle_through(
                 best_cost = cycle_cost;
                 best_first_edge = Some(ei);
                 best_last_edge = Some(ej);
-                // Reconstruct path edges
-                let mut path_edges = Vec::new();
-                let mut cur = w;
-                while cur != u {
-                    if let Some((pred, edge_idx)) = prev[cur as usize] {
-                        path_edges.push(edge_idx);
-                        cur = pred;
-                    } else {
-                        break;
-                    }
-                }
-                best_path = Some(path_edges);
+                // Reconstruct the winning path once, after all source runs. The
+                // predecessor storage is reused for each Dijkstra instead of
+                // allocating a path vector on every improvement.
+                best_found = true;
             }
         }
     }
 
     if best_cost < f64::INFINITY / 2.0 {
+        if !best_found {
+            return None;
+        }
+        ws.path.clear();
+        // The winning source is encoded by the first edge's endpoint in the
+        // search above. Re-run that one shortest path to recover predecessors
+        // after the final Dijkstra run.
+        let first_edge = best_first_edge?;
+        let last_edge = best_last_edge?;
+        let start = neighbors
+            .iter()
+            .find(|&&(_, edge, _)| edge == first_edge)
+            .map(|&(node, _, _)| node)?;
+        let target = neighbors
+            .iter()
+            .find(|&&(_, edge, _)| edge == last_edge)
+            .map(|&(node, _, _)| node)?;
+        dijkstra_from_avoiding(start, v, adj, max_node, ws);
+        let mut cur = target;
+        while cur != start {
+            if let Some((pred, edge_idx)) = ws.prev[cur as usize] {
+                ws.path.push(edge_idx);
+                cur = pred;
+            } else {
+                break;
+            }
+        }
         let mut all_edges: Vec<usize> = Vec::new();
-        if let Some(fe) = best_first_edge { all_edges.push(fe); }
-        if let Some(le) = best_last_edge { all_edges.push(le); }
-        if let Some(path) = best_path { all_edges.extend(path); }
+        all_edges.push(first_edge);
+        all_edges.push(last_edge);
+        all_edges.extend_from_slice(&ws.path);
         all_edges.sort();
         all_edges.dedup();
         Some((best_cost, all_edges))
@@ -286,51 +342,37 @@ fn dijkstra_from_avoiding(
     source: NodeId,
     avoid: NodeId,
     adj: &[Vec<(NodeId, usize, f64)>],
-    max_node: usize,
-) -> (Vec<f64>, Vec<Option<(NodeId, usize)>>) {
-    let mut dist = vec![f64::INFINITY; max_node + 1];
-    let mut prev: Vec<Option<(NodeId, usize)>> = vec![None; max_node + 1];
-    let mut heap = BinaryHeap::new();
+    _max_node: usize,
+    ws: &mut CycleDijkstraWorkspace,
+) {
+    ws.dist.fill(f64::INFINITY);
+    ws.prev.fill(None);
+    ws.heap.clear();
 
-    dist[source as usize] = 0.0;
-    heap.push(DEntry { cost: 0.0, node: source });
+    ws.dist[source as usize] = 0.0;
+    ws.heap.push(DEntry { cost: 0.0, node: source });
 
-    while let Some(DEntry { cost, node }) = heap.pop() {
-        if cost > dist[node as usize] + 1e-10 { continue; }
+    while let Some(DEntry { cost, node }) = ws.heap.pop() {
+        if cost > ws.dist[node as usize] + 1e-10 { continue; }
 
         for &(next, edge_idx, w) in &adj[node as usize] {
             if next == avoid { continue; }
             let new_cost = cost + w;
-            if new_cost < dist[next as usize] - 1e-10 {
-                dist[next as usize] = new_cost;
-                prev[next as usize] = Some((node, edge_idx));
-                heap.push(DEntry { cost: new_cost, node: next });
+            if new_cost < ws.dist[next as usize] - 1e-10 {
+                ws.dist[next as usize] = new_cost;
+                ws.prev[next as usize] = Some((node, edge_idx));
+                ws.heap.push(DEntry { cost: new_cost, node: next });
             }
         }
     }
-
-    (dist, prev)
 }
 
-/// Run Dijkstra from `source` in the graph with `avoid` removed.
-/// Simple version used for distance computation only.
-fn dijkstra_from_node_avoiding(
-    avoid: NodeId,
-    _adj: &[Vec<(NodeId, usize, f64)>],
-    max_node: usize,
-) -> Vec<f64> {
-    // This isn't directly used anymore, but kept for potential future use
-    let mut dist = vec![f64::INFINITY; max_node + 1];
-    dist[avoid as usize] = 0.0;
-    dist
-}
-
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 struct DEntry { cost: f64, node: NodeId }
 impl Eq for DEntry {}
 impl Ord for DEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.cost.partial_cmp(&self.cost).unwrap_or(Ordering::Equal)
+        cmp_cost(other.cost, self.cost)
             .then_with(|| self.node.cmp(&other.node))
     }
 }

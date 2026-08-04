@@ -88,7 +88,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::graph::algorithms::{dual_ascent_cuts, dual_ascent_packing, dual_ascent_packing_residual, ArcIndex};
-use crate::graph::{ArcId, Cost, DirectedGraph, NodeId};
+use crate::graph::{cmp_cost, ArcId, Cost, DirectedGraph, NodeId};
 use crate::model::{LpMethod, LpRelaxation};
 use crate::separation::{CycleCutSeparator, FlowCutSeparator, PartitionSeparator, TfCutSeparator};
 
@@ -428,9 +428,7 @@ pub fn certify(candidates: &[Candidate], idx: &ArcIndex, root: NodeId) -> Certif
     // weight its boundary still has room for. `load(a) <= c(a)` is an invariant
     // of the loop, so the result satisfies (PACK) whatever the order.
     let mut order: Vec<usize> = (0..recovered.len()).collect();
-    order.sort_by(|&i, &j| {
-        recovered[j].0.partial_cmp(&recovered[i].0).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    order.sort_by(|&i, &j| cmp_cost(recovered[j].0, recovered[i].0));
     load.iter_mut().for_each(|l| *l = 0.0);
     let mut admitted: Vec<(usize, Cost)> = Vec::with_capacity(recovered.len());
     let mut greedy_value: Cost = 0.0;
@@ -1371,7 +1369,7 @@ impl RootSeparation {
                 let norm = coeffs.iter().map(|c| c * c).sum::<Cost>().max(1.0).sqrt();
                 ranked.push((t.violation / norm, 2, Row::Weighted(arcs, coeffs, 0.0)));
             }
-            ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            ranked.sort_by(|a, b| cmp_cost(b.0, a.0));
             // Extra rows are admitted, never substituted: every flow cut is
             // already installed above. An extra earns its slot only when it is
             // deeper than every flow cut on offer this round -- when it is the
@@ -1846,7 +1844,7 @@ mod tests {
             .filter(|e| sub >> (e.src - 1) & 1 == 1 && sub >> (e.dst - 1) & 1 == 1)
             .map(|e| (e.cost, e.src, e.dst))
             .collect();
-        edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        edges.sort_by(|a, b| cmp_cost(a.0, b.0));
         let mut parent: Vec<u32> = (0..=n).collect();
         fn find(p: &mut Vec<u32>, x: u32) -> u32 {
             if p[x as usize] != x {

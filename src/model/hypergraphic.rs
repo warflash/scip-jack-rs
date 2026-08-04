@@ -98,7 +98,7 @@ use std::time::Instant;
 
 use highs::{HighsModelStatus, RowProblem, Sense};
 
-use crate::graph::{Cost, NodeId, UndirectedGraph};
+use crate::graph::{cmp_cost, Cost, NodeId, UndirectedGraph};
 
 /// Terminals this module will address. `2^k` constraints and one Dreyfus-Wagner
 /// table are both indexed by it.
@@ -474,13 +474,17 @@ fn subset_steiner_costs(graph: &UndirectedGraph, terminals: &[NodeId]) -> Option
     Some(smt)
 }
 
-#[derive(PartialEq, PartialOrd)]
+#[derive(PartialEq)]
 struct Ordered(Cost);
 impl Eq for Ordered {}
-#[allow(clippy::derive_ord_xor_partial_ord)]
 impl Ord for Ordered {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+        cmp_cost(self.0, other.0)
+    }
+}
+impl PartialOrd for Ordered {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 

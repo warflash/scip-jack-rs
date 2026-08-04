@@ -16,7 +16,7 @@
 //! discard the simplex basis, so they are triggered only when the row count
 //! actually exceeds its budget.
 
-use crate::graph::{ArcId, Cost, DirectedGraph, NodeId};
+use crate::graph::{cmp_cost, ArcId, Cost, DirectedGraph, NodeId};
 use highs::{Col, HighsModelStatus, Model as HModel, RowProblem, Sense};
 
 /// Per-solve tracing, off unless `SJ_LP_TRACE` is set in the environment.
@@ -81,6 +81,10 @@ pub struct LpRelaxation {
     /// `structural` first, then `cuts`. Only meaningful when
     /// [`LpRelaxation::is_optimal`] holds; see [`LpRelaxation::unit_arc_rows`].
     pub row_duals: Vec<f64>,
+    /// Row multipliers are only needed by the root certificate/packing path.
+    /// Branch-and-cut consumes the primal point and reduced costs, so it can
+    /// skip copying this large slice out of HiGHS on every warm solve.
+    capture_row_duals: bool,
     pub dual_bound: f64,
     pub status: LpStatus,
     pub solve_count: u64,
@@ -493,6 +497,7 @@ impl LpRelaxation {
             solution: vec![0.0; b.col_cost.len()],
             reduced_costs: vec![0.0; b.col_cost.len()],
             row_duals: Vec::new(),
+            capture_row_duals: true,
             dual_bound: f64::NEG_INFINITY,
             status: LpStatus::NotSolved,
             solve_count: 0,
@@ -613,8 +618,22 @@ impl LpRelaxation {
     fn activity(&self, row: &RowData) -> f64 {
         row.entries
             .iter()
-            .map(|&(c, v)| v * self.solution.get(c as usize).copied().unwrap_or(0.0))
+            // Row construction only admits valid column ids. Keep this hot
+            // accumulation on the direct slice path instead of doing a bounds
+            // check and fallback branch for every nonzero.
+            .map(|&(c, v)| v * self.solution[c as usize])
             .sum()
+    }
+
+    /// Avoid transferring row multipliers when the caller only needs the
+    /// primal point and reduced costs. This does not change the HiGHS model or
+    /// its solve; it only trims an unused result copy in the branch-and-cut
+    /// path.
+    pub fn set_capture_row_duals(&mut self, capture: bool) {
+        self.capture_row_duals = capture;
+        if !capture {
+            self.row_duals.clear();
+        }
     }
 
     /// Add any held-back structural rows the current solution violates.
@@ -646,7 +665,7 @@ impl LpRelaxation {
             return 0;
         }
         // Most violated first: those move the bound the furthest per row added.
-        violated.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        violated.sort_by(|a, b| cmp_cost(b.0, a.0));
         violated.truncate(max_add);
         for &(_, i) in &violated {
             self.lazy_resident[i as usize] = true;
@@ -910,9 +929,20 @@ impl LpRelaxation {
         match solved.status() {
             HighsModelStatus::Optimal => {
                 let sol = solved.get_solution();
-                self.solution = sol.columns().to_vec();
-                self.reduced_costs = sol.dual_columns().to_vec();
-                self.row_duals = sol.dual_rows().to_vec();
+                // HiGHS returns borrowed slices. Reuse the buffers retained by
+                // the relaxation instead of allocating three fresh vectors on
+                // every warm solve; the LP loop can execute thousands of these
+                // transfers even when HiGHS itself only needs a few pivots.
+                self.solution.clear();
+                self.solution.extend_from_slice(sol.columns());
+                self.reduced_costs.clear();
+                self.reduced_costs.extend_from_slice(sol.dual_columns());
+                if self.capture_row_duals {
+                    self.row_duals.clear();
+                    self.row_duals.extend_from_slice(sol.dual_rows());
+                } else {
+                    self.row_duals.clear();
+                }
                 self.dual_bound = self
                     .solution
                     .iter()

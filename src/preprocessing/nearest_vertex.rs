@@ -94,8 +94,11 @@ fn degree_one_terminals(graph: &mut ReducibleGraph) -> u32 {
             .copied()
             .filter(|&t| graph.is_node_valid(t))
             .find_map(|t| {
-                let n = graph.valid_neighbors(t);
-                (n.len() == 1).then(|| (t, n[0].0, n[0].1))
+                let mut neighbors = graph.valid_neighbors_iter(t);
+                match (neighbors.next(), neighbors.next()) {
+                    (Some((other, eid)), None) => Some((t, other, eid)),
+                    _ => None,
+                }
             });
         let Some((t, other, eid)) = victim else { break };
         if graph.terminals.len() < 2 {
@@ -167,17 +170,20 @@ fn nearest_vertex_pass(graph: &mut ReducibleGraph) -> u32 {
         }
         // Contracting invalidates the precomputed walks that pass through the
         // merged vertices, so re-derive the local part against the live graph.
-        let neighbors = graph.valid_neighbors(t);
-        if neighbors.len() < 2 {
+        let has_two_neighbors = {
+            let mut neighbors = graph.valid_neighbors_iter(t);
+            neighbors.next().is_some() && neighbors.next().is_some()
+        };
+        if !has_two_neighbors {
             continue;
         }
         if !graph.is_edge_valid(lead) {
             continue;
         }
-        let second = neighbors
-            .iter()
-            .filter(|&&(_, f)| f != lead)
-            .map(|&(_, f)| graph.edges[f as usize].cost)
+        let second = graph
+            .valid_neighbors_iter(t)
+            .filter(|&(_, f)| f != lead)
+            .map(|(_, f)| graph.edges[f as usize].cost)
             .fold(Cost::INFINITY, Cost::min);
         if walk > second + 1e-9 {
             continue;

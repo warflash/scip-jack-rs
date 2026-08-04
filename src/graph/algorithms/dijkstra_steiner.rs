@@ -313,7 +313,7 @@ fn pack(mask: Mask, v: NodeId) -> LabelKey {
     ((mask as LabelKey) << 32) | v as LabelKey
 }
 
-use crate::graph::{Cost, NodeId, UndirectedGraph};
+use crate::graph::{cmp_cost, Cost, NodeId, UndirectedGraph};
 
 /// Largest terminal count the bitmask state can address.
 const MAX_TERMINALS: usize = 64;
@@ -328,13 +328,17 @@ pub struct DijkstraSteinerResult {
 }
 
 /// Ordering shim for `f64` keys in the priority queue.
-#[derive(PartialEq, PartialOrd)]
+#[derive(PartialEq)]
 struct Key(Cost);
 impl Eq for Key {}
-#[allow(clippy::derive_ord_xor_partial_ord)]
 impl Ord for Key {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+        cmp_cost(self.0, other.0)
+    }
+}
+impl PartialOrd for Key {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -1049,11 +1053,7 @@ impl SteinerSearch {
         let nearest_order: Vec<Vec<u32>> = (0..k)
             .map(|i| {
                 let mut order: Vec<u32> = (0..k as u32).filter(|&j| j as usize != i).collect();
-                order.sort_by(|&a, &b| {
-                    td[i][a as usize]
-                        .partial_cmp(&td[i][b as usize])
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                order.sort_by(|&a, &b| cmp_cost(td[i][a as usize], td[i][b as usize]));
                 order
             })
             .collect();

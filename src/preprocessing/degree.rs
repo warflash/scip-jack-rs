@@ -42,8 +42,7 @@ pub fn degree_reductions(graph: &mut ReducibleGraph) -> (u32, Vec<EdgeId>, Cost)
             // Note: we do NOT add to lb_offset here because the edge remains in the graph
             // and will be counted in the solver's solution. We just record which edges are fixed.
             if degree == 1 && graph.is_terminal(node) {
-                let neighbors = graph.valid_neighbors(node);
-                if let Some(&(_, eid)) = neighbors.first() {
+                if let Some((_, eid)) = graph.valid_neighbors_iter(node).next() {
                     if !fixed_edges.contains(&eid) {
                         fixed_edges.push(eid);
                     }

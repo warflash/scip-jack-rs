@@ -17,7 +17,7 @@
 //! recomputed from the true arc costs, never from the search weights.
 
 use crate::graph::algorithms::ArcIndex;
-use crate::graph::{ArcId, Cost, NodeId};
+use crate::graph::{cmp_cost, ArcId, Cost, NodeId};
 
 /// A feasible arborescence: arcs oriented away from the root.
 #[derive(Debug, Clone)]
@@ -30,21 +30,34 @@ pub struct SphResult {
 pub struct SphWorkspace {
     dist: Vec<Cost>,
     parent_arc: Vec<u32>,
-    in_tree: Vec<bool>,
+    tree_stamp: Vec<u32>,
+    tree_epoch: u32,
     visited_stamp: Vec<u32>,
     stamp: u32,
     heap: std::collections::BinaryHeap<HeapEntry>,
+    tree_nodes: Vec<NodeId>,
+    cands: Vec<(Cost, ArcId)>,
+    dsu_parent: Vec<u32>,
+    mst_adj: Vec<Vec<(NodeId, ArcId)>>,
+    mst_touched: Vec<NodeId>,
+    degree: Vec<u32>,
+    alive_stamp: Vec<u32>,
+    alive_epoch: u32,
+    seen_stamp: Vec<u32>,
+    seen_epoch: u32,
+    queue: Vec<NodeId>,
+    stack: Vec<NodeId>,
 }
 
 const NO_ARC: u32 = u32::MAX;
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 struct HeapEntry(Cost, NodeId);
 impl Eq for HeapEntry {}
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Reversed: BinaryHeap is a max-heap and we need the minimum.
-        other.0.partial_cmp(&self.0).unwrap_or(std::cmp::Ordering::Equal)
+        cmp_cost(other.0, self.0)
     }
 }
 impl PartialOrd for HeapEntry {
@@ -58,10 +71,23 @@ impl SphWorkspace {
         Self {
             dist: vec![Cost::INFINITY; num_nodes],
             parent_arc: vec![NO_ARC; num_nodes],
-            in_tree: vec![false; num_nodes],
+            tree_stamp: vec![0; num_nodes],
+            tree_epoch: 0,
             visited_stamp: vec![0; num_nodes],
             stamp: 0,
             heap: std::collections::BinaryHeap::new(),
+            tree_nodes: Vec::new(),
+            cands: Vec::new(),
+            dsu_parent: vec![0; num_nodes],
+            mst_adj: vec![Vec::new(); num_nodes],
+            mst_touched: Vec::new(),
+            degree: vec![0; num_nodes],
+            alive_stamp: vec![0; num_nodes],
+            alive_epoch: 0,
+            seen_stamp: vec![0; num_nodes],
+            seen_epoch: 0,
+            queue: Vec::new(),
+            stack: Vec::new(),
         }
     }
 }
@@ -81,24 +107,29 @@ pub fn shortest_path_heuristic(
     ws: &mut SphWorkspace,
 ) -> Option<SphResult> {
     let n = idx.num_nodes();
-    for v in 0..n {
-        ws.in_tree[v] = false;
+    if ws.tree_stamp.len() < n {
+        ws.tree_stamp.resize(n, 0);
+        ws.visited_stamp.resize(n, 0);
+        ws.dist.resize(n, Cost::INFINITY);
+        ws.parent_arc.resize(n, NO_ARC);
+        ws.dsu_parent.resize(n, 0);
+        ws.mst_adj.resize_with(n, Vec::new);
+        ws.degree.resize(n, 0);
+        ws.alive_stamp.resize(n, 0);
+        ws.seen_stamp.resize(n, 0);
     }
 
-    let mut tree_nodes: Vec<NodeId> = vec![start];
-    ws.in_tree[start as usize] = true;
+    ws.tree_epoch = ws.tree_epoch.wrapping_add(1);
+    if ws.tree_epoch == 0 {
+        ws.tree_stamp.fill(0);
+        ws.tree_epoch = 1;
+    }
+    let tree_epoch = ws.tree_epoch;
+    ws.tree_nodes.clear();
+    ws.tree_nodes.push(start);
+    ws.tree_stamp[start as usize] = tree_epoch;
     let mut connected = 1usize;
     let total_terminals = terminals.iter().filter(|&&t| t != start).count() + 1;
-    for &t in terminals {
-        if t == start {
-            continue;
-        }
-        if ws.in_tree[t as usize] {
-            connected += 1;
-        }
-    }
-
-    let mut tree_arcs: Vec<ArcId> = Vec::new();
 
     while connected < total_terminals {
         // One iteration is a multi-source Dijkstra, so on an instance with
@@ -112,7 +143,7 @@ pub fn shortest_path_heuristic(
         ws.stamp += 1;
         let stamp = ws.stamp;
         ws.heap.clear();
-        for &v in &tree_nodes {
+        for &v in &ws.tree_nodes {
             ws.dist[v as usize] = 0.0;
             ws.parent_arc[v as usize] = NO_ARC;
             ws.visited_stamp[v as usize] = stamp;
@@ -124,7 +155,7 @@ pub fn shortest_path_heuristic(
             if ws.visited_stamp[v as usize] == stamp && d > ws.dist[v as usize] + 1e-12 {
                 continue;
             }
-            if is_terminal[v as usize] && !ws.in_tree[v as usize] {
+            if is_terminal[v as usize] && ws.tree_stamp[v as usize] != tree_epoch {
                 found = Some(v);
                 break;
             }
@@ -147,14 +178,13 @@ pub fn shortest_path_heuristic(
 
         // Walk the parent chain back to the tree, attaching it.
         let mut v = target;
-        while !ws.in_tree[v as usize] {
+        while ws.tree_stamp[v as usize] != tree_epoch {
             let a = ws.parent_arc[v as usize];
             if a == NO_ARC {
                 return None;
             }
-            tree_arcs.push(a);
-            ws.in_tree[v as usize] = true;
-            tree_nodes.push(v);
+            ws.tree_stamp[v as usize] = tree_epoch;
+            ws.tree_nodes.push(v);
             if is_terminal[v as usize] {
                 connected += 1;
             }
@@ -162,7 +192,10 @@ pub fn shortest_path_heuristic(
         }
     }
 
-    mst_prune(idx, active, root, &tree_nodes, is_terminal, ws)
+    let tree_nodes = std::mem::take(&mut ws.tree_nodes);
+    let result = mst_prune(idx, active, root, &tree_nodes, is_terminal, ws);
+    ws.tree_nodes = tree_nodes;
+    result
 }
 
 /// Minimum spanning tree of the subgraph induced on `tree_nodes`, pruned of
@@ -188,7 +221,7 @@ pub fn mst_prune(
     ws: &mut SphWorkspace,
 ) -> Option<SphResult> {
     let result = finalize(idx, active, root, tree_nodes, is_terminal, ws);
-    spans_every_terminal(idx, root, &result, is_terminal).then_some(result)
+    spans_every_terminal(idx, root, &result, is_terminal, ws).then_some(result)
 }
 
 /// Whether every terminal is reachable from `root` along the arcs of `result`.
@@ -197,23 +230,28 @@ fn spans_every_terminal(
     root: NodeId,
     result: &SphResult,
     is_terminal: &[bool],
+    ws: &mut SphWorkspace,
 ) -> bool {
-    let n = idx.num_nodes();
-    let mut reached = vec![false; n];
-    reached[root as usize] = true;
-    // The arcs come out of a rooted orientation, so one relaxation sweep per arc
-    // is enough; iterate to a fixpoint anyway rather than rely on their order.
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &a in &result.arcs {
-            if reached[idx.tail(a) as usize] && !reached[idx.head(a) as usize] {
-                reached[idx.head(a) as usize] = true;
-                changed = true;
-            }
+    ws.stamp = ws.stamp.wrapping_add(1);
+    if ws.stamp == 0 {
+        ws.visited_stamp.fill(0);
+        ws.stamp = 1;
+    }
+    let reached = ws.stamp;
+    ws.visited_stamp[root as usize] = reached;
+    // `finalize` emits a parent arc before any descendant arc during its
+    // rooted DFS, so a single sweep is enough to propagate reachability. The
+    // old fixpoint loop repeatedly rescanned the whole tree even though the
+    // orientation already supplies a topological order.
+    for &a in &result.arcs {
+        if ws.visited_stamp[idx.tail(a) as usize] == reached {
+            ws.visited_stamp[idx.head(a) as usize] = reached;
         }
     }
-    (0..n).all(|v| !is_terminal[v] || reached[v])
+    is_terminal
+        .iter()
+        .enumerate()
+        .all(|(v, &terminal)| !terminal || ws.visited_stamp[v] == reached)
 }
 
 /// Rebuild an MST on the induced subgraph, prune non-terminal leaves, and orient
@@ -229,7 +267,11 @@ fn finalize(
     let n = idx.num_nodes();
 
     // Mark the induced vertex set.
-    ws.stamp += 1;
+    ws.stamp = ws.stamp.wrapping_add(1);
+    if ws.stamp == 0 {
+        ws.visited_stamp.fill(0);
+        ws.stamp = 1;
+    }
     let inside = ws.stamp;
     for &v in tree_nodes {
         ws.visited_stamp[v as usize] = inside;
@@ -237,7 +279,7 @@ fn finalize(
     ws.visited_stamp[root as usize] = inside;
 
     // Collect every active arc with both endpoints inside, one per arc pair.
-    let mut cands: Vec<(Cost, ArcId)> = Vec::new();
+    ws.cands.clear();
     for &v in tree_nodes {
         for &a in idx.outgoing(v) {
             if !active[a as usize] {
@@ -249,14 +291,23 @@ fn finalize(
             }
             // Keep one orientation per undirected edge to avoid duplicates.
             if idx.tail(a) < h {
-                cands.push((idx.cost(a), a));
+                ws.cands.push((idx.cost(a), a));
             }
         }
     }
-    cands.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+    ws.cands.sort_by(|x, y| cmp_cost(x.0, y.0));
 
     // Kruskal.
-    let mut parent: Vec<u32> = (0..n as u32).collect();
+    if ws.dsu_parent.len() < n {
+        ws.dsu_parent.resize(n, 0);
+    }
+    if ws.degree.len() < n {
+        ws.degree.resize(n, 0);
+    }
+    for &v in tree_nodes {
+        ws.dsu_parent[v as usize] = v;
+    }
+    ws.dsu_parent[root as usize] = root;
     fn find(p: &mut [u32], mut x: u32) -> u32 {
         while p[x as usize] != x {
             p[x as usize] = p[p[x as usize] as usize];
@@ -264,42 +315,64 @@ fn finalize(
         }
         x
     }
-    let mut adj: Vec<Vec<(NodeId, ArcId)>> = vec![Vec::new(); n];
-    for &(_, a) in &cands {
+    if ws.mst_adj.len() < n {
+        ws.mst_adj.resize_with(n, Vec::new);
+    }
+    for &v in &ws.mst_touched {
+        ws.mst_adj[v as usize].clear();
+    }
+    ws.mst_touched.clear();
+    for &v in tree_nodes {
+        ws.degree[v as usize] = 0;
+    }
+    ws.degree[root as usize] = 0;
+    for &(_, a) in &ws.cands {
         let (u, v) = (idx.tail(a), idx.head(a));
-        let (ru, rv) = (find(&mut parent, u), find(&mut parent, v));
+        let (ru, rv) = (find(&mut ws.dsu_parent, u), find(&mut ws.dsu_parent, v));
         if ru != rv {
-            parent[ru as usize] = rv;
-            adj[u as usize].push((v, a));
-            adj[v as usize].push((u, a));
+            ws.dsu_parent[ru as usize] = rv;
+            ws.mst_adj[u as usize].push((v, a));
+            ws.mst_adj[v as usize].push((u, a));
+            ws.mst_touched.push(u);
+            ws.mst_touched.push(v);
         }
     }
 
     // Prune non-terminal leaves iteratively.
-    let mut degree: Vec<u32> = (0..n).map(|v| adj[v].len() as u32).collect();
-    let mut alive = vec![false; n];
-    for &v in tree_nodes {
-        alive[v as usize] = true;
+    for &v in &ws.mst_touched {
+        ws.degree[v as usize] += 1;
     }
-    alive[root as usize] = true;
-    let mut queue: Vec<NodeId> = tree_nodes
-        .iter()
-        .copied()
-        .filter(|&v| v != root && !is_terminal[v as usize] && degree[v as usize] <= 1)
-        .collect();
-    while let Some(v) = queue.pop() {
-        if !alive[v as usize] || is_terminal[v as usize] || v == root {
+    ws.alive_epoch = ws.alive_epoch.wrapping_add(1);
+    if ws.alive_epoch == 0 {
+        ws.alive_stamp.fill(0);
+        ws.alive_epoch = 1;
+    }
+    let alive = ws.alive_epoch;
+    for &v in tree_nodes {
+        ws.alive_stamp[v as usize] = alive;
+    }
+    ws.alive_stamp[root as usize] = alive;
+    ws.queue.clear();
+    ws.queue.extend(
+        tree_nodes
+            .iter()
+            .copied()
+            .filter(|&v| v != root && !is_terminal[v as usize] && ws.degree[v as usize] <= 1),
+    );
+    while let Some(v) = ws.queue.pop() {
+        if ws.alive_stamp[v as usize] != alive || is_terminal[v as usize] || v == root {
             continue;
         }
-        if degree[v as usize] > 1 {
+        if ws.degree[v as usize] > 1 {
             continue;
         }
-        alive[v as usize] = false;
-        for &(u, _) in &adj[v as usize] {
-            if alive[u as usize] {
-                degree[u as usize] -= 1;
-                if !is_terminal[u as usize] && u != root && degree[u as usize] <= 1 {
-                    queue.push(u);
+        ws.alive_stamp[v as usize] = 0;
+        for i in 0..ws.mst_adj[v as usize].len() {
+            let u = ws.mst_adj[v as usize][i].0;
+            if ws.alive_stamp[u as usize] == alive {
+                ws.degree[u as usize] -= 1;
+                if !is_terminal[u as usize] && u != root && ws.degree[u as usize] <= 1 {
+                    ws.queue.push(u);
                 }
             }
         }
@@ -308,20 +381,27 @@ fn finalize(
     // Orient the surviving tree away from the root.
     let mut arcs = Vec::new();
     let mut cost = 0.0;
-    let mut seen = vec![false; n];
-    let mut stack = vec![root];
-    seen[root as usize] = true;
-    while let Some(v) = stack.pop() {
-        for &(u, a) in &adj[v as usize] {
-            if !alive[u as usize] || seen[u as usize] {
+    ws.seen_epoch = ws.seen_epoch.wrapping_add(1);
+    if ws.seen_epoch == 0 {
+        ws.seen_stamp.fill(0);
+        ws.seen_epoch = 1;
+    }
+    let seen = ws.seen_epoch;
+    ws.stack.clear();
+    ws.stack.push(root);
+    ws.seen_stamp[root as usize] = seen;
+    while let Some(v) = ws.stack.pop() {
+        for i in 0..ws.mst_adj[v as usize].len() {
+            let (u, a) = ws.mst_adj[v as usize][i];
+            if ws.alive_stamp[u as usize] != alive || ws.seen_stamp[u as usize] == seen {
                 continue;
             }
             // `a` may be stored in either orientation; pick the one leaving v.
             let oriented = if idx.tail(a) == v { a } else { sibling(a) };
-            seen[u as usize] = true;
+            ws.seen_stamp[u as usize] = seen;
             arcs.push(oriented);
             cost += idx.cost(oriented);
-            stack.push(u);
+            ws.stack.push(u);
         }
     }
 

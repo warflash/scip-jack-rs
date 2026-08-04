@@ -181,7 +181,7 @@
 
 use std::time::Instant;
 
-use crate::graph::{Cost, NodeId};
+use crate::graph::{cmp_cost, Cost, NodeId};
 
 use super::csr::{Csr, DijkstraWorkspace};
 use super::sd_closure::{closure_mst, BottleneckForest, SdClosure};
@@ -406,7 +406,7 @@ pub fn vertex_reductions_watched(
         // Parallel edges reach the same neighbour twice; keep the cheapest.
         let mut star = star;
         star.sort_by(|a, b| {
-            a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            a.0.cmp(&b.0).then(cmp_cost(a.1, b.1))
         });
         star.dedup_by_key(|&mut (u, _)| u);
         let k = star.len();
@@ -420,7 +420,7 @@ pub fn vertex_reductions_watched(
         // condition takes over; ordering the star by cost is what makes that
         // condition provable and what lets the scan stop early.
         let exact = k <= MAX_DEGREE;
-        star.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        star.sort_by(|a, b| cmp_cost(a.1, b.1));
 
         // The exact test spends up to the whole star; the sorted-path condition
         // never compares against more than its largest edge, so it can search a

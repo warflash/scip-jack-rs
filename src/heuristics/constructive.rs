@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use super::PrimalHeuristic;
-use crate::graph::{DirectedGraph, NodeId, ArcId, Cost};
-use crate::graph::algorithms::ShortestPathResult;
+use crate::graph::{cmp_cost, DirectedGraph, NodeId, ArcId, Cost};
 use crate::model::SteinerSolution;
 
 /// Shortest-path-based constructive heuristic (Takahashi & Matsuyama, 1980).
@@ -24,16 +23,83 @@ pub struct ConstructiveHeuristic {
     pub terminals: Vec<NodeId>,
     pub num_starts: u32,
     pub lp_weights: Option<Vec<f64>>,
+    dijkstra_ws: DijkstraWorkspace,
+    prune_ws: PruneWorkspace,
+}
+
+/// Scratch for the repeated multi-source Dijkstras in one constructive run.
+///
+/// The distances and predecessor map are overwritten for every attachment;
+/// keeping them here removes two full vector allocations and one heap
+/// allocation per attachment without changing the scan or tie order.
+struct DijkstraWorkspace {
+    distances: Vec<Cost>,
+    predecessors: Vec<Option<(NodeId, ArcId)>>,
+    heap: std::collections::BinaryHeap<State>,
+    path: Vec<ArcId>,
+}
+
+impl DijkstraWorkspace {
+    fn new(num_nodes: usize) -> Self {
+        Self {
+            distances: vec![f64::INFINITY; num_nodes + 1],
+            predecessors: vec![None; num_nodes + 1],
+            heap: std::collections::BinaryHeap::new(),
+            path: Vec::new(),
+        }
+    }
+
+    fn path_to(&mut self, target: NodeId) -> Option<&[ArcId]> {
+        if self.distances[target as usize] >= f64::INFINITY {
+            return None;
+        }
+        self.path.clear();
+        let mut current = target;
+        while let Some((pred_node, arc_id)) = self.predecessors[current as usize] {
+            self.path.push(arc_id);
+            current = pred_node;
+        }
+        self.path.reverse();
+        Some(&self.path)
+    }
+}
+
+/// Reusable state for leaf pruning. The output arc/node vectors remain owned by
+/// the returned solution; only the membership, degree, incidence, and queue
+/// buffers are recycled between starts.
+#[derive(Default)]
+struct PruneWorkspace {
+    active_arc: Vec<bool>,
+    present_node: Vec<bool>,
+    degree: Vec<u32>,
+    incident: Vec<Vec<ArcId>>,
+    leaves: Vec<NodeId>,
+}
+
+impl PruneWorkspace {
+    fn new(num_nodes: usize, num_arcs: usize) -> Self {
+        Self {
+            active_arc: vec![false; num_arcs],
+            present_node: vec![false; num_nodes + 1],
+            degree: vec![0; num_nodes + 1],
+            incident: vec![Vec::new(); num_nodes + 1],
+            leaves: Vec::new(),
+        }
+    }
 }
 
 impl ConstructiveHeuristic {
     pub fn new(graph: DirectedGraph, root: NodeId, terminals: Vec<NodeId>) -> Self {
+        let num_nodes = graph.num_nodes as usize;
+        let num_arcs = graph.arcs.len();
         Self {
             graph,
             root,
             terminals,
             num_starts: 100,
             lp_weights: None,
+            dijkstra_ws: DijkstraWorkspace::new(num_nodes),
+            prune_ws: PruneWorkspace::new(num_nodes, num_arcs),
         }
     }
 
@@ -64,9 +130,12 @@ impl ConstructiveHeuristic {
     ///
     /// The algorithm grows a tree from the start node, greedily connecting
     /// the nearest unspanned terminal at each step via the shortest path.
-    fn construct_from(&self, start: NodeId, costs: &[Cost]) -> Option<SteinerSolution> {
-        let terminal_set: HashSet<NodeId> = self.terminals.iter().copied().collect();
-
+    fn construct_from(
+        &mut self,
+        start: NodeId,
+        costs: &[Cost],
+        terminal_set: &HashSet<NodeId>,
+    ) -> Option<SteinerSolution> {
         if terminal_set.is_empty() {
             return None;
         }
@@ -74,35 +143,42 @@ impl ConstructiveHeuristic {
         // Track which terminals are already spanned
         let mut unspanned: HashSet<NodeId> = terminal_set.clone();
         // Nodes currently in the tree (always rooted at self.root)
-        let mut tree_nodes: HashSet<NodeId> = HashSet::new();
+        let mut tree_nodes: Vec<NodeId> = Vec::new();
+        let mut in_tree = vec![false; self.graph.num_nodes as usize + 1];
         // Arcs in the solution
-        let mut tree_arcs: HashSet<ArcId> = HashSet::new();
+        let mut tree_arcs: Vec<ArcId> = Vec::new();
+        let mut in_tree_arc = vec![false; self.graph.arcs.len()];
 
         // Always start from root for a valid arborescence
-        tree_nodes.insert(self.root);
+        in_tree[self.root as usize] = true;
+        tree_nodes.push(self.root);
         unspanned.remove(&self.root);
 
         // If start is different from root and is a terminal, connect it first
         if start != self.root && unspanned.contains(&start) {
-            let sp_result = multi_source_dijkstra(&self.graph, &tree_nodes, costs);
-            let dist = sp_result.distances[start as usize];
+            multi_source_dijkstra(&self.graph, &tree_nodes, costs, &mut self.dijkstra_ws);
+            let dist = self.dijkstra_ws.distances[start as usize];
             if dist < f64::INFINITY {
-                if let Some(path) = sp_result.path_to(start) {
-                    for &arc_id in &path {
+                if let Some(path) = self.dijkstra_ws.path_to(start) {
+                    for &arc_id in path {
                         let arc = &self.graph.arcs[arc_id as usize];
-                        tree_arcs.insert(arc_id);
-                        tree_nodes.insert(arc.tail);
-                        tree_nodes.insert(arc.head);
-                    }
-                    unspanned.remove(&start);
-                    let path_nodes: HashSet<NodeId> = path.iter()
-                        .flat_map(|&aid| {
-                            let arc = &self.graph.arcs[aid as usize];
-                            vec![arc.tail, arc.head]
-                        })
-                        .collect();
-                    for node in &path_nodes {
-                        unspanned.remove(node);
+                        if !in_tree_arc[arc_id as usize] {
+                            in_tree_arc[arc_id as usize] = true;
+                            tree_arcs.push(arc_id);
+                        }
+                        if !in_tree[arc.tail as usize] {
+                            in_tree[arc.tail as usize] = true;
+                            tree_nodes.push(arc.tail);
+                        }
+                        if !in_tree[arc.head as usize] {
+                            in_tree[arc.head as usize] = true;
+                            tree_nodes.push(arc.head);
+                        }
+                        // A path has at most two new endpoint checks per arc;
+                        // building a temporary HashSet here only to remove
+                        // terminals made every growth step allocate.
+                        unspanned.remove(&arc.tail);
+                        unspanned.remove(&arc.head);
                     }
                 }
             }
@@ -112,44 +188,49 @@ impl ConstructiveHeuristic {
         while !unspanned.is_empty() {
             let mut best_terminal: Option<NodeId> = None;
             let mut best_distance = f64::INFINITY;
-            let mut best_path: Option<Vec<ArcId>> = None;
 
             // For each node in the current tree, compute shortest paths to find
             // the nearest unspanned terminal.
             // Optimization: compute shortest paths from all tree nodes simultaneously
             // by using a multi-source Dijkstra (insert all tree nodes with distance 0).
-            let sp_result = multi_source_dijkstra(&self.graph, &tree_nodes, costs);
+            multi_source_dijkstra(&self.graph, &tree_nodes, costs, &mut self.dijkstra_ws);
 
             for &terminal in &unspanned {
-                let dist = sp_result.distances[terminal as usize];
+                let dist = self.dijkstra_ws.distances[terminal as usize];
                 if dist < best_distance {
                     best_distance = dist;
                     best_terminal = Some(terminal);
-                    best_path = sp_result.path_to(terminal);
                 }
             }
 
-            match (best_terminal, best_path) {
-                (Some(terminal), Some(path)) => {
+            match best_terminal {
+                Some(terminal) => {
+                    // Reconstruct only the winning path. The previous code
+                    // reconstructed and allocated a path every time the scan
+                    // found a closer terminal, even though all but the last
+                    // candidate were discarded.
+                    let Some(path) = self.dijkstra_ws.path_to(terminal) else {
+                        return None;
+                    };
                     // Add all arcs and nodes on the path to the tree
-                    for &arc_id in &path {
+                    for &arc_id in path {
                         let arc = &self.graph.arcs[arc_id as usize];
-                        tree_arcs.insert(arc_id);
-                        tree_nodes.insert(arc.tail);
-                        tree_nodes.insert(arc.head);
+                        if !in_tree_arc[arc_id as usize] {
+                            in_tree_arc[arc_id as usize] = true;
+                            tree_arcs.push(arc_id);
+                        }
+                        if !in_tree[arc.tail as usize] {
+                            in_tree[arc.tail as usize] = true;
+                            tree_nodes.push(arc.tail);
+                        }
+                        if !in_tree[arc.head as usize] {
+                            in_tree[arc.head as usize] = true;
+                            tree_nodes.push(arc.head);
+                        }
+                        unspanned.remove(&arc.tail);
+                        unspanned.remove(&arc.head);
                     }
                     unspanned.remove(&terminal);
-
-                    // Also remove any other terminals that happen to be on the path
-                    let path_nodes: HashSet<NodeId> = path.iter()
-                        .flat_map(|&aid| {
-                            let arc = &self.graph.arcs[aid as usize];
-                            vec![arc.tail, arc.head]
-                        })
-                        .collect();
-                    for node in &path_nodes {
-                        unspanned.remove(node);
-                    }
                 }
                 _ => {
                     // Cannot reach remaining terminals — infeasible from this start
@@ -159,7 +240,7 @@ impl ConstructiveHeuristic {
         }
 
         // Pruning: remove degree-1 Steiner nodes iteratively
-        let (pruned_arcs, pruned_nodes) = self.prune_tree(&tree_arcs, &terminal_set);
+        let (pruned_arcs, pruned_nodes) = self.prune_tree(&tree_arcs, terminal_set);
 
         // Compute objective value
         let obj: Cost = pruned_arcs.iter()
@@ -167,58 +248,93 @@ impl ConstructiveHeuristic {
             .sum();
 
         Some(SteinerSolution::new(
-            pruned_arcs.into_iter().collect(),
-            pruned_nodes.into_iter().collect(),
+            pruned_arcs,
+            pruned_nodes,
             obj,
         ))
     }
 
     /// Remove degree-1 Steiner (non-terminal) nodes from the tree iteratively.
     fn prune_tree(
-        &self,
-        tree_arcs: &HashSet<ArcId>,
+        &mut self,
+        tree_arcs: &[ArcId],
         terminals: &HashSet<NodeId>,
-    ) -> (HashSet<ArcId>, HashSet<NodeId>) {
-        let mut arcs: HashSet<ArcId> = tree_arcs.clone();
-        let mut nodes: HashSet<NodeId> = HashSet::new();
+    ) -> (Vec<ArcId>, Vec<NodeId>) {
+        let mut arcs = tree_arcs.to_vec();
+        let mut ws = std::mem::take(&mut self.prune_ws);
+        let num_arcs = self.graph.arcs.len();
+        let num_nodes = self.graph.num_nodes as usize;
+        ws.active_arc.resize(num_arcs, false);
+        ws.active_arc.fill(false);
+        ws.present_node.resize(num_nodes + 1, false);
+        ws.present_node.fill(false);
+        ws.degree.resize(num_nodes + 1, 0);
+        ws.degree.fill(0);
+        ws.incident.resize_with(num_nodes + 1, Vec::new);
+        for incident in &mut ws.incident {
+            incident.clear();
+        }
+        ws.leaves.clear();
+        let mut nodes = Vec::new();
 
-        // Collect all nodes in the tree
+        // Collect the tree's incidence lists once. Removing a leaf can then
+        // update only its neighbor instead of rescanning every remaining arc
+        // for every remaining node.
         for &arc_id in &arcs {
+            ws.active_arc[arc_id as usize] = true;
             let arc = &self.graph.arcs[arc_id as usize];
-            nodes.insert(arc.tail);
-            nodes.insert(arc.head);
+            if !ws.present_node[arc.tail as usize] {
+                ws.present_node[arc.tail as usize] = true;
+                nodes.push(arc.tail);
+            }
+            if !ws.present_node[arc.head as usize] {
+                ws.present_node[arc.head as usize] = true;
+                nodes.push(arc.head);
+            }
+            ws.degree[arc.tail as usize] += 1;
+            ws.degree[arc.head as usize] += 1;
+            ws.incident[arc.tail as usize].push(arc_id);
+            ws.incident[arc.head as usize].push(arc_id);
         }
 
-        let mut changed = true;
-        while changed {
-            changed = false;
-            let current_nodes: Vec<NodeId> = nodes.iter().copied().collect();
+        for &node in &nodes {
+            if !terminals.contains(&node)
+                && node != self.root
+                && ws.degree[node as usize] <= 1
+            {
+                ws.leaves.push(node);
+            }
+        }
+        while let Some(node) = ws.leaves.pop() {
+            let node_index = node as usize;
+            if terminals.contains(&node) || node == self.root || ws.degree[node_index] != 1 {
+                continue;
+            }
 
-            for &node in &current_nodes {
-                if terminals.contains(&node) || node == self.root {
-                    continue;
-                }
+            let Some(arc_id) = ws.incident[node_index]
+                .iter()
+                .copied()
+                .find(|&aid| ws.active_arc[aid as usize]) else {
+                ws.degree[node_index] = 0;
+                ws.present_node[node_index] = false;
+                continue;
+            };
+            ws.active_arc[arc_id as usize] = false;
+            ws.degree[node_index] = 0;
+            ws.present_node[node_index] = false;
 
-                // Count arcs incident to this node in the current tree
-                let incident: Vec<ArcId> = arcs.iter()
-                    .copied()
-                    .filter(|&aid| {
-                        let arc = &self.graph.arcs[aid as usize];
-                        arc.tail == node || arc.head == node
-                    })
-                    .collect();
-
-                // Degree-1 Steiner node: remove it and its incident arc
-                if incident.len() <= 1 {
-                    nodes.remove(&node);
-                    for aid in incident {
-                        arcs.remove(&aid);
-                    }
-                    changed = true;
-                }
+            let arc = &self.graph.arcs[arc_id as usize];
+            let other = if arc.tail == node { arc.head } else { arc.tail };
+            let other_index = other as usize;
+            ws.degree[other_index] = ws.degree[other_index].saturating_sub(1);
+            if !terminals.contains(&other) && other != self.root && ws.degree[other_index] <= 1 {
+                ws.leaves.push(other);
             }
         }
 
+        arcs.retain(|&arc_id| ws.active_arc[arc_id as usize]);
+        nodes.retain(|&node| ws.present_node[node as usize]);
+        self.prune_ws = ws;
         (arcs, nodes)
     }
 }
@@ -226,6 +342,10 @@ impl ConstructiveHeuristic {
 impl PrimalHeuristic for ConstructiveHeuristic {
     fn run(&mut self) -> Option<SteinerSolution> {
         let costs = self.effective_costs();
+        let terminal_set: HashSet<NodeId> = self.terminals.iter().copied().collect();
+        if terminal_set.is_empty() {
+            return None;
+        }
         let mut best: Option<SteinerSolution> = None;
 
         // Build list of starting nodes: prefer terminals, then use root
@@ -238,7 +358,7 @@ impl PrimalHeuristic for ConstructiveHeuristic {
         start_nodes.truncate(self.num_starts as usize);
 
         for start in start_nodes {
-            if let Some(sol) = self.construct_from(start, &costs) {
+            if let Some(sol) = self.construct_from(start, &costs, &terminal_set) {
                 match &best {
                     None => best = Some(sol),
                     Some(current_best) if sol.objective_value < current_best.objective_value => {
@@ -256,9 +376,8 @@ impl PrimalHeuristic for ConstructiveHeuristic {
 /// Multi-source Dijkstra: computes shortest distances from a SET of source nodes.
 /// All source nodes start with distance 0.
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 struct State {
     cost: Cost,
     node: NodeId,
@@ -268,8 +387,7 @@ impl Eq for State {}
 
 impl Ord for State {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.cost.partial_cmp(&self.cost)
-            .unwrap_or(Ordering::Equal)
+        cmp_cost(other.cost, self.cost)
             .then_with(|| self.node.cmp(&other.node))
     }
 }
@@ -282,22 +400,25 @@ impl PartialOrd for State {
 
 fn multi_source_dijkstra(
     graph: &DirectedGraph,
-    sources: &HashSet<NodeId>,
+    sources: &[NodeId],
     costs: &[Cost],
-) -> ShortestPathResult {
+    ws: &mut DijkstraWorkspace,
+) {
     let n = graph.num_nodes as usize;
-    let mut distances = vec![f64::INFINITY; n + 1];
-    let mut predecessors: Vec<Option<(NodeId, ArcId)>> = vec![None; n + 1];
-    let mut heap = BinaryHeap::new();
+    ws.distances.resize(n + 1, f64::INFINITY);
+    ws.distances.fill(f64::INFINITY);
+    ws.predecessors.resize(n + 1, None);
+    ws.predecessors.fill(None);
+    ws.heap.clear();
 
     // Initialize all source nodes with distance 0
     for &source in sources {
-        distances[source as usize] = 0.0;
-        heap.push(State { cost: 0.0, node: source });
+        ws.distances[source as usize] = 0.0;
+        ws.heap.push(State { cost: 0.0, node: source });
     }
 
-    while let Some(State { cost, node }) = heap.pop() {
-        if cost > distances[node as usize] {
+    while let Some(State { cost, node }) = ws.heap.pop() {
+        if cost > ws.distances[node as usize] {
             continue;
         }
 
@@ -305,15 +426,13 @@ fn multi_source_dijkstra(
             let arc_cost = costs[arc_id as usize];
             let next_cost = cost + arc_cost;
 
-            if next_cost < distances[head as usize] {
-                distances[head as usize] = next_cost;
-                predecessors[head as usize] = Some((node, arc_id));
-                heap.push(State { cost: next_cost, node: head });
+            if next_cost < ws.distances[head as usize] {
+                ws.distances[head as usize] = next_cost;
+                ws.predecessors[head as usize] = Some((node, arc_id));
+                ws.heap.push(State { cost: next_cost, node: head });
             }
         }
     }
-
-    ShortestPathResult { distances, predecessors }
 }
 
 #[cfg(test)]

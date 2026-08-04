@@ -65,7 +65,7 @@
 
 use std::time::Instant;
 
-use crate::graph::{Cost, NodeId};
+use crate::graph::{cmp_cost, Cost, NodeId};
 
 use super::csr::Csr;
 use super::sd_closure::SdClosure;
@@ -424,7 +424,7 @@ fn nearest_terminals(terminals: &[NodeId], dist: &[Vec<Cost>], num_nodes: usize)
                 scratch.push((dv, i as u32));
             }
         }
-        scratch.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        scratch.sort_by(|a, b| cmp_cost(a.0, b.0));
         scratch.truncate(NEAREST_TERMINALS);
         out[v] = scratch.iter().map(|&(_, i)| i).collect();
     }

@@ -13,7 +13,7 @@ pub mod vertex_test;
 use std::collections::{HashMap, HashSet, BinaryHeap};
 use std::cmp::Ordering;
 use std::time::Instant;
-use crate::graph::{UndirectedGraph, NodeId, EdgeId, Cost, NodeType, Node, Edge, SteinerInstance};
+use crate::graph::{cmp_cost, UndirectedGraph, NodeId, EdgeId, Cost, NodeType, Node, Edge, SteinerInstance};
 
 /// A graph wrapper that supports efficient node/edge removal for preprocessing.
 /// Uses validity flags to mark removed elements without rebuilding the structure.
@@ -21,11 +21,15 @@ use crate::graph::{UndirectedGraph, NodeId, EdgeId, Cost, NodeType, Node, Edge, 
 pub struct ReducibleGraph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
-    pub adjacency: HashMap<NodeId, Vec<(NodeId, EdgeId)>>,
+    /// Adjacency indexed by the dense, one-based node id. Preprocessing calls
+    /// `degree` and `valid_neighbors` millions of times; hashing a `u32` for
+    /// every such call was unnecessary overhead.
+    pub adjacency: Vec<Vec<(NodeId, EdgeId)>>,
     pub terminals: HashSet<NodeId>,
     pub root: Option<NodeId>,
-    node_valid: Vec<bool>,
-    edge_valid: Vec<bool>,
+    node_valid: Vec<u8>,
+    edge_valid: Vec<u8>,
+    live_degree: Vec<usize>,
     /// Edges created by degree-2 contraction (should not be subject to SD test)
     pub contracted_edges: HashSet<EdgeId>,
     /// Nodes that have been contracted (degree-2 removal targets)
@@ -41,15 +45,11 @@ impl ReducibleGraph {
         let m = graph.edges.len();
 
         let terminal_set: HashSet<NodeId> = instance.terminals.iter().copied().collect();
-        let mut adjacency: HashMap<NodeId, Vec<(NodeId, EdgeId)>> = HashMap::new();
-
+        let adjacency = graph.adjacency.clone();
+        let mut live_degree = vec![0usize; n + 1];
         for edge in &graph.edges {
-            adjacency.entry(edge.src).or_default().push((edge.dst, edge.id));
-            adjacency.entry(edge.dst).or_default().push((edge.src, edge.id));
-        }
-
-        for node in &graph.nodes {
-            adjacency.entry(node.id).or_default();
+            live_degree[edge.src as usize] += 1;
+            live_degree[edge.dst as usize] += 1;
         }
 
         Self {
@@ -58,37 +58,46 @@ impl ReducibleGraph {
             adjacency,
             terminals: terminal_set,
             root: instance.root,
-            node_valid: vec![true; n + 1],
-            edge_valid: vec![true; m],
+            node_valid: vec![1; n + 1],
+            edge_valid: vec![1; m],
+            live_degree,
             contracted_edges: HashSet::new(),
             contracted_nodes: HashSet::new(),
             offset: 0.0,
         }
     }
 
+    #[inline]
     pub fn is_node_valid(&self, node: NodeId) -> bool {
-        (node as usize) < self.node_valid.len() && self.node_valid[node as usize]
+        (node as usize) < self.node_valid.len() && self.node_valid[node as usize] != 0
     }
 
+    #[inline]
     pub fn is_edge_valid(&self, edge: EdgeId) -> bool {
-        (edge as usize) < self.edge_valid.len() && self.edge_valid[edge as usize]
+        (edge as usize) < self.edge_valid.len() && self.edge_valid[edge as usize] != 0
     }
 
+    #[inline]
     pub fn degree(&self, node: NodeId) -> usize {
-        self.adjacency.get(&node).map_or(0, |neighbors| {
-            neighbors.iter().filter(|&&(_, eid)| self.is_edge_valid(eid)).count()
-        })
+        self.live_degree.get(node as usize).copied().unwrap_or(0)
     }
 
+    #[inline]
     pub fn valid_neighbors(&self, node: NodeId) -> Vec<(NodeId, EdgeId)> {
-        self.adjacency.get(&node).map_or(Vec::new(), |neighbors| {
-            neighbors.iter()
-                .filter(|&&(n, eid)| self.is_node_valid(n) && self.is_edge_valid(eid))
-                .copied()
-                .collect()
+        self.valid_neighbors_iter(node).collect()
+    }
+
+    #[inline]
+    pub fn valid_neighbors_iter(&self, node: NodeId) -> impl Iterator<Item = (NodeId, EdgeId)> + '_ {
+        let adjacency = &self.adjacency[node as usize];
+        let node_valid = &self.node_valid;
+        let edge_valid = &self.edge_valid;
+        adjacency.iter().copied().filter(move |&(neighbor, eid)| {
+            node_valid[neighbor as usize] != 0 && edge_valid[eid as usize] != 0
         })
     }
 
+    #[inline]
     pub fn is_terminal(&self, node: NodeId) -> bool {
         self.terminals.contains(&node)
     }
@@ -96,14 +105,14 @@ impl ReducibleGraph {
     /// Remove a node and all its incident edges.
     pub fn remove_node(&mut self, node: NodeId) {
         if (node as usize) < self.node_valid.len() {
-            self.node_valid[node as usize] = false;
+            self.node_valid[node as usize] = 0;
         }
         // Invalidate all incident edges
-        if let Some(neighbors) = self.adjacency.get(&node).cloned() {
-            for &(_, eid) in &neighbors {
-                if (eid as usize) < self.edge_valid.len() {
-                    self.edge_valid[eid as usize] = false;
-                }
+        if (node as usize) < self.adjacency.len() {
+            let len = self.adjacency[node as usize].len();
+            for i in 0..len {
+                let eid = self.adjacency[node as usize][i].1;
+                self.remove_edge(eid);
             }
         }
     }
@@ -113,30 +122,43 @@ impl ReducibleGraph {
     /// caller is the extended reduction's defensive connectivity rollback.
     pub fn restore_edge(&mut self, edge_id: EdgeId) {
         if (edge_id as usize) < self.edge_valid.len() {
-            self.edge_valid[edge_id as usize] = true;
+            if self.edge_valid[edge_id as usize] == 0 {
+                self.edge_valid[edge_id as usize] = 1;
+                let edge = &self.edges[edge_id as usize];
+                self.live_degree[edge.src as usize] += 1;
+                self.live_degree[edge.dst as usize] += 1;
+            }
         }
     }
 
     /// Remove an edge (keep nodes).
     pub fn remove_edge(&mut self, edge_id: EdgeId) {
         if (edge_id as usize) < self.edge_valid.len() {
-            self.edge_valid[edge_id as usize] = false;
+            if self.edge_valid[edge_id as usize] != 0 {
+                self.edge_valid[edge_id as usize] = 0;
+                let edge = &self.edges[edge_id as usize];
+                self.live_degree[edge.src as usize] = self.live_degree[edge.src as usize].saturating_sub(1);
+                self.live_degree[edge.dst as usize] = self.live_degree[edge.dst as usize].saturating_sub(1);
+            }
         }
     }
 
     /// Contract a degree-2 Steiner node: replace v with direct edge between its two neighbors.
     /// Returns the cost of the new edge (if contraction happened), and the edges that were removed.
     pub fn contract_degree2(&mut self, node: NodeId) -> Option<(EdgeId, Cost)> {
-        let neighbors = self.valid_neighbors(node);
-        if neighbors.len() != 2 {
-            return None;
-        }
+        let (n1, e1, n2, e2) = {
+            let mut neighbors = self.valid_neighbors_iter(node);
+            let (Some((n1, e1)), Some((n2, e2))) = (neighbors.next(), neighbors.next()) else {
+                return None;
+            };
+            if neighbors.next().is_some() {
+                return None;
+            }
+            (n1, e1, n2, e2)
+        };
         if self.is_terminal(node) {
             return None;
         }
-
-        let (n1, e1) = neighbors[0];
-        let (n2, e2) = neighbors[1];
 
         // Both edges lead to the same vertex. Contracting would create a loop at
         // `n1`, and a loop is in no tree — which is also why `node` itself is in
@@ -158,15 +180,17 @@ impl ReducibleGraph {
 
         self.remove_edge(e1);
         self.remove_edge(e2);
-        self.node_valid[node as usize] = false;
+        self.node_valid[node as usize] = 0;
         self.contracted_nodes.insert(node);
 
         let new_eid = self.edges.len() as EdgeId;
         self.edges.push(Edge { id: new_eid, src: n1, dst: n2, cost: new_cost });
-        self.edge_valid.push(true);
+        self.edge_valid.push(1);
         self.contracted_edges.insert(new_eid);
-        self.adjacency.entry(n1).or_default().push((n2, new_eid));
-        self.adjacency.entry(n2).or_default().push((n1, new_eid));
+        self.adjacency[n1 as usize].push((n2, new_eid));
+        self.adjacency[n2 as usize].push((n1, new_eid));
+        self.live_degree[n1 as usize] += 1;
+        self.live_degree[n2 as usize] += 1;
 
         Some((new_eid, new_cost))
     }
@@ -192,36 +216,43 @@ impl ReducibleGraph {
         debug_assert_ne!(keep, drop);
         let cost = self.edges[eid as usize].cost;
         self.offset += cost;
-        self.edge_valid[eid as usize] = false;
+        self.remove_edge(eid);
 
-        let incident = self.adjacency.get(&drop).cloned().unwrap_or_default();
+        let incident = if let Some(list) = self.adjacency.get_mut(drop as usize) {
+            std::mem::take(list)
+        } else {
+            Vec::new()
+        };
         for (other, f) in incident {
             if f == eid || !self.is_edge_valid(f) {
                 continue;
             }
             if other == keep || other == drop {
                 // Would become a self-loop at the merged vertex.
-                self.edge_valid[f as usize] = false;
+                self.remove_edge(f);
                 continue;
             }
+            // Remove the old incidence before moving the endpoint. The new
+            // incidence at `keep` is added below.
+            self.remove_edge(f);
             let edge = &mut self.edges[f as usize];
             if edge.src == drop {
                 edge.src = keep;
             } else {
                 edge.dst = keep;
             }
-            if let Some(list) = self.adjacency.get_mut(&other) {
+            if let Some(list) = self.adjacency.get_mut(other as usize) {
                 for slot in list.iter_mut() {
                     if slot.1 == f {
                         slot.0 = keep;
                     }
                 }
             }
-            self.adjacency.entry(keep).or_default().push((other, f));
+            self.adjacency[keep as usize].push((other, f));
+            self.restore_edge(f);
         }
 
-        self.adjacency.insert(drop, Vec::new());
-        self.node_valid[drop as usize] = false;
+        self.node_valid[drop as usize] = 0;
         self.terminals.remove(&drop);
         self.terminals.insert(keep);
         if self.root == Some(drop) {
@@ -243,7 +274,7 @@ impl ReducibleGraph {
             if cost > dist[node as usize] {
                 continue;
             }
-            for (neighbor, eid) in self.valid_neighbors(node) {
+            for (neighbor, eid) in self.valid_neighbors_iter(node) {
                 let edge_cost = self.edges[eid as usize].cost;
                 let new_cost = cost + edge_cost;
                 if new_cost < dist[neighbor as usize] {
@@ -360,7 +391,7 @@ impl ReducibleGraph {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 struct DijkEntry {
     cost: Cost,
     node: NodeId,
@@ -370,8 +401,7 @@ impl Eq for DijkEntry {}
 
 impl Ord for DijkEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.cost.partial_cmp(&self.cost)
-            .unwrap_or(Ordering::Equal)
+        cmp_cost(other.cost, self.cost)
             .then_with(|| self.node.cmp(&other.node))
     }
 }

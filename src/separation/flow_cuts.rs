@@ -1,5 +1,5 @@
 use super::Separator;
-use crate::graph::{DirectedGraph, NodeId, ArcId};
+use crate::graph::{cmp_cost, DirectedGraph, NodeId, ArcId};
 use crate::graph::algorithms::MaxFlowWorkspace;
 
 /// Separates violated directed cut constraints (Steiner cuts).
@@ -59,6 +59,10 @@ pub struct FlowCutSeparator<'a> {
     /// The last pass ran out of clock before it had looked at every terminal it
     /// meant to. See [`FlowCutSeparator::was_truncated`].
     truncated: bool,
+    /// Canonical cut signatures reused across sweeps. The rows themselves are
+    /// returned to the caller, but retaining the hash table avoids rebuilding
+    /// its buckets for every LP round.
+    seen: std::collections::HashSet<Vec<ArcId>>,
 }
 
 /// Cuts emitted per terminal before moving on. Nested cuts are disjoint by
@@ -95,6 +99,7 @@ impl<'a> FlowCutSeparator<'a> {
             last_full_secs: 0.0,
             lp_secs: f64::INFINITY,
             truncated: false,
+            seen: std::collections::HashSet::new(),
         }
     }
 
@@ -216,7 +221,7 @@ impl<'a> FlowCutSeparator<'a> {
                 }
                 // Compute total incoming flow to this Steiner node
                 let in_flow: f64 = self.graph.delta_minus(node.id).iter()
-                    .map(|&(_, aid)| lp_solution.get(aid as usize).copied().unwrap_or(0.0))
+                    .map(|&(_, aid)| lp_solution[aid as usize])
                     .sum();
                 if in_flow > 0.01 && in_flow < 0.999 {
                     steiner_candidates.push((node.id, in_flow));
@@ -227,27 +232,26 @@ impl<'a> FlowCutSeparator<'a> {
             steiner_candidates.sort_by(|a, b| {
                 let frac_a = (a.1 - 0.5).abs();
                 let frac_b = (b.1 - 0.5).abs();
-                frac_a.partial_cmp(&frac_b).unwrap_or(std::cmp::Ordering::Equal)
+                cmp_cost(frac_a, frac_b)
             });
 
             let ws = self.workspace.as_mut().unwrap();
             for &(node, in_flow) in steiner_candidates.iter().take(10) {
-                let result = ws.compute(self.root, node, lp_solution, &self.graph.arcs);
-                if result.flow_value < in_flow - self.violation_tolerance {
-                    let violation = in_flow - result.flow_value;
-                    if violation > self.violation_tolerance {
-                        violated_cuts.push(SteinerCut {
-                            cut_set: result.source_side,
-                            cut_arcs: result.cut_arcs,
-                            separated_terminal: node,
-                            violation,
-                        });
-                    }
+                let result = ws.compute_view_without_sink(self.root, node, lp_solution, &self.graph.arcs);
+                if result.flow_value < in_flow - self.violation_tolerance
+                    && in_flow - result.flow_value > self.violation_tolerance
+                {
+                    violated_cuts.push(SteinerCut {
+                        cut_set: result.source_side.to_vec(),
+                        cut_arcs: result.cut_arcs.to_vec(),
+                        separated_terminal: node,
+                        violation: in_flow - result.flow_value,
+                    });
                 }
             }
         }
 
-        violated_cuts.sort_by(|a, b| b.violation.partial_cmp(&a.violation).unwrap_or(std::cmp::Ordering::Equal));
+        violated_cuts.sort_by(|a, b| cmp_cost(b.violation, a.violation));
 
         self.cuts_found = violated_cuts.len() as u32;
         self.total_cuts_generated += self.cuts_found;
@@ -271,7 +275,7 @@ impl<'a> FlowCutSeparator<'a> {
         // Stop once the round has enough material: the solver installs a bounded
         // number per round, and further max-flows are wasted work.
         let max_violated = 200;
-        let mut seen: std::collections::HashSet<Vec<ArcId>> = std::collections::HashSet::new();
+        self.seen.clear();
 
         'terminals: for &terminal in order {
             if terminal == self.root {
@@ -291,28 +295,43 @@ impl<'a> FlowCutSeparator<'a> {
 
             for _ in 0..MAX_NESTED {
                 let ws = self.workspace.as_mut().unwrap();
-                let result = ws.compute(self.root, terminal, &self.capacities, &self.graph.arcs);
-                if result.flow_value >= 1.0 - self.violation_tolerance {
+                // First compute only the source-side cut. The backward residual
+                // sweep for the sink-nearest variant is needed only when this
+                // flow is actually violated.
+                let flow_value = {
+                    let result = ws.compute_view_until(
+                        self.root, terminal, &self.capacities, &self.graph.arcs,
+                        1.0 - self.violation_tolerance,
+                    );
+                    result.flow_value
+                };
+                if flow_value >= 1.0 - self.violation_tolerance {
                     break;
                 }
 
-                let source_side = result.source_side;
+                let result = ws.finish_sink_cut(terminal, &self.graph.arcs, flow_value);
+                let source_side = result.source_side.to_vec();
+                let cut_arcs = result.cut_arcs.to_vec();
+                let sink_cut_arcs = result.sink_cut_arcs.to_vec();
+                drop(result);
                 let mut emitted = false;
-                for arcs in [result.cut_arcs, result.sink_cut_arcs] {
+                for arcs in [cut_arcs, sink_cut_arcs] {
                     if arcs.is_empty() {
                         continue;
                     }
                     // Score against the true LP values, never the creeping ones.
                     let load: f64 = arcs
                         .iter()
-                        .map(|&a| lp_solution.get(a as usize).copied().unwrap_or(0.0))
+                        .map(|&a| lp_solution[a as usize])
                         .sum();
                     if load >= 1.0 - self.violation_tolerance {
                         continue;
                     }
-                    let mut key = arcs.clone();
-                    key.sort_unstable();
-                    if !seen.insert(key) {
+                    // MaxFlowWorkspace scans the graph's arc array in id order,
+                    // so both cut variants are already canonical. Sorting the
+                    // same row again was pure separator overhead on every
+                    // nested flow.
+                    if !self.seen.insert(arcs.clone()) {
                         continue;
                     }
                     // Saturating the emitted arcs is what makes the next flow

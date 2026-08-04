@@ -1,5 +1,5 @@
-use std::collections::{HashSet, VecDeque};
-use crate::graph::{DirectedGraph, NodeId, ArcId};
+use std::collections::VecDeque;
+use crate::graph::{cmp_cost, DirectedGraph, NodeId, ArcId};
 
 /// Terminal-Free (TF) set cut separator (Section 11.3 of research memo).
 ///
@@ -27,65 +27,80 @@ pub struct TfCutSeparator<'a> {
     terminals: &'a [NodeId],
     pub cuts_found: u32,
     pub violation_tolerance: f64,
+    terminal_flags: Vec<u8>,
+    x: Vec<f64>,
+    candidates: Vec<(usize, f64)>,
+    residual_adj: Vec<Vec<(usize, usize)>>,
+    residual_cap: Vec<f64>,
+    parent: Vec<Option<(usize, usize)>>,
+    visited: Vec<bool>,
+    reachable: Vec<bool>,
+    queue: VecDeque<usize>,
 }
 
 impl<'a> TfCutSeparator<'a> {
     pub fn new(graph: &'a DirectedGraph, terminals: &'a [NodeId]) -> Self {
+        let max_node = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) as usize;
+        let total_nodes = max_node + 3;
+        let num_edges = graph.arcs.len() / 2;
+        let mut terminal_flags = vec![0u8; max_node + 1];
+        for &t in terminals {
+            terminal_flags[t as usize] = 1;
+        }
         Self {
             graph,
             terminals,
             cuts_found: 0,
             violation_tolerance: 1e-4,
+            terminal_flags,
+            x: Vec::with_capacity(num_edges),
+            candidates: Vec::new(),
+            residual_adj: vec![Vec::new(); total_nodes],
+            residual_cap: Vec::with_capacity(graph.arcs.len() + terminals.len() * 2 + 4),
+            parent: vec![None; total_nodes],
+            visited: vec![false; total_nodes],
+            reachable: vec![false; total_nodes],
+            queue: VecDeque::with_capacity(total_nodes),
         }
     }
 
     pub fn find_violated_cuts(&mut self, lp_solution: &[f64]) -> Vec<TfCut> {
         let num_arcs = self.graph.arcs.len();
         let num_edges = num_arcs / 2;
-        let terminal_set: HashSet<NodeId> = self.terminals.iter().copied().collect();
 
-        let mut x: Vec<f64> = vec![0.0; num_edges];
+        self.x.resize(num_edges, 0.0);
         for i in 0..num_edges {
-            let fwd = lp_solution.get(2 * i).copied().unwrap_or(0.0);
-            let rev = lp_solution.get(2 * i + 1).copied().unwrap_or(0.0);
-            x[i] = fwd + rev;
+            let fwd = lp_solution[2 * i];
+            let rev = lp_solution[2 * i + 1];
+            self.x[i] = fwd + rev;
         }
 
         let max_node = self.graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) as usize;
-
-        // Build undirected adjacency: node -> [(neighbor, edge_idx)]
-        let mut adj: Vec<Vec<(NodeId, usize)>> = vec![Vec::new(); max_node + 1];
-        for i in 0..num_edges {
-            if x[i] < 1e-8 { continue; }
-            let arc = &self.graph.arcs[2 * i];
-            adj[arc.tail as usize].push((arc.head, i));
-            adj[arc.head as usize].push((arc.tail, i));
-        }
 
         let mut violated_cuts = Vec::new();
 
         // Collect candidate edges sorted by x_e descending (most fractional first).
         // Only check top candidates to avoid O(|E|) max-flow computations on dense graphs.
-        let mut candidates: Vec<(usize, f64)> = (0..num_edges)
-            .filter(|&i| x[i] >= 0.1)
+        self.candidates.clear();
+        self.candidates.extend((0..num_edges)
+            .filter(|&i| self.x[i] >= 0.1)
             .filter(|&i| {
                 let arc = &self.graph.arcs[2 * i];
-                !terminal_set.contains(&arc.tail) && !terminal_set.contains(&arc.head)
+                self.terminal_flags[arc.tail as usize] == 0
+                    && self.terminal_flags[arc.head as usize] == 0
             })
-            .map(|i| (i, x[i]))
-            .collect();
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        candidates.truncate(50);
+            .map(|i| (i, self.x[i])));
+        self.candidates.sort_by(|a, b| cmp_cost(b.1, a.1));
+        self.candidates.truncate(50);
 
-        for (edge_idx, x_val) in candidates {
+        for i in 0..self.candidates.len() {
+            let (edge_idx, x_val) = self.candidates[i];
             let arc = &self.graph.arcs[2 * edge_idx];
             let u = arc.tail;
             let v = arc.head;
             let threshold = 2.0 * x_val;
 
-            if let Some(cut) = self.find_min_cut_to_terminals(
-                u, v, edge_idx, &x, &adj, &terminal_set, max_node, threshold,
-            ) {
+            if let Some(cut) = self.find_min_cut_to_terminals(u, v, edge_idx, max_node, threshold) {
                 violated_cuts.push(cut);
             }
         }
@@ -97,25 +112,20 @@ impl<'a> TfCutSeparator<'a> {
     /// Find min-cut from merged {u,v} to terminal set.
     /// Returns a TfCut if the min-cut value < threshold.
     fn find_min_cut_to_terminals(
-        &self,
+        &mut self,
         u: NodeId,
         v: NodeId,
         edge_idx: usize,
-        x: &[f64],
-        _adj: &[Vec<(NodeId, usize)>],
-        _terminal_set: &HashSet<NodeId>,
         max_node: usize,
         threshold: f64,
     ) -> Option<TfCut> {
-        let num_edges = x.len();
+        let num_edges = self.x.len();
 
         // Max-flow from super-source (representing merged {u,v}) to super-sink (terminals).
         // We use BFS-based augmenting paths on the undirected capacities.
         // Node IDs: 0..max_node are graph nodes, max_node+1 = super-source, max_node+2 = super-sink
         let source = max_node + 1;
         let sink = max_node + 2;
-        let total_nodes = max_node + 3;
-
         // Residual capacities stored per edge direction.
         // For undirected edge i between a and b: capacity x[i] in both directions.
         // Plus source->u, source->v (infinite), and terminal->sink (infinite).
@@ -126,43 +136,45 @@ impl<'a> TfCutSeparator<'a> {
         // Plus extra edges for source/sink connections.
 
         // Simpler approach: sparse residual with Vec<(neighbor, residual_cap, rev_edge_idx)>
-        let mut graph_adj: Vec<Vec<(usize, usize)>> = vec![Vec::new(); total_nodes];
-        let mut capacities: Vec<f64> = Vec::new();
+        for adj in &mut self.residual_adj {
+            adj.clear();
+        }
+        self.residual_cap.clear();
 
         // Add graph edges (undirected = two directed)
         for i in 0..num_edges {
-            if x[i] < 1e-8 { continue; }
+            if self.x[i] < 1e-8 { continue; }
             let arc = &self.graph.arcs[2 * i];
             let a = arc.tail as usize;
             let b = arc.head as usize;
 
-            let fwd_idx = capacities.len();
-            capacities.push(x[i]);
-            let rev_idx = capacities.len();
-            capacities.push(x[i]);
+            let fwd_idx = self.residual_cap.len();
+            self.residual_cap.push(self.x[i]);
+            let rev_idx = self.residual_cap.len();
+            self.residual_cap.push(self.x[i]);
 
-            graph_adj[a].push((b, fwd_idx));
-            graph_adj[b].push((a, rev_idx));
+            self.residual_adj[a].push((b, fwd_idx));
+            self.residual_adj[b].push((a, rev_idx));
         }
 
         // Source -> u, Source -> v (infinite capacity)
         for &node in &[u, v] {
-            let fwd_idx = capacities.len();
-            capacities.push(inf_cap);
-            let rev_idx = capacities.len();
-            capacities.push(0.0);
-            graph_adj[source].push((node as usize, fwd_idx));
-            graph_adj[node as usize].push((source, rev_idx));
+            let fwd_idx = self.residual_cap.len();
+            self.residual_cap.push(inf_cap);
+            let rev_idx = self.residual_cap.len();
+            self.residual_cap.push(0.0);
+            self.residual_adj[source].push((node as usize, fwd_idx));
+            self.residual_adj[node as usize].push((source, rev_idx));
         }
 
         // Terminal -> sink (infinite capacity)
         for &t in self.terminals {
-            let fwd_idx = capacities.len();
-            capacities.push(inf_cap);
-            let rev_idx = capacities.len();
-            capacities.push(0.0);
-            graph_adj[t as usize].push((sink, fwd_idx));
-            graph_adj[sink].push((t as usize, rev_idx));
+            let fwd_idx = self.residual_cap.len();
+            self.residual_cap.push(inf_cap);
+            let rev_idx = self.residual_cap.len();
+            self.residual_cap.push(0.0);
+            self.residual_adj[t as usize].push((sink, fwd_idx));
+            self.residual_adj[sink].push((t as usize, rev_idx));
         }
 
         // Build reverse edge mapping: for each edge at index i, its reverse is i^1
@@ -177,23 +189,23 @@ impl<'a> TfCutSeparator<'a> {
             }
 
             // BFS to find augmenting path
-            let mut parent: Vec<Option<(usize, usize)>> = vec![None; total_nodes]; // (from_node, edge_idx)
-            let mut visited = vec![false; total_nodes];
-            let mut queue = VecDeque::new();
-            queue.push_back(source);
-            visited[source] = true;
+            self.parent.fill(None); // (from_node, edge_idx)
+            self.visited.fill(false);
+            self.queue.clear();
+            self.queue.push_back(source);
+            self.visited[source] = true;
 
             let mut found_sink = false;
-            while let Some(node) = queue.pop_front() {
+            while let Some(node) = self.queue.pop_front() {
                 if node == sink {
                     found_sink = true;
                     break;
                 }
-                for &(neighbor, edge_idx) in &graph_adj[node] {
-                    if !visited[neighbor] && capacities[edge_idx] > 1e-10 {
-                        visited[neighbor] = true;
-                        parent[neighbor] = Some((node, edge_idx));
-                        queue.push_back(neighbor);
+                for &(neighbor, edge_idx) in &self.residual_adj[node] {
+                    if !self.visited[neighbor] && self.residual_cap[edge_idx] > 1e-10 {
+                        self.visited[neighbor] = true;
+                        self.parent[neighbor] = Some((node, edge_idx));
+                        self.queue.push_back(neighbor);
                     }
                 }
             }
@@ -203,16 +215,16 @@ impl<'a> TfCutSeparator<'a> {
             // Find bottleneck
             let mut bottleneck = f64::INFINITY;
             let mut node = sink;
-            while let Some((prev, edge_idx)) = parent[node] {
-                bottleneck = bottleneck.min(capacities[edge_idx]);
+            while let Some((prev, edge_idx)) = self.parent[node] {
+                bottleneck = bottleneck.min(self.residual_cap[edge_idx]);
                 node = prev;
             }
 
             // Update residuals
             let mut node = sink;
-            while let Some((prev, edge_idx)) = parent[node] {
-                capacities[edge_idx] -= bottleneck;
-                capacities[edge_idx ^ 1] += bottleneck;
+            while let Some((prev, edge_idx)) = self.parent[node] {
+                self.residual_cap[edge_idx] -= bottleneck;
+                self.residual_cap[edge_idx ^ 1] += bottleneck;
                 node = prev;
             }
 
@@ -226,32 +238,31 @@ impl<'a> TfCutSeparator<'a> {
         }
 
         // Extract min-cut: source-reachable set in residual graph
-        let mut reachable = vec![false; total_nodes];
-        let mut queue = VecDeque::new();
-        queue.push_back(source);
-        reachable[source] = true;
-        while let Some(node) = queue.pop_front() {
-            for &(neighbor, edge_idx) in &graph_adj[node] {
-                if !reachable[neighbor] && capacities[edge_idx] > 1e-10 {
-                    reachable[neighbor] = true;
-                    queue.push_back(neighbor);
+        self.reachable.fill(false);
+        self.queue.clear();
+        self.queue.push_back(source);
+        self.reachable[source] = true;
+        while let Some(node) = self.queue.pop_front() {
+            for &(neighbor, edge_idx) in &self.residual_adj[node] {
+                if !self.reachable[neighbor] && self.residual_cap[edge_idx] > 1e-10 {
+                    self.reachable[neighbor] = true;
+                    self.queue.push_back(neighbor);
                 }
             }
         }
 
         // Set S = reachable graph nodes (excluding source/sink pseudo-nodes)
         let set_nodes: Vec<NodeId> = (0..=max_node)
-            .filter(|&n| reachable[n] && n != source && n != sink)
+            .filter(|&n| self.reachable[n])
             .map(|n| n as NodeId)
             .collect();
 
         // Boundary edges: edges with one endpoint in S, one outside
-        let set_flags: HashSet<NodeId> = set_nodes.iter().copied().collect();
         let mut boundary_arcs: Vec<(ArcId, ArcId)> = Vec::new();
         for i in 0..num_edges {
             let arc = &self.graph.arcs[2 * i];
-            let a_in = set_flags.contains(&arc.tail);
-            let b_in = set_flags.contains(&arc.head);
+            let a_in = self.reachable[arc.tail as usize];
+            let b_in = self.reachable[arc.head as usize];
             if a_in != b_in {
                 boundary_arcs.push(((2 * i) as ArcId, (2 * i + 1) as ArcId));
             }

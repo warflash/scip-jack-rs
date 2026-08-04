@@ -1,6 +1,6 @@
 use std::collections::BinaryHeap;
 use std::cmp::Ordering;
-use crate::graph::{UndirectedGraph, NodeId, Cost};
+use crate::graph::{cmp_cost, UndirectedGraph, NodeId, Cost};
 
 /// Dreyfus-Wagner DP for the Steiner tree problem in undirected graphs.
 ///
@@ -101,15 +101,12 @@ pub fn dreyfus_wagner(graph: &UndirectedGraph, terminals: &[NodeId]) -> Option<D
             if cost > dp[s_idx][v] + 1e-10 {
                 continue;
             }
-            if let Some(neighbors) = graph.adjacency.get(&(v as u32)) {
-                for &(u, eid) in neighbors {
-                    let edge_cost = graph.edges[eid as usize].cost;
-                    let new_cost = cost + edge_cost;
-                    if new_cost < dp[s_idx][u as usize] - 1e-10 {
-                        dp[s_idx][u as usize] = new_cost;
-                        parent[s_idx][u as usize] = (s, v as u32);
-                        heap.push(DpEntry { cost: new_cost, node: u });
-                    }
+            for (u, edge_cost) in graph.neighbors_with_cost(v as u32) {
+                let new_cost = cost + edge_cost;
+                if new_cost < dp[s_idx][u as usize] - 1e-10 {
+                    dp[s_idx][u as usize] = new_cost;
+                    parent[s_idx][u as usize] = (s, v as u32);
+                    heap.push(DpEntry { cost: new_cost, node: u });
                 }
             }
         }
@@ -175,11 +172,9 @@ fn reconstruct(
 }
 
 fn find_edge_cost(graph: &UndirectedGraph, u: NodeId, v: NodeId) -> Cost {
-    if let Some(neighbors) = graph.adjacency.get(&u) {
-        for &(n, eid) in neighbors {
-            if n == v {
-                return graph.edges[eid as usize].cost;
-            }
+    for &(n, eid) in graph.neighbors(u) {
+        if n == v {
+            return graph.edges[eid as usize].cost;
         }
     }
     f64::INFINITY
@@ -197,14 +192,11 @@ fn all_pairs_dijkstra(graph: &UndirectedGraph, n: usize) -> Vec<Vec<f64>> {
             if cost > dist[source][node as usize] + 1e-10 {
                 continue;
             }
-            if let Some(neighbors) = graph.adjacency.get(&node) {
-                for &(u, eid) in neighbors {
-                    let edge_cost = graph.edges[eid as usize].cost;
-                    let new_cost = cost + edge_cost;
-                    if new_cost < dist[source][u as usize] - 1e-10 {
-                        dist[source][u as usize] = new_cost;
-                        heap.push(DpEntry { cost: new_cost, node: u });
-                    }
+            for (u, edge_cost) in graph.neighbors_with_cost(node) {
+                let new_cost = cost + edge_cost;
+                if new_cost < dist[source][u as usize] - 1e-10 {
+                    dist[source][u as usize] = new_cost;
+                    heap.push(DpEntry { cost: new_cost, node: u });
                 }
             }
         }
@@ -213,7 +205,7 @@ fn all_pairs_dijkstra(graph: &UndirectedGraph, n: usize) -> Vec<Vec<f64>> {
     dist
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 struct DpEntry {
     cost: Cost,
     node: NodeId,
@@ -223,8 +215,7 @@ impl Eq for DpEntry {}
 
 impl Ord for DpEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.cost.partial_cmp(&self.cost)
-            .unwrap_or(Ordering::Equal)
+        cmp_cost(other.cost, self.cost)
             .then_with(|| self.node.cmp(&other.node))
     }
 }

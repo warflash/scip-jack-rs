@@ -153,7 +153,7 @@ fn depth_first(graph: &ReducibleGraph) -> Forest {
         stack.push((s, 0));
 
         while let Some(&mut (v, ref mut cursor)) = stack.last_mut() {
-            let neighbours = graph.adjacency.get(&v).map(|a| a.as_slice()).unwrap_or(&[]);
+            let neighbours = graph.adjacency.get(v as usize).map_or(&[][..], Vec::as_slice);
             if *cursor < neighbours.len() {
                 let (w, eid) = neighbours[*cursor];
                 *cursor += 1;
